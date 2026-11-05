@@ -83,12 +83,16 @@ export async function collectMaterials(root: string, contract: ChapterContract):
     const safeSummary = {
       chapter: contract.chapter - 1,
       title: previousContract.title,
-      endingState: previousContract.endingState,
-      nextLink: previousContract.nextLink,
       pov: contract.pov,
-      visibleKnowledge: contract.narrativeMode === 'omniscient' ? contract.visibleKnowledge : undefined,
       facts: povFacts,
       beliefs: povBeliefs,
+      ...(contract.narrativeMode === 'omniscient'
+        ? {
+            endingState: previousContract.endingState,
+            nextLink: previousContract.nextLink,
+            visibleKnowledge: contract.visibleKnowledge,
+          }
+        : {}),
     }
     materials.push(
       material(

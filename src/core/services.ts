@@ -274,11 +274,18 @@ export async function rebuildBook(
     const ledgerName: LedgerProjectionName | 'all' =
       projection === 'all' || projection === 'ledger' ? 'all' : projection
     const state = await readLedgerProjectionState(root)
-    ledgerProjection = fromChapter
-      ? await rebuildLedgerProjection(root, { fromChapter, projection: ledgerName })
-      : !force && state?.invalidFrom && state.status !== 'current'
-        ? await replayLedgerProjectionFrom(root, state.invalidFrom)
-        : await rebuildLedgerProjection(root, { projection: ledgerName })
+    if (ledgerName !== 'all') {
+      ledgerProjection = await rebuildLedgerProjection(root, {
+        fromChapter,
+        projection: ledgerName,
+      })
+    } else {
+      ledgerProjection = fromChapter
+        ? await rebuildLedgerProjection(root, { fromChapter, projection: 'all' })
+        : !force && state?.invalidFrom && state.status !== 'current'
+          ? await replayLedgerProjectionFrom(root, state.invalidFrom)
+          : await rebuildLedgerProjection(root, { projection: 'all' })
+    }
   }
   return {
     projection: contentProjection,

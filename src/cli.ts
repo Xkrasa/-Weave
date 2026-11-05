@@ -428,7 +428,7 @@ async function commandStyle(root: string, parsed: Parsed, json: boolean): Promis
 }
 
 async function commandLoops(root: string, parsed: Parsed, json: boolean): Promise<number> {
-  await assertLedgerProjectionCurrent(root)
+  await assertLedgerProjectionCurrent(root, ['open-loop'])
   const state = await collectLoopState(root)
   const action = parsed.positionals[0] ?? 'list'
   if (action === 'list') {
@@ -451,7 +451,7 @@ async function commandLoops(root: string, parsed: Parsed, json: boolean): Promis
 async function commandState(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const entityId = parsed.positionals[0]
   if (!entityId) throw usageError('用法：weave state <entityId> [--chapter <n>]')
-  await assertLedgerProjectionCurrent(root)
+  await assertLedgerProjectionCurrent(root, ['entity-state'])
   const head = await readMainline(root)
   const latest = Math.max(0, ...Object.keys(head.selectedCommitByChapter).map(Number))
   const chapter = optionalNumber(parsed, 'chapter') ?? latest
@@ -463,7 +463,7 @@ async function commandState(root: string, parsed: Parsed, json: boolean): Promis
 }
 
 async function commandKnowledge(root: string, parsed: Parsed, json: boolean): Promise<number> {
-  await assertLedgerProjectionCurrent(root)
+  await assertLedgerProjectionCurrent(root, ['belief'])
   if (parsed.positionals[0] === 'check') {
     const chapter = parseChapter(parsed.positionals[1])
     const contract = await loadContract(root, chapter)
@@ -699,7 +699,7 @@ async function commandIgnore(root: string, parsed: Parsed, json: boolean): Promi
 }
 
 async function commandTimeline(root: string, parsed: Parsed, json: boolean): Promise<number> {
-  await assertLedgerProjectionCurrent(root)
+  await assertLedgerProjectionCurrent(root, ['series-timeline'])
   if (parsed.positionals[0] === 'series') {
     const registry = await loadCharacters(root)
     const report = await seriesTimeline(root, registry)

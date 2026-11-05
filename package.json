@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
     "accept:scale": "node scripts/acceptance-scale.ts",
-    "accept:p1": "node --test test/cli.test.ts",
+    "accept:p1": "node scripts/acceptance-p1.ts",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {

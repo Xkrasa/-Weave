@@ -256,6 +256,7 @@ export interface ImpactItem {
   reason: string
   dependencies?: string[]
   evidence?: string[]
+  sourceCommit?: string
   status: 'pending' | 'accepted' | 'revision-planned' | 'deferred'
   decidedAt?: string
 }

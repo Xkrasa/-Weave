@@ -63,6 +63,7 @@ export async function createImpactReport(
       reason: ledger.dependencies.length > 0 ? `${item.reason}；账本依赖：${ledger.dependencies.join('、')}` : item.reason,
       dependencies,
       evidence: ledger.evidence,
+      sourceCommit: sourceCommit.commitId,
       status: waived ? 'accepted' : level === 'unknown' ? 'deferred' : 'pending',
     })
   }
@@ -100,6 +101,12 @@ function ledgerDependencies(
     if (event.participants.some(participant => targetEntities.has(participant))) {
       dependencies.push(`event:${event.eventId}`)
       evidence.push(`event:${event.eventId}:${event.evidence.map(span => span.quote).join('|')}`)
+    }
+  }
+  for (const belief of source.ledger.beliefs) {
+    if (targetEntities.has(belief.characterId)) {
+      dependencies.push(`belief:${belief.characterId}:${belief.proposition}`)
+      evidence.push(`belief:${belief.beliefId}:${belief.evidence.map(span => span.quote).join('|')}`)
     }
   }
   for (const fact of source.ledger.facts) {

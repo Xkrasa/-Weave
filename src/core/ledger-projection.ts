@@ -55,6 +55,13 @@ function open(root: string): DatabaseSync {
       last_commit TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS ledger_view (
+      projection TEXT NOT NULL,
+      chapter INTEGER NOT NULL,
+      commit_id TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      PRIMARY KEY(projection, chapter)
+    );
   `)
   return db
 }
@@ -73,18 +80,24 @@ export async function rebuildLedgerProjection(
         .get(from - 1) as Record<string, unknown> | undefined
       if (Number(baseline?.count ?? 0) === 0) from = 1
     }
+    const names = projectionNames(options.projection)
     db.exec('BEGIN IMMEDIATE')
-    db.prepare('DELETE FROM ledger_projection WHERE chapter >= ?').run(from)
-    db.prepare('DELETE FROM ledger_projection_snapshots WHERE chapter >= ?').run(from)
-    const applied = await apply(db, root, head, Math.max(0, from - 1))
-    const state = writeStates(db, projectionNames('all'), {
+    if (names.includes(NAME)) {
+      db.prepare('DELETE FROM ledger_projection WHERE chapter >= ?').run(from)
+      db.prepare('DELETE FROM ledger_projection_snapshots WHERE chapter >= ?').run(from)
+    }
+    for (const name of names) {
+      db.prepare('DELETE FROM ledger_view WHERE projection = ? AND chapter >= ?').run(name, from)
+    }
+    const applied = await apply(db, root, head, Math.max(0, from - 1), names)
+    const state = writeStates(db, names, {
       mainlineRevision: head.mainlineRevision,
       appliedThrough: applied,
       invalidFrom: null,
       replayBaseChapter: Math.max(0, from - 1),
       status: 'current',
       updatedAt: new Date().toISOString(),
-    }, NAME)
+    }, names.includes(NAME) ? NAME : names[0]!)
     db.exec('COMMIT')
     return state
   } catch (error) {
@@ -111,7 +124,8 @@ export async function replayLedgerProjectionFrom(
     db.exec('BEGIN IMMEDIATE')
     db.prepare('DELETE FROM ledger_projection WHERE chapter > ?').run(base)
     db.prepare('DELETE FROM ledger_projection_snapshots WHERE chapter > ?').run(base)
-    const applied = await apply(db, root, head, base)
+    db.exec('DELETE FROM ledger_view')
+    const applied = await apply(db, root, head, base, [...LEDGER_PROJECTIONS])
     const state = writeStates(db, projectionNames('all'), {
       mainlineRevision: head.mainlineRevision,
       appliedThrough: applied,
@@ -135,6 +149,7 @@ async function apply(
   root: string,
   head: Awaited<ReturnType<typeof readMainline>>,
   base: number,
+  names: LedgerProjectionName[],
 ): Promise<number> {
   let applied = base
   const chapters = Object.keys(head.selectedCommitByChapter)
@@ -151,19 +166,38 @@ async function apply(
       if (commit.ledgerHash !== objectHash(ledger)) {
         throw conflictError(`第 ${chapter} 章账本哈希不一致`)
       }
-      db.prepare(
-        `INSERT OR REPLACE INTO ledger_projection
-          (chapter, commit_id, ledger_hash, event_count, fact_count, belief_count, loop_count)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        chapter,
-        commit.commitId,
-        commit.ledgerHash ?? '',
-        ledger.events.length,
-        ledger.facts.length,
-        ledger.beliefs.length,
-        ledger.loops?.length ?? 0,
-      )
+      const payloads: Record<LedgerProjectionName, unknown> = {
+        'ledger-index': {
+          eventCount: ledger.events.length,
+          factCount: ledger.facts.length,
+          beliefCount: ledger.beliefs.length,
+          loopCount: ledger.loops?.length ?? 0,
+        },
+        'entity-state': ledger.facts,
+        belief: ledger.beliefs,
+        'open-loop': ledger.loops ?? [],
+        'series-timeline': ledger.events,
+      }
+      for (const name of names) {
+        db.prepare(
+          'INSERT OR REPLACE INTO ledger_view (projection, chapter, commit_id, payload) VALUES (?, ?, ?, ?)',
+        ).run(name, chapter, commit.commitId, JSON.stringify(payloads[name]))
+      }
+      if (names.includes(NAME)) {
+        db.prepare(
+          `INSERT OR REPLACE INTO ledger_projection
+            (chapter, commit_id, ledger_hash, event_count, fact_count, belief_count, loop_count)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          chapter,
+          commit.commitId,
+          commit.ledgerHash ?? '',
+          ledger.events.length,
+          ledger.facts.length,
+          ledger.beliefs.length,
+          ledger.loops?.length ?? 0,
+        )
+      }
     }
     applied = chapter
   }
@@ -215,7 +249,10 @@ export async function readLedgerProjectionStates(root: string): Promise<LedgerPr
   return states
 }
 
-export async function assertLedgerProjectionCurrent(root: string): Promise<void> {
+export async function assertLedgerProjectionCurrent(
+  root: string,
+  required: LedgerProjectionName[] = [...LEDGER_PROJECTIONS],
+): Promise<void> {
   const head = await readMainline(root)
   let hasLedger = false
   for (const commitId of Object.values(head.selectedCommitByChapter)) {
@@ -226,7 +263,7 @@ export async function assertLedgerProjectionCurrent(root: string): Promise<void>
     }
   }
   if (!hasLedger) return
-  for (const name of LEDGER_PROJECTIONS) {
+  for (const name of required) {
     const state = await readLedgerProjectionState(root, name)
     if (!state) {
       throw conflictError(`账本投影 ${name} 缺失；请执行 weave rebuild --projection ${name}`)
@@ -244,8 +281,9 @@ export async function assertLedgerProjectionCurrent(root: string): Promise<void>
   }
 }
 
-function projectionNames(_projection?: LedgerProjectionName | 'all'): LedgerProjectionName[] {
-  return [...LEDGER_PROJECTIONS]
+function projectionNames(projection?: LedgerProjectionName | 'all'): LedgerProjectionName[] {
+  if (!projection || projection === 'all') return [...LEDGER_PROJECTIONS]
+  return [projection]
 }
 
 function writeStates(
@@ -286,8 +324,11 @@ function writeState(db: DatabaseSync, state: LedgerProjectionState): LedgerProje
   return state
 }
 
-export async function markLedgerProjectionFailed(root: string): Promise<void> {
-  const state = await readLedgerProjectionState(root)
+export async function markLedgerProjectionFailed(
+  root: string,
+  name: LedgerProjectionName = NAME,
+): Promise<void> {
+  const state = await readLedgerProjectionState(root, name)
   if (!state) return
   const db = open(root)
   try {

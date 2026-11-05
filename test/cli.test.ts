@@ -1235,6 +1235,13 @@ test('P1.1 writes a v3 ledger and exposes event/fact/entity/belief queries', asy
     assert.equal(parseJson<{ ledgerProjection: { status: string } }>(rebuilt.stdout).ledgerProjection.status, 'current')
     const aliasRebuild = await runCli(dir, ['rebuild', '--projection', 'entity-state', '--from', '1', '--json'])
     assert.equal(aliasRebuild.code, 0, aliasRebuild.stderr)
+    assert.equal(
+      parseJson<{ ledgerProjection: { name: string } }>(aliasRebuild.stdout).ledgerProjection.name,
+      'entity-state',
+    )
+    const beliefRebuild = await runCli(dir, ['rebuild', '--projection', 'belief', '--json'])
+    assert.equal(beliefRebuild.code, 0, beliefRebuild.stderr)
+    assert.equal(parseJson<{ ledgerProjection: { name: string } }>(beliefRebuild.stdout).ledgerProjection.name, 'belief')
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
@@ -2007,6 +2014,99 @@ test('P1.6 excludes waived findings from the revision plan', async () => {
     const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
     assert.equal(revised.code, 3)
     assert.equal(model.requests.length, 4)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.7 timeline rejects age conflicts', async () => {
+  const extraction = JSON.parse(extractionPayload()) as Record<string, unknown>
+  const timeline = extraction.timeline as Array<Record<string, unknown>>
+  timeline[0]!.storyDate = '2026-01-01'
+  timeline[0]!.ages = { 林岚: 99 }
+  const model = new FakeModel([P05_DRAFT, JSON.stringify(extraction)])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await setCharacters(dir, [{
+      name: '林岚',
+      status: 'alive',
+      introducedIn: 1,
+      birthDate: '2000-01-01',
+    }])
+    await setContract(dir, 1)
+    assert.equal((await checkContract(dir, 1)).code, 0)
+    assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    const timelineReport = await runCli(dir, ['timeline', '1', '--json'])
+    assert.equal(timelineReport.code, 3)
+    assert.ok(
+      parseJson<{ errors: string[] }>(timelineReport.stdout).errors.some(error => error.includes('按生日推算')),
+      timelineReport.stdout,
+    )
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.7 accepts a no-event chapter with an explicit reason', async () => {
+  const extraction = JSON.stringify({
+    summary: '过渡章',
+    noEventsReason: '本章只做场景过渡',
+    records: [],
+    timeline: [],
+    facts: [],
+    beliefs: [],
+    loops: [],
+  })
+  const model = new FakeModel([P05_DRAFT, extraction])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await contract1(dir)
+    assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    const extracted = await runCli(dir, ['extract', '1', '--json'])
+    assert.equal(extracted.code, 0, extracted.stdout + extracted.stderr)
+    assert.equal(parseJson<{ noEventsReason: string }>(extracted.stdout).noEventsReason, '本章只做场景过渡')
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.7 impact with no dependency stays deferred', async () => {
+  const model = new FakeModel(['第一章：林岚在码头查账。', '第二章：周独自离开钟楼。'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await setCharacters(dir, [
+      { name: '林岚', status: 'alive', introducedIn: 1 },
+      { name: '周', status: 'alive', introducedIn: 2 },
+    ])
+    await setContract(dir, 1, { characters: ['林岚'] })
+    assert.equal((await checkContract(dir, 1)).code, 0)
+    await writeAndFinalize(dir, 1)
+    await setContract(dir, 2, {
+      characters: ['周'],
+      pov: '周',
+      location: '钟楼',
+      threads: ['周线'],
+    })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    assert.equal((await runCli(dir, ['write', '2', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '2', '--json'])).code, 0)
+    const impact = await runCli(dir, ['impact', '1', '--json'])
+    assert.equal(impact.code, 0, impact.stderr)
+    const payload = parseJson<{
+      report: { items: Array<{ targetChapter: number; level: string; status: string }> }
+    }>(impact.stdout)
+    assert.equal(payload.report.items[0]?.targetChapter, 2)
+    assert.equal(payload.report.items[0]?.level, 'unknown')
+    assert.equal(payload.report.items[0]?.status, 'deferred')
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
