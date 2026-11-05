@@ -2324,7 +2324,11 @@ test('P2.2 indexes Chinese chunks, searches short terms, deconstructs and export
 
     const indexed = await runCli(dir, ['index', 'rebuild', '--json'])
     assert.equal(indexed.code, 0, indexed.stderr)
-    assert.ok(parseJson<{ chunks: number }>(indexed.stdout).chunks >= 4)
+    const firstIndex = parseJson<{ chunks: number; terms: number }>(indexed.stdout)
+    assert.ok(firstIndex.chunks >= 4)
+    const rebuiltAgain = await runCli(dir, ['index', 'rebuild', '--json'])
+    assert.equal(rebuiltAgain.code, 0, rebuiltAgain.stderr)
+    assert.deepEqual(parseJson<{ chunks: number; terms: number }>(rebuiltAgain.stdout), firstIndex)
 
     const search = await runCli(dir, ['search', '账本', '--json'])
     assert.equal(search.code, 0, search.stderr)
@@ -2372,6 +2376,10 @@ test('P2.2 indexes Chinese chunks, searches short terms, deconstructs and export
     const time = await runCli(dir, ['search', '账本', '--time', '第 1 天', '--json'])
     assert.equal(time.code, 0, time.stderr)
     assert.ok(parseJson<{ results: Array<{ chapter: number }> }>(time.stdout).results.every(item => item.chapter === 1))
+
+    const location = await runCli(dir, ['search', '账本', '--location', '海港', '--json'])
+    assert.equal(location.code, 0, location.stderr)
+    assert.ok(parseJson<{ results: unknown[] }>(location.stdout).results.length > 0)
 
     const sample = path.join(dir, 'sample.txt')
     await writeFile(sample, '第一章 起点\n林岚来到码头。\n\n第二章 账本\n她翻开账本。\n')

@@ -222,6 +222,13 @@ export async function styleCheck(root: string, chapter: number): Promise<{
   if (style.interiority === 'high' && interiorityPerK < 2 && draft.length > 300) {
     findings.push({ severity: 'warning', code: 'LOW_INTERIORITY', message: '心理描写密度低于风格宪法' })
   }
+  const descriptionDensity = draft.length === 0 ? 0 : (draft.match(/的/g) ?? []).length / draft.length
+  if (style.descriptionDensity === 'low' && descriptionDensity > 0.08) {
+    findings.push({ severity: 'warning', code: 'DENSE_DESCRIPTION', message: '描写密度高于风格宪法' })
+  }
+  if (style.descriptionDensity === 'high' && descriptionDensity < 0.02 && draft.length > 300) {
+    findings.push({ severity: 'warning', code: 'SPARSE_DESCRIPTION', message: '描写密度低于风格宪法' })
+  }
   if (/总之[，,]|终于明白|意识到人生|感慨万千/.test(draft.slice(-120))) {
     findings.push({ severity: 'warning', code: 'SUMMARY_ENDING', message: '章末出现总结式收束' })
   }

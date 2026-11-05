@@ -359,6 +359,7 @@ async function commandSearch(root: string, parsed: Parsed, json: boolean): Promi
     entity: optionalString(parsed, 'entity'),
     storyline: optionalString(parsed, 'storyline'),
     time: optionalString(parsed, 'time'),
+    location: optionalString(parsed, 'location'),
     limit,
     vectors,
   })
@@ -1087,7 +1088,7 @@ function printHelp(): void {
   weave rewrite <chapter> --paragraph <id> --goal <text>
   weave method list|show <id>|route <chapter> [--platform long-form|short-form] [--max-tokens <n>]
   weave style check <chapter>|samples
-  weave search <query> [--chapter <n>] [--entity <id>] [--storyline <id>] [--time <label>] [--vectors <file>] [--limit <n>]
+  weave search <query> [--chapter <n>] [--entity <id>] [--location <name>] [--storyline <id>] [--time <label>] [--vectors <file>] [--limit <n>]
   weave chunk <chunkId>
   weave index rebuild
   weave deconstruct <file> [--split-pattern <regex>] [--save]

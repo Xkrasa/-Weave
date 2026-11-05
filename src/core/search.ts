@@ -39,6 +39,7 @@ function open(root: string): DatabaseSync {
       entities TEXT NOT NULL,
       storyline TEXT NOT NULL,
       time_label TEXT NOT NULL,
+      location TEXT NOT NULL,
       source_commit TEXT NOT NULL,
       content_hash TEXT NOT NULL,
       length INTEGER NOT NULL
@@ -58,6 +59,11 @@ function open(root: string): DatabaseSync {
   `)
   try {
     db.exec("ALTER TABLE search_chunks ADD COLUMN time_label TEXT NOT NULL DEFAULT ''")
+  } catch {
+    // Existing index already has the column.
+  }
+  try {
+    db.exec("ALTER TABLE search_chunks ADD COLUMN location TEXT NOT NULL DEFAULT ''")
   } catch {
     // Existing index already has the column.
   }
@@ -101,8 +107,8 @@ export async function rebuildSearchIndex(root: string): Promise<{ chunks: number
         db.prepare(
           `INSERT INTO search_chunks
             (chunk_id, chapter, paragraph, text, start_byte, end_byte, entities, storyline,
-             time_label, source_commit, content_hash, length)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             time_label, location, source_commit, content_hash, length)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           chunkId,
           chapter,
@@ -113,6 +119,7 @@ export async function rebuildSearchIndex(root: string): Promise<{ chunks: number
           [...new Set(entities)].join(','),
           storyline,
           contract?.time ?? '',
+          contract?.location ?? '',
           commitId,
           commit.contentHash,
           tokens.length,
@@ -142,6 +149,7 @@ export async function searchBook(
     entity?: string
     storyline?: string
     time?: string
+    location?: string
     limit?: number
     vectors?: VectorFixture
   } = {},
@@ -167,6 +175,7 @@ export async function searchBook(
       && (!filterEntity || String(row.entities).split(',').includes(filterEntity))
       && (!filterStoryline || String(row.storyline).split(',').includes(filterStoryline))
       && (!options.time || String(row.time_label).includes(options.time))
+      && (!options.location || String(row.location).includes(options.location))
     const queryTerms = tokenize(query)
     const fallback = query.length <= 1 || queryTerms.length === 0
     if (!fallback) {
