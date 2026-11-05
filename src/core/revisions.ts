@@ -35,7 +35,8 @@ const RECHECK_SYSTEM = [
 
 export interface RevisionPlanView {
   chapter: number
-  baseDraftHash: string
+  draftHash: string
+  createdAt: string
   findings: ReviewFinding[]
   instructions: RevisionInstruction[]
 }
@@ -72,6 +73,9 @@ export async function reviseChapter(
     paragraphIds: paragraphsForFinding(paragraphs, finding),
     goal: finding.description,
   }))
+  if (instructions.some(item => item.paragraphIds.length === 0)) {
+    throw validationError('部分 finding 缺少可定位段落，无法定向修稿')
+  }
   const targetIds = new Set(instructions.flatMap(item => item.paragraphIds))
   const targetParagraphs = paragraphs.filter(paragraph => targetIds.has(paragraph.paragraphId))
   const prompt = [
@@ -115,11 +119,21 @@ export async function reviseChapter(
       rejected.push({ paragraphId: entry.paragraphId, reason: '修订段落不在原稿中' })
       continue
     }
+    if (!targetIds.has(entry.paragraphId)) {
+      rejected.push({ paragraphId: entry.paragraphId, reason: '修订段落超出 selected finding 范围' })
+      continue
+    }
     if (!entry.text.trim()) {
       rejected.push({ paragraphId: entry.paragraphId, reason: '修订段落为空' })
       continue
     }
-    changed.push({ paragraphId: entry.paragraphId, text: entry.text })
+    changed.push({
+      paragraphId: entry.paragraphId,
+      text: entry.text,
+      findingIds: Array.isArray(entry.findingIds)
+        ? entry.findingIds.filter((value): value is string => typeof value === 'string')
+        : undefined,
+    })
   }
   if (changed.length === 0) throw validationError('修稿模型没有返回可用段落', rejected)
   const revision: RevisionCandidate = {
@@ -130,6 +144,7 @@ export async function reviseChapter(
     createdAt: new Date().toISOString(),
     model,
     usage: result.usage,
+    raw: result.text,
     findings: selected.map(finding => finding.findingId),
     instructions,
     baseParagraphs: paragraphs,
@@ -149,7 +164,8 @@ export async function reviseChapter(
     candidate: revision,
     plan: {
       chapter,
-      baseDraftHash: revision.baseDraftHash,
+      draftHash: revision.baseDraftHash,
+      createdAt: revision.createdAt,
       findings: selected,
       instructions,
     },
@@ -178,6 +194,9 @@ export async function mergeRevision(
   const revision = mapParagraphs(candidate.paragraphs)
   const manual = mapParagraphs(paragraphsOf(manualDraft))
   const ids = [...new Set([...base.keys(), ...revision.keys(), ...manual.keys()])].sort()
+  for (const paragraphId of Object.keys(choices)) {
+    if (!ids.includes(paragraphId)) throw validationError(`--choices 包含不存在的段落：${paragraphId}`)
+  }
   const hunks: MergeHunk[] = []
   let conflict = false
   for (const paragraphId of ids) {
@@ -189,48 +208,32 @@ export async function mergeRevision(
     const findingIds = candidate.instructions
       .filter(item => item.paragraphIds.includes(paragraphId))
       .map(item => item.findingId)
-    if (revisionChanged && manualChanged && revisionText !== manualText) {
-      const choice = choices[paragraphId]
-      if (!choice) {
-        conflict = true
-        hunks.push({
-          paragraphId,
-          base: baseText,
-          revision: revisionText,
-          manual: manualText,
-          status: 'conflict',
-          findingIds,
-        })
-      } else {
-        hunks.push({
-          paragraphId,
-          base: baseText,
-          revision: revisionText,
-          manual: manualText,
-          status: 'auto',
-          findingIds,
-        })
-      }
+    const choice = choices[paragraphId]
+    if (revisionChanged && manualChanged && revisionText !== manualText && !choice) {
+      conflict = true
+      hunks.push({
+        paragraphId,
+        base: baseText,
+        revision: revisionText,
+        manual: manualText,
+        status: 'conflict',
+        findingIds,
+      })
       continue
     }
-    const text = revisionChanged && !manualChanged
-      ? revisionText
-      : manualChanged && !revisionChanged
-        ? manualText
-        : revisionChanged && manualChanged && revisionText === manualText
-          ? revisionText
-          : baseText
     hunks.push({
       paragraphId,
       base: baseText,
       revision: revisionText,
       manual: manualText,
-      status: revisionChanged && !manualChanged ? 'revision-only' : manualChanged && !revisionChanged ? 'manual-only' : 'auto',
+      status: choice
+        ? 'auto'
+        : revisionChanged && !manualChanged
+          ? 'revision-only'
+          : manualChanged && !revisionChanged ? 'manual-only' : 'auto',
+      ...(choice ? { resolution: choice } : {}),
       findingIds,
     })
-    if (text === '' && baseText !== '') {
-      // deletion: leave the hunk empty; join below removes it
-    }
   }
   const resolved = hunks.filter(hunk => hunk.status !== 'conflict')
   if (conflict) {
@@ -300,6 +303,16 @@ export async function recheckChapter(
   if (!audit || audit.draftHash !== currentHash) {
     throw conflictError('合并后需要先重新运行 weave audit')
   }
+  const revisionIds = [...new Set(applied.map(finding => finding.revisionId).filter((id): id is string => Boolean(id)))]
+  let merged = false
+  for (const revisionId of revisionIds) {
+    const report = await readJsonIfExists<MergeReport>(mergePath(root, chapter, revisionId))
+    if (report?.status === 'merged' && report.mergedDraftHash === currentHash) {
+      merged = true
+      break
+    }
+  }
+  if (!merged) throw conflictError('修订尚未合并到当前草稿；请先执行 weave merge')
   const paragraphs = paragraphsOf(draft)
   const targetIds = new Set(applied.flatMap(finding => finding.paragraphIds ?? []))
   const targets = paragraphs.filter(paragraph => targetIds.has(paragraph.paragraphId))
@@ -319,7 +332,7 @@ export async function recheckChapter(
     '只输出：',
     JSON.stringify({
       summary: '复检结论',
-      findings: [{ findingId: 'f1', resolved: true, note: '已补充来源' }],
+      findings: [{ findingId: 'f1', resolved: true, note: '已补充来源', quote: '正文逐字引文' }],
       newFindings: [{
         dimension: '叙事衔接',
         severity: 'warning',
@@ -337,17 +350,33 @@ export async function recheckChapter(
     signal,
   })
   const raw = parseJsonObject(result.text)
-  const resolvedMap = new Map<string, boolean>()
+  const resolvedMap = new Map<string, { resolved: boolean; quote?: string; note?: string }>()
   if (Array.isArray(raw.findings)) {
     for (const item of raw.findings) {
       const entry = item && typeof item === 'object' ? item as Record<string, unknown> : null
       if (!entry || typeof entry.findingId !== 'string') continue
-      resolvedMap.set(entry.findingId, entry.resolved === true)
+      resolvedMap.set(entry.findingId, {
+        resolved: entry.resolved === true,
+        quote: typeof entry.quote === 'string' ? entry.quote : undefined,
+        note: typeof entry.note === 'string' ? entry.note : undefined,
+      })
     }
   }
   for (const finding of applied) {
-    const resolved = resolvedMap.get(finding.findingId) === true
+    const result = resolvedMap.get(finding.findingId)
+    let resolved = result?.resolved === true
+    if (resolved && result?.quote) {
+      try {
+        finding.evidence = resolveEvidence(draft, chapter, result.quote)
+        finding.quote = result.quote
+      } catch {
+        resolved = false
+      }
+    } else if (resolved) {
+      resolved = false
+    }
     finding.status = resolved ? 'verified' : 'open'
+    finding.recheckNote = result?.note
     finding.recheckedAt = new Date().toISOString()
   }
   let nextId = report.findings.reduce((max, finding) => {
@@ -376,7 +405,7 @@ export async function recheckChapter(
       )
       finding.quote = entry.quote
     } else if (severity === 'blocking') {
-      finding.severity = 'warning'
+      throw validationError('复检新增 blocking 缺少正文证据')
     }
     report.findings.push(finding)
   }
@@ -403,6 +432,9 @@ export async function ignoreFinding(
   const finding = report.findings.find(item => item.findingId === findingId)
   if (!finding) throw validationError(`未找到 finding：${findingId}`)
   if (finding.severity === 'blocking') throw validationError('blocking finding 不能 ignore；请修复或显式豁免')
+  if (finding.status === 'applied' || finding.status === 'verified') {
+    throw validationError('已进入修稿或已复检的 finding 不能直接 ignore')
+  }
   if (!reason.trim()) throw validationError('ignore 必须提供理由')
   finding.status = 'ignored'
   finding.ignoreReason = reason.trim()
@@ -445,9 +477,8 @@ function mapParagraphs(paragraphs: DraftParagraph[]): Map<string, string> {
 
 function paragraphsForFinding(paragraphs: DraftParagraph[], finding: ReviewFinding): string[] {
   const quote = finding.quote ?? finding.evidence?.quote
-  if (quote) {
-    const matched = paragraphs.filter(paragraph => paragraph.text.includes(quote))
-    if (matched.length > 0) return matched.map(paragraph => paragraph.paragraphId)
-  }
-  return paragraphs.map(paragraph => paragraph.paragraphId)
+  if (!quote) return []
+  return paragraphs
+    .filter(paragraph => paragraph.text.includes(quote))
+    .map(paragraph => paragraph.paragraphId)
 }

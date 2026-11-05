@@ -147,6 +147,7 @@ export interface ReviewFinding {
   ignoreReason?: string
   revisionId?: string
   recheckedAt?: string
+  recheckNote?: string
 }
 
 export interface ReviewReport {
@@ -167,6 +168,7 @@ export interface ReviewReport {
 export interface DraftParagraph {
   paragraphId: string
   text: string
+  findingIds?: string[]
 }
 
 export interface RevisionInstruction {
@@ -183,6 +185,7 @@ export interface RevisionCandidate {
   createdAt: string
   model: string
   usage?: RunUsage
+  raw?: string
   findings: string[]
   instructions: RevisionInstruction[]
   baseParagraphs: DraftParagraph[]
@@ -196,6 +199,7 @@ export interface MergeHunk {
   revision: string
   manual: string
   status: 'auto' | 'conflict' | 'manual-only' | 'revision-only'
+  resolution?: 'base' | 'revision' | 'manual'
   findingIds: string[]
 }
 

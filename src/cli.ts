@@ -502,7 +502,7 @@ async function commandRevise(root: string, parsed: Parsed, json: boolean): Promi
   else {
     console.log(`已生成第 ${chapter} 章修订候选：${result.candidate.revisionId}`)
     console.log(`处理 finding：${result.plan.findings.map(item => item.findingId).join('、')}`)
-    console.log(`原稿：${result.plan.baseDraftHash}`)
+    console.log(`原稿：${result.plan.draftHash}`)
   }
   return 0
 }
@@ -510,6 +510,8 @@ async function commandRevise(root: string, parsed: Parsed, json: boolean): Promi
 async function commandMerge(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const chapter = parseChapter(parsed.positionals[0])
   const revisionId = requiredString(parsed, 'revision')
+  const strategy = optionalString(parsed, 'strategy')
+  if (strategy !== undefined && strategy !== 'auto') throw usageError('--strategy 目前只支持 auto')
   const choices: Record<string, 'base' | 'revision' | 'manual'> = {}
   const rawChoices = optionalString(parsed, 'choices')
   if (rawChoices) {

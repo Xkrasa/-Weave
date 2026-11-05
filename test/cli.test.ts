@@ -1567,7 +1567,12 @@ test('P1.6 revises only selected findings, merges, rechecks and finalizes', asyn
   })
   const recheck = JSON.stringify({
     summary: '复检通过',
-    findings: [{ findingId: 'f1', resolved: true, note: '已补充追查动机' }],
+    findings: [{
+      findingId: 'f1',
+      resolved: true,
+      note: '已补充追查动机',
+      quote: '她发现缺页上留着港务局的印，决定追查下去。',
+    }],
     newFindings: [],
   })
   const model = new FakeModel([
@@ -1632,6 +1637,9 @@ test('P1.6 reports manual/revision conflicts and resolves by choice', async () =
     assert.equal(model.requests.length, 4)
     const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
     const revisionId = parseJson<{ revisionId: string }>(revised.stdout).revisionId
+    const noMerge = await runCli(dir, ['recheck', '1', '--json'])
+    assert.equal(noMerge.code, 4)
+    assert.equal(model.requests.length, 5)
     await writeFile(
       path.join(dir, 'chapters', 'drafts', '001.md'),
       '林岚在码头翻开账本。\n\n她发现缺页上留着港务局的印，但她决定先不声张。\n',
@@ -1647,7 +1655,9 @@ test('P1.6 reports manual/revision conflicts and resolves by choice', async () =
       'merge', '1', '--revision', revisionId, '--choices', 'p002=manual', '--json',
     ])
     assert.equal(resolved.code, 0, resolved.stderr)
-    assert.match(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), /先不声张/)
+    const resolvedText = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
+    assert.match(resolvedText, /先不声张/)
+    assert.equal(resolvedText.includes('决定追查'), false)
 
     const ignored = await runCli(dir, ['ignore', '1', '--finding', 'f1', '--reason', '保留原意'])
     assert.equal(ignored.code, 3)
