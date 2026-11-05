@@ -20,6 +20,7 @@ import { projectPaths } from './project.ts'
 import { draftPath } from './ledger.ts'
 import { chapterFileStem } from './contract.ts'
 import { conflictError, validationError } from './errors.ts'
+import { applyWaivers } from './waivers.ts'
 
 const REVISION_SYSTEM = [
   '你是小说修稿器。只修改请求中列出的段落，不重写整章。',
@@ -49,8 +50,9 @@ export async function reviseChapter(
   signal: AbortSignal,
 ): Promise<{ candidate: RevisionCandidate; plan: RevisionPlanView }> {
   const draft = await readDraft(root, chapter)
-  const report = await loadStage<ReviewReport>(root, 'review', chapter)
-  if (!report) throw validationError(`第 ${chapter} 章没有审查报告`)
+  const loaded = await loadStage<ReviewReport>(root, 'review', chapter)
+  if (!loaded) throw validationError(`第 ${chapter} 章没有审查报告`)
+  const report = await applyWaivers(root, chapter, loaded)
   if (report.draftHash !== draftHash(draft)) {
     throw conflictError('草稿在审查后已修改；请重新审查后再修稿')
   }

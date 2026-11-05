@@ -498,7 +498,13 @@ async function commandRevise(root: string, parsed: Parsed, json: boolean): Promi
   if (findingIds.length === 0) throw usageError('请提供 --findings <id,...>')
   const config = await loadModelConfig(root)
   const result = await reviseChapter(root, chapter, findingIds, config, new AbortController().signal)
-  if (json) outputJson({ ok: true, revisionId: result.candidate.revisionId, plan: result.plan, candidate: result.candidate })
+  if (json) outputJson({
+    ok: true,
+    exitCode: 0,
+    revisionId: result.candidate.revisionId,
+    plan: result.plan,
+    candidate: result.candidate,
+  })
   else {
     console.log(`已生成第 ${chapter} 章修订候选：${result.candidate.revisionId}`)
     console.log(`处理 finding：${result.plan.findings.map(item => item.findingId).join('、')}`)
@@ -524,7 +530,7 @@ async function commandMerge(root: string, parsed: Parsed, json: boolean): Promis
     }
   }
   const report = await mergeRevision(root, chapter, revisionId, choices)
-  if (json) outputJson({ ok: report.status === 'merged', report })
+  if (json) outputJson({ ok: report.status === 'merged', exitCode: report.status === 'merged' ? 0 : 3, report })
   else if (report.status === 'merged') console.log(`已合并修订 ${revisionId} 到草稿`)
   else {
     console.error(`修订 ${revisionId} 存在 ${report.hunks.filter(item => item.status === 'conflict').length} 个冲突`)
@@ -539,7 +545,7 @@ async function commandRecheck(root: string, parsed: Parsed, json: boolean): Prom
   const chapter = parseChapter(parsed.positionals[0])
   const config = await loadModelConfig(root)
   const report = await recheckChapter(root, chapter, config, new AbortController().signal)
-  if (json) outputJson(report)
+  if (json) outputJson({ ...report, exitCode: report.passed ? 0 : 7 })
   else {
     console.log(`第 ${chapter} 章复检：${report.passed ? '通过' : '仍有阻断'}`)
     for (const finding of report.findings) {

@@ -1594,21 +1594,32 @@ test('P1.6 revises only selected findings, merges, rechecks and finalizes', asyn
     const before = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
     const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
     assert.equal(revised.code, 0, revised.stderr)
-    const revisionPayload = parseJson<{ revisionId: string; plan: { findings: Array<{ status: string }> } }>(revised.stdout)
+    const revisionPayload = parseJson<{
+      exitCode: number
+      revisionId: string
+      plan: { findings: Array<{ status: string }> }
+    }>(revised.stdout)
+    assert.equal(revisionPayload.exitCode, 0)
     assert.equal(revisionPayload.plan.findings[0]?.status, 'applied')
     assert.equal(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), before)
 
     const merged = await runCli(dir, ['merge', '1', '--revision', revisionPayload.revisionId, '--json'])
     assert.equal(merged.code, 0, merged.stderr)
-    assert.match(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), /决定追查下去/)
+    assert.equal(parseJson<{ exitCode: number }>(merged.stdout).exitCode, 0)
+    const mergedText = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
+    assert.match(mergedText, /决定追查下去/)
+    assert.match(mergedText, /林岚在码头翻开账本/)
 
+    const staleExtract = await runCli(dir, ['extract', '1', '--json'])
+    assert.equal(staleExtract.code, 4)
     assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
     assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
     assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
     const rechecked = await runCli(dir, ['recheck', '1', '--json'])
     assert.equal(rechecked.code, 0, rechecked.stdout + rechecked.stderr)
-    const report = parseJson<{ passed: boolean; findings: Array<{ status: string }> }>(rechecked.stdout)
+    const report = parseJson<{ passed: boolean; exitCode: number; findings: Array<{ status: string }> }>(rechecked.stdout)
     assert.equal(report.passed, true)
+    assert.equal(report.exitCode, 0)
     assert.equal(report.findings[0]?.status, 'verified')
     assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
   } finally {
@@ -1646,7 +1657,11 @@ test('P1.6 reports manual/revision conflicts and resolves by choice', async () =
     )
     const conflict = await runCli(dir, ['merge', '1', '--revision', revisionId, '--json'])
     assert.equal(conflict.code, 3)
-    const conflictPayload = parseJson<{ report: { status: string; hunks: Array<{ status: string; paragraphId: string }> } }>(conflict.stdout)
+    const conflictPayload = parseJson<{
+      exitCode: number
+      report: { status: string; hunks: Array<{ status: string; paragraphId: string }> }
+    }>(conflict.stdout)
+    assert.equal(conflictPayload.exitCode, 3)
     assert.equal(conflictPayload.report.status, 'conflict')
     assert.ok(conflictPayload.report.hunks.some(hunk => hunk.status === 'conflict' && hunk.paragraphId === 'p002'))
     assert.match(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), /先不声张/)
@@ -1713,12 +1728,38 @@ test('P1.6 recheck keeps unresolved blocking findings and appends new ones', asy
     assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
     const rechecked = await runCli(dir, ['recheck', '1', '--json'])
     assert.equal(rechecked.code, 7)
-    const report = parseJson<{ passed: boolean; blockingCount: number; findings: Array<{ findingId: string; status: string }> }>(rechecked.stdout)
+    const report = parseJson<{
+      passed: boolean
+      exitCode: number
+      blockingCount: number
+      findings: Array<{ findingId: string; status: string }>
+    }>(rechecked.stdout)
     assert.equal(report.passed, false)
+    assert.equal(report.exitCode, 7)
     assert.equal(report.blockingCount, 1)
     assert.equal(report.findings[0]?.status, 'open')
     assert.equal(report.findings[1]?.findingId, 'f2')
     assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 7)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.6 excludes waived findings from the revision plan', async () => {
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload(true)])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 7)
+    assert.equal((await runCli(dir, [
+      'waive', '1', '--finding', 'f1', '--reason', '作者确认保留', '--scope', 'project', '--json',
+    ])).code, 0)
+    const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
+    assert.equal(revised.code, 3)
+    assert.equal(model.requests.length, 4)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
