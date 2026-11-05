@@ -8,11 +8,15 @@ import { createImpactReport, loadImpactReport, resolveImpact } from './core/impa
 import { currentCommit } from './core/ledger.ts'
 import { doctor, exportBook, projectStatus, rebuildBook, type ExportFormat } from './core/services.ts'
 import { WeaveError, usageError, validationError } from './core/errors.ts'
+import type { GenerationEvent } from './core/types.ts'
 
 interface Parsed {
   positionals: string[]
   flags: Record<string, string | true>
 }
+
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events'])
+let eventStreamStarted = false
 
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2))
@@ -44,7 +48,7 @@ async function main(): Promise<number> {
     case 'resolve-impact':
       return commandResolveImpact(root, parsed, json)
     case 'rebuild':
-      return commandRebuild(root, json)
+      return commandRebuild(root, parsed, json)
     case 'export':
       return commandExport(root, parsed, json)
     case 'doctor':
@@ -129,14 +133,28 @@ async function commandContract(root: string, parsed: Parsed, json: boolean): Pro
 
 async function commandWrite(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const chapter = parseChapter(parsed.positionals[0])
+  const events = parsed.flags.events === true
+  if (events && json) throw usageError('--events 与 --json 不能同时使用')
   const controller = new AbortController()
   const onSigint = (): void => controller.abort()
   process.once('SIGINT', onSigint)
+  if (process.platform === 'win32') process.once('SIGBREAK', onSigint)
+  const cancelAfter = optionalNumber(parsed, 'cancel-after-ms')
+  const cancelTimer = cancelAfter === undefined
+    ? undefined
+    : setTimeout(() => controller.abort(), Math.max(1, cancelAfter))
   try {
     const result = await writeChapter(root, chapter, {
       signal: controller.signal,
-      onDelta: json ? undefined : text => process.stdout.write(text),
+      onDelta: json || events ? undefined : text => process.stdout.write(text),
+      onEvent: events
+        ? (event: GenerationEvent) => {
+            eventStreamStarted = true
+            console.log(JSON.stringify(event))
+          }
+        : undefined,
     })
+    if (events) return 0
     if (json) {
       outputJson({
         ok: true,
@@ -158,7 +176,9 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
     }
     return 0
   } finally {
+    if (cancelTimer) clearTimeout(cancelTimer)
     process.removeListener('SIGINT', onSigint)
+    if (process.platform === 'win32') process.removeListener('SIGBREAK', onSigint)
   }
 }
 
@@ -182,10 +202,12 @@ async function commandFinalize(root: string, parsed: Parsed, json: boolean): Pro
       projection: result.projection,
       projectionFailed: result.projectionFailed,
       impact: result.impact,
+      draftEdited: result.draftEdited,
     })
   } else {
     console.log(`已定稿第 ${chapter} 章：rev-${result.commit.revision}`)
     console.log(`提交：${result.commit.commitId}`)
+    if (result.draftEdited) console.log('注意：草稿在生成后被手工修改，本次定稿使用了修改后的内容')
     if (result.projectionFailed) console.error('警告：投影更新失败，请执行 weave rebuild')
     if (result.impact) {
       console.log(`影响面：${result.impact.items.length} 个后续章节待复查`)
@@ -231,8 +253,8 @@ async function commandResolveImpact(root: string, parsed: Parsed, json: boolean)
   return 0
 }
 
-async function commandRebuild(root: string, json: boolean): Promise<number> {
-  const result = await rebuildBook(root)
+async function commandRebuild(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const result = await rebuildBook(root, parsed.flags.force === true)
   if (json) outputJson({ ok: true, ...result })
   else console.log(`已重建投影：主线版本 ${result.projection.mainlineRevision}，覆盖到第 ${result.chapters} 章`)
   return 0
@@ -273,6 +295,10 @@ function parseArgs(argv: string[]): Parsed {
       if (!rawKey) throw usageError(`无效参数：${token}`)
       if (inline !== undefined) {
         flags[rawKey] = inline
+        continue
+      }
+      if (BOOLEAN_FLAGS.has(rawKey)) {
+        flags[rawKey] = true
         continue
       }
       const next = argv[index + 1]
@@ -328,18 +354,19 @@ function printHelp(): void {
   weave init [dir] --title <name> --model <model> --base-url <url>
   weave status
   weave contract show|set|check <chapter> [--file <path>]
-  weave write <chapter> [--json]
+  weave write <chapter> [--json|--events] [--cancel-after-ms <n>]
   weave amend <chapter> [--force]
   weave finalize <chapter>
   weave impact <chapter>
   weave resolve-impact <chapter> --target <n> --decision accept|revise|defer
   weave resolve-impact <chapter> --all --decision accept
-  weave rebuild
+  weave rebuild [--force]
   weave export --format merged|split|txt
   weave doctor
 
 全局：
   --json          输出机器可读 JSON
+  --events        输出 NDJSON 生成事件流
   --root <dir>    指定项目根目录
 
 环境变量：
@@ -352,6 +379,10 @@ main()
   })
   .catch(error => {
     const json = process.argv.includes('--json')
+    if (eventStreamStarted) {
+      process.exitCode = error instanceof WeaveError ? error.exitCode : 6
+      return
+    }
     if (error instanceof WeaveError) {
       if (json) {
         outputJson({

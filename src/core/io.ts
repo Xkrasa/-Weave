@@ -57,6 +57,10 @@ export async function listFiles(dir: string): Promise<string[]> {
   }
 }
 
+export function normalizeText(text: string): string {
+  return text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
+}
+
 export function isMissing(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT')
 }

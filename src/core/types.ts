@@ -84,6 +84,8 @@ export interface Material {
   label: string
   text: string
   contentHash: string
+  visibility: 'project' | 'author-only'
+  purpose: string
 }
 
 export type MaterialDecision =
@@ -95,6 +97,14 @@ export type MaterialDecision =
       capacityTokens: number
     }
   | {
+      decision: 'split-required'
+      blockingSourceId: string
+      omissions: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
+      requiredTokens: number
+      capacityTokens: number
+      message: string
+    }
+  | {
       decision: 'capacity-conflict'
       blockingSourceId: string
       omissions: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
@@ -102,6 +112,17 @@ export type MaterialDecision =
       capacityTokens: number
       message: string
     }
+
+export interface GenerationEvent {
+  type: 'started' | 'delta' | 'usage' | 'completed' | 'failed' | 'cancelled'
+  seq: number
+  runId: string
+  chapter: number
+  text?: string
+  usage?: RunUsage
+  draft?: string
+  error?: string
+}
 
 export interface CommitRecord {
   schemaVersion: 1

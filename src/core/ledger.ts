@@ -109,7 +109,14 @@ export function buildCommit(input: {
     createdAt: new Date().toISOString(),
     evidence: [] as never[],
   }
-  body.commitId = objectHash({ ...body, commitId: undefined })
+  body.commitId = objectHash({
+    schemaVersion: 1,
+    chapter: input.chapter,
+    supersedes: input.supersedes,
+    contentHash: input.contentHash,
+    contractHash: input.contractHash,
+    contextHash: input.contextHash,
+  })
   return body
 }
 

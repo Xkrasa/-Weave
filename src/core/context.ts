@@ -69,14 +69,19 @@ export function assembleContext(
 
   if (requiredTokens > capacityTokens) {
     const oversized = required.find(item => estimateTokens(item.text, config.charsPerToken) > capacityTokens)
+    const decision: 'split-required' | 'capacity-conflict' =
+      !oversized && capacityTokens > 0 ? 'split-required' : 'capacity-conflict'
     return {
       decision: {
-        decision: 'capacity-conflict',
+        decision,
         blockingSourceId: oversized?.sourceId ?? required[0]?.sourceId ?? 'contract',
         omissions: omitted,
         requiredTokens,
         capacityTokens,
-        message: '必要材料超过所选模型的可用上下文；请缩小本章范围、拆章或选择更大上下文的模型',
+        message:
+          decision === 'split-required'
+            ? '必要材料总量超过可用上下文；请拆章或分批写作，不要静默裁剪'
+            : '单份必要材料或输出预留已超过可用上下文；请缩小本章范围或选择更大上下文的模型',
       },
       context: null,
     }

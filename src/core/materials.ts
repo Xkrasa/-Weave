@@ -105,7 +105,17 @@ function material(
   label: string,
   text: string,
 ): Material {
-  return { sourceId, category, provenance, required, label, text, contentHash: hashText(text) }
+  return {
+    sourceId,
+    category,
+    provenance,
+    required,
+    label,
+    text,
+    contentHash: hashText(text),
+    visibility: category === 'reference' ? 'author-only' : 'project',
+    purpose: label,
+  }
 }
 
 function previousTail(text: string, limit: number): string {

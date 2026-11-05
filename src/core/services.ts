@@ -5,10 +5,10 @@ import { atomicWrite, ensureDir, listFiles, readTextIfExists } from './io.ts'
 import { hashFileBytes } from './hash.ts'
 import { projectPaths, loadProject, loadModelConfig } from './project.ts'
 import { loadDraftMeta } from './runs.ts'
-import { currentCommit, finalPath, listCommits, readCommit, readMainline } from './ledger.ts'
+import { assertFinalIntegrity, currentCommit, finalPath, listCommits, readCommit, readMainline } from './ledger.ts'
 import { loadContract } from './contract.ts'
 import { impactSummary, pendingImpactItems } from './impact.ts'
-import { readProjectionState, rebuildProjection } from './projections.ts'
+import { assertProjectionCurrent, readProjectionState, rebuildProjection } from './projections.ts'
 import { conflictError } from './errors.ts'
 
 export interface ChapterStatus {
@@ -24,6 +24,7 @@ export interface ProjectStatus {
   root: string
   title: string
   language: string
+  schemaVersion: number
   mainlineRevision: number
   chapters: ChapterStatus[]
   drafts: number[]
@@ -66,6 +67,7 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
     root,
     title: project.title,
     language: project.language,
+    schemaVersion: project.schemaVersion,
     mainlineRevision: head.mainlineRevision,
     chapters,
     drafts: drafts.sort((a, b) => a - b),
@@ -172,7 +174,8 @@ export interface RebuildResult {
   chapters: number
 }
 
-export async function rebuildBook(root: string): Promise<RebuildResult> {
+export async function rebuildBook(root: string, force = false): Promise<RebuildResult> {
+  if (!force) await assertFinalIntegrity(root)
   const projection = await rebuildProjection(root, { materialize: true })
   return { projection, chapters: projection.appliedThrough }
 }
@@ -186,6 +189,8 @@ export interface ExportResult {
 
 export async function exportBook(root: string, format: ExportFormat): Promise<ExportResult> {
   const project = await loadProject(root)
+  await assertFinalIntegrity(root)
+  await assertProjectionCurrent(root)
   const head = await readMainline(root)
   const chapters = Object.keys(head.selectedCommitByChapter).map(Number).sort((a, b) => a - b)
   if (chapters.length === 0) throw conflictError('还没有已定稿章节可以导出')

@@ -41,6 +41,8 @@ export async function rebuildProjection(root: string, options: { materialize?: b
   const head = await readMainline(root)
   const db = openIndex(root)
   try {
+    const prior = readStateFromDb(db)
+    const invalidFrom = prior?.invalidFrom ?? null
     db.exec('BEGIN IMMEDIATE')
     db.exec('DELETE FROM content_index')
     const chapters = Object.keys(head.selectedCommitByChapter)
@@ -73,22 +75,22 @@ export async function rebuildProjection(root: string, options: { materialize?: b
     const updatedAt = new Date().toISOString()
     db.prepare(
       `INSERT INTO projection_state (name, mainline_revision, applied_through, last_commit, invalid_from, status, updated_at)
-       VALUES (?, ?, ?, ?, NULL, 'current', ?)
+       VALUES (?, ?, ?, ?, ?, 'current', ?)
        ON CONFLICT(name) DO UPDATE SET
          mainline_revision = excluded.mainline_revision,
          applied_through = excluded.applied_through,
          last_commit = excluded.last_commit,
-         invalid_from = NULL,
+         invalid_from = excluded.invalid_from,
          status = 'current',
          updated_at = excluded.updated_at`,
-    ).run(PROJECTION_NAME, head.mainlineRevision, appliedThrough, lastCommit, updatedAt)
+    ).run(PROJECTION_NAME, head.mainlineRevision, appliedThrough, lastCommit, invalidFrom, updatedAt)
     db.exec('COMMIT')
     return {
       name: PROJECTION_NAME,
       mainlineRevision: head.mainlineRevision,
       appliedThrough,
       lastCommit,
-      invalidFrom: null,
+      invalidFrom,
       status: 'current',
       updatedAt,
     }
@@ -131,6 +133,23 @@ export async function readProjectionState(root: string): Promise<ProjectionState
     return readStateFromDb(db)
   } finally {
     db.close()
+  }
+}
+
+export async function assertProjectionCurrent(root: string): Promise<void> {
+  const head = await readMainline(root)
+  if (Object.keys(head.selectedCommitByChapter).length === 0) return
+  const state = await readProjectionState(root)
+  if (!state) throw conflictError('派生投影缺失；请先执行 weave rebuild')
+  if (state.mainlineRevision !== head.mainlineRevision) {
+    throw conflictError('派生投影落后于当前主线；请执行 weave rebuild')
+  }
+  if (state.status !== 'current') {
+    throw conflictError(`派生投影不可用（${state.status}）；请先执行 weave rebuild`)
+  }
+  const maxChapter = Math.max(...Object.keys(head.selectedCommitByChapter).map(Number))
+  if (state.appliedThrough < maxChapter) {
+    throw conflictError(`派生投影只应用到第 ${state.appliedThrough} 章；请执行 weave rebuild`)
   }
 }
 

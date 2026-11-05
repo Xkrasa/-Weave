@@ -66,7 +66,11 @@ export async function streamChapter(input: {
         if (result.usage) usage = result.usage
       }
     }
-    if (buffer.trim()) parseEvent(buffer)
+    if (buffer.trim()) {
+      const result = parseEvent(buffer)
+      if (result.text) input.onDelta(result.text)
+      if (result.usage) usage = result.usage
+    }
     return { usage }
   } catch (error) {
     if (input.signal.aborted) throw modelError('生成已取消')
@@ -79,11 +83,14 @@ export async function streamChapter(input: {
 
 function parseEvent(raw: string): { text?: string; usage?: RunUsage; done?: boolean } {
   const lines = raw.split(/\r?\n/)
-  for (const line of lines) {
-    if (!line.startsWith('data:')) continue
-    const data = line.slice(5).trim()
-    if (!data) continue
-    if (data === '[DONE]') return { done: true }
+  const payloads = lines
+    .filter(line => line.startsWith('data:'))
+    .map(line => line.slice(5).trim())
+    .filter(Boolean)
+  if (payloads.includes('[DONE]')) return { done: true }
+  let text = ''
+  let usage: RunUsage | undefined
+  for (const data of payloads) {
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(data) as Record<string, unknown>
@@ -91,22 +98,19 @@ function parseEvent(raw: string): { text?: string; usage?: RunUsage; done?: bool
       continue
     }
     const usageRaw = parsed.usage as Record<string, unknown> | undefined
-    const usage = usageRaw
-      ? {
-          promptTokens: numberOrUndefined(usageRaw.prompt_tokens),
-          completionTokens: numberOrUndefined(usageRaw.completion_tokens),
-          totalTokens: numberOrUndefined(usageRaw.total_tokens),
-        }
-      : undefined
+    if (usageRaw) {
+      usage = {
+        promptTokens: numberOrUndefined(usageRaw.prompt_tokens),
+        completionTokens: numberOrUndefined(usageRaw.completion_tokens),
+        totalTokens: numberOrUndefined(usageRaw.total_tokens),
+      }
+    }
     const choices = parsed.choices as Array<Record<string, unknown>> | undefined
     const delta = choices?.[0]?.delta as Record<string, unknown> | undefined
     const content = delta?.content
-    return {
-      text: typeof content === 'string' ? content : undefined,
-      usage,
-    }
+    if (typeof content === 'string') text += content
   }
-  return {}
+  return { text: text || undefined, usage }
 }
 
 function numberOrUndefined(value: unknown): number | undefined {

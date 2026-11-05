@@ -16,23 +16,32 @@ interface CliResult {
   stderr: string
 }
 
-function runCli(cwd: string, args: string[], env: Record<string, string> = {}): Promise<CliResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [CLI, ...args], {
-      cwd,
-      env: { ...process.env, ...env },
-      stdio: ['ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    })
-    let stdout = ''
-    let stderr = ''
-    child.stdout.setEncoding('utf8')
-    child.stderr.setEncoding('utf8')
-    child.stdout.on('data', chunk => { stdout += chunk })
-    child.stderr.on('data', chunk => { stderr += chunk })
+function spawnCli(cwd: string, args: string[], env: Record<string, string> = {}): {
+  child: ReturnType<typeof spawn>
+  done: Promise<CliResult>
+  output: () => string
+} {
+  const child = spawn(process.execPath, [CLI, ...args], {
+    cwd,
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const done = new Promise<CliResult>((resolve, reject) => {
     child.on('error', reject)
     child.on('close', code => resolve({ code: code ?? -1, stdout, stderr }))
   })
+  return { child, done, output: () => stdout }
+}
+
+function runCli(cwd: string, args: string[], env: Record<string, string> = {}): Promise<CliResult> {
+  return spawnCli(cwd, args, env).done
 }
 
 async function tempDir(): Promise<string> {
@@ -94,10 +103,11 @@ class FakeModel {
   readonly requests: Array<Record<string, unknown>> = []
   private readonly texts: string[]
   private readonly server: Server
-  private readonly mode: 'ok' | 'break'
+  private readonly mode: 'ok' | 'break' | 'slow'
+  private readonly responses = new Set<ServerResponse>()
   baseUrl = ''
 
-  constructor(texts: string[], mode: 'ok' | 'break' = 'ok') {
+  constructor(texts: string[], mode: 'ok' | 'break' | 'slow' = 'ok') {
     this.texts = [...texts]
     this.mode = mode
     this.server = createServer((request, response) => this.handle(request, response))
@@ -111,6 +121,8 @@ class FakeModel {
   }
 
   async close(): Promise<void> {
+    for (const response of this.responses) response.destroy()
+    this.responses.clear()
     await new Promise<void>((resolve, reject) => this.server.close(error => error ? reject(error) : resolve()))
   }
 
@@ -125,6 +137,8 @@ class FakeModel {
         this.requests.push({ raw: body })
       }
       const text = this.texts.shift() ?? '林岚把账本摊在桌上，缺页的边缘还留着新鲜折痕。'
+      this.responses.add(response)
+      response.on('close', () => this.responses.delete(response))
       response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
       const chunks = [...text].reduce<string[]>((all, char, index) => {
         const target = Math.floor(index / 12)
@@ -134,6 +148,20 @@ class FakeModel {
       if (this.mode === 'break') {
         response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: chunks[0] ?? '半' } }] })}\n\n`)
         setTimeout(() => response.destroy(), 10)
+        return
+      }
+      if (this.mode === 'slow') {
+        let index = 0
+        const timer = setInterval(() => {
+          if (response.destroyed) {
+            clearInterval(timer)
+            return
+          }
+          const chunk = chunks[index] ?? '。'
+          response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: chunk } }] })}\n\n`)
+          index += 1
+        }, 60)
+        response.on('close', () => clearInterval(timer))
         return
       }
       for (const chunk of chunks) {
@@ -166,6 +194,7 @@ async function writeAndFinalize(dir: string, chapter: number): Promise<{ commitI
   const final = await runCli(dir, ['finalize', String(chapter), '--json'])
   assert.equal(final.code, 0, final.stderr)
   const payload = parseJson<{ commit: { commitId: string }; chapter: number }>(final.stdout)
+  assert.equal(payload.chapter, chapter)
   const text = await readFile(path.join(dir, 'chapters', 'final', `${String(chapter).padStart(3, '0')}.md`), 'utf8')
   return { commitId: payload.commit.commitId, text }
 }
@@ -334,6 +363,8 @@ test('finalize creates an immutable commit, rebuild is deterministic, and secret
     const doctorWithoutProjection = await runCli(dir, ['doctor', '--json'])
     assert.equal(doctorWithoutProjection.code, 4)
     assert.ok(parseJson<{ errors: string[] }>(doctorWithoutProjection.stdout).errors.some(error => error.includes('投影缺失')))
+    const exportWithoutProjection = await runCli(dir, ['export', '--format', 'merged', '--json'])
+    assert.equal(exportWithoutProjection.code, 4)
     const rebuilt = await runCli(dir, ['rebuild', '--json'])
     assert.equal(rebuilt.code, 0, rebuilt.stderr)
     const exportedAgain = await runCli(dir, ['export', '--format', 'merged', '--json'])
@@ -344,7 +375,7 @@ test('finalize creates an immutable commit, rebuild is deterministic, and secret
     const doctorResult = await runCli(dir, ['doctor', '--json'])
     assert.equal(doctorResult.code, 0, doctorResult.stdout + doctorResult.stderr)
 
-    const leaked = await findText(path.join(dir, '.weave'), SECRET)
+    const leaked = await findText(dir, SECRET)
     assert.equal(leaked, null)
   } finally {
     await model.close()
@@ -374,11 +405,19 @@ test('amend keeps history, creates a new revision, records impact, and blocks ne
     await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), '第一章修订：林岚发现缺页是被人撕走的。\n')
     const finalized = await runCli(dir, ['finalize', '1', '--json'])
     assert.equal(finalized.code, 0, finalized.stderr)
-    const payload = parseJson<{ commit: { revision: number; commitId: string }; impact: { items: Array<{ targetChapter: number; level: string }> } }>(finalized.stdout)
+    const payload = parseJson<{
+      commit: { revision: number; commitId: string }
+      impact: { items: Array<{ targetChapter: number; level: string }> }
+      projection: { status: string; invalidFrom: number | null }
+      draftEdited: boolean
+    }>(finalized.stdout)
     assert.equal(payload.commit.revision, 2)
     assert.equal(payload.impact.items[0]?.targetChapter, 2)
     assert.equal(payload.impact.items[0]?.level, 'confirmed')
     assert.notEqual(payload.commit.commitId, original.commitId)
+    assert.equal(payload.projection.status, 'current')
+    assert.equal(payload.projection.invalidFrom, 1)
+    assert.equal(payload.draftEdited, true)
 
     const commitFiles = await readdir(path.join(dir, 'ledger', 'commits'))
     assert.equal(commitFiles.length, 3)
@@ -432,11 +471,109 @@ test('external drift in formal prose is reported and blocks the next generation'
     const blocked = await runCli(dir, ['write', '3', '--json'], { WEAVE_API_KEY: SECRET })
     assert.equal(blocked.code, 4)
     assert.equal(model.requests.length, requestsBefore)
+
+    const refusedRebuild = await runCli(dir, ['rebuild', '--json'])
+    assert.equal(refusedRebuild.code, 4)
+    const forcedRebuild = await runCli(dir, ['rebuild', '--force', '--json'])
+    assert.equal(forcedRebuild.code, 0, forcedRebuild.stderr)
+    assert.match(await readFile(path.join(dir, 'chapters', 'final', '001.md'), 'utf8'), /林岚翻开账本/)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('changing canon after contract check blocks generation until re-check', async () => {
+  const model = new FakeModel(['林岚翻开账本。'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    await writeFile(path.join(dir, 'canon', 'style.md'), '改过的文风约束\n')
+    const blocked = await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(blocked.code, 3)
+    const payload = parseJson<{ error: { message: string } }>(blocked.stdout)
+    assert.match(payload.error.message, /设定在合同检查后已修改/)
+    assert.equal(model.requests.length, 0)
+    const rechecked = await checkContract(dir, 1)
+    assert.equal(rechecked.code, 0, rechecked.stderr)
+    const written = await runCli(dir, ['write', '--json', '1'], { WEAVE_API_KEY: SECRET })
+    assert.equal(written.code, 0, written.stderr)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('multiple required materials that individually fit but collectively overflow return split-required', async () => {
+  const model = new FakeModel([])
+  await model.start()
+  const dir = await initBook(model.baseUrl, ['--context-window', '2600', '--max-output', '1000'])
+  try {
+    await setCharacters(dir, [{
+      name: '林岚',
+      status: 'alive',
+      introducedIn: 1,
+      knows: [{ fact: '账本缺页', fromChapter: 1 }],
+    }])
+    await setContract(dir, 1)
+    await writeFile(path.join(dir, 'canon', 'style.md'), '风'.repeat(800))
+    await writeFile(path.join(dir, 'canon', 'world.md'), '海'.repeat(800))
+    const checked = await checkContract(dir, 1)
+    assert.equal(checked.code, 0, checked.stderr)
+    const written = await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(written.code, 3, written.stderr)
+    const payload = parseJson<{ error: { details: { decision: string } } }>(written.stdout)
+    assert.equal(payload.error.details.decision, 'split-required')
+    assert.equal(model.requests.length, 0)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('generation events are ordered and cancellation emits a cancelled terminal event', async () => {
+  const model = new FakeModel(['这是一段会被取消的长文字，用来验证流式事件。'], 'slow')
+  await model.start()
+  const dir = await initBook(model.baseUrl, ['--context-window', '8192', '--max-output', '1024'])
+  try {
+    await contract1(dir)
+    const run = spawnCli(dir, ['write', '1', '--events', '--cancel-after-ms', '180'], { WEAVE_API_KEY: SECRET })
+    await waitFor(() => run.output().includes('"type":"delta"'))
+    const result = await Promise.race([
+      run.done,
+      new Promise<CliResult>(resolve => setTimeout(() => {
+        run.child.kill('SIGKILL')
+        resolve({ code: -1, stdout: run.output(), stderr: 'timeout' })
+      }, 8000)),
+    ])
+    assert.equal(result.code, 5, result.stderr)
+    const events = result.stdout.trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as {
+      type: string
+      seq: number
+    })
+    assert.equal(events[0]?.type, 'started')
+    assert.equal(events[events.length - 1]?.type, 'cancelled')
+    assert.ok(events.some(event => event.type === 'delta'))
+    for (let index = 1; index < events.length; index += 1) {
+      assert.equal(events[index]!.seq, events[index - 1]!.seq + 1)
+    }
+    const drafts = (await readdir(path.join(dir, 'chapters', 'drafts'))).filter(name => name.endsWith('.md'))
+    assert.deepEqual(drafts, [])
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+async function waitFor(predicate: () => boolean, timeoutMs = 8000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (predicate()) return
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  throw new Error('timed out waiting for condition')
+}
 
 test('split export preserves Chinese filenames and deterministic content', async () => {
   const model = new FakeModel(['林岚把缺页夹进账本。'])

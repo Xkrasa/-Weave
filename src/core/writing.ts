@@ -1,12 +1,20 @@
 import path from 'node:path'
-import type { CommitRecord, DraftMeta, ImpactReport, ProjectionState, RunRecord } from './types.ts'
+import { readFile, rm } from 'node:fs/promises'
+import type {
+  CommitRecord,
+  DraftMeta,
+  GenerationEvent,
+  ImpactReport,
+  ProjectionState,
+  RunRecord,
+} from './types.ts'
 import { assertNoPendingImpacts, createImpactReport } from './impact.ts'
 import { loadContract, contractHash, requirePassingContractCheck } from './contract.ts'
 import { collectMaterials } from './materials.ts'
 import { assembleContext } from './context.ts'
 import { streamChapter } from './model.ts'
-import { loadModelConfig, loadProject, projectPaths } from './project.ts'
-import { atomicWrite, readJsonIfExists, readTextIfExists } from './io.ts'
+import { loadModelConfig } from './project.ts'
+import { atomicWrite, normalizeText, readTextIfExists } from './io.ts'
 import { hashText, objectHash } from './hash.ts'
 import {
   appendMainline,
@@ -14,14 +22,15 @@ import {
   buildCommit,
   commitsForChapter,
   currentCommit,
+  draftPath,
   ensureUniqueCommit,
-  materializeFinal,
+  finalPath,
   readMainline,
   versionPath,
   writeCommit,
-  draftPath,
 } from './ledger.ts'
 import {
+  draftMetaPath,
   finishRun,
   loadDraftMeta,
   loadRun,
@@ -30,9 +39,13 @@ import {
   saveDraftMeta,
   savePartial,
   saveRun,
-  draftMetaPath,
 } from './runs.ts'
-import { markProjectionFailed, rebuildProjection } from './projections.ts'
+import {
+  assertProjectionCurrent,
+  invalidateProjection,
+  markProjectionFailed,
+  rebuildProjection,
+} from './projections.ts'
 import { conflictError, modelError, validationError, WeaveError } from './errors.ts'
 
 export interface WriteResult {
@@ -48,11 +61,12 @@ export interface WriteResult {
 export async function writeChapter(
   root: string,
   chapter: number,
-  options: { signal: AbortSignal; onDelta?: (text: string) => void },
+  options: { signal: AbortSignal; onDelta?: (text: string) => void; onEvent?: (event: GenerationEvent) => void },
 ): Promise<WriteResult> {
   const contract = await loadContract(root, chapter)
   await requirePassingContractCheck(root, contract)
   await assertFinalIntegrity(root)
+  await assertProjectionCurrent(root)
   const modelConfig = await loadModelConfig(root)
   const meta = await loadDraftMeta(root, chapter)
   const current = await currentCommit(root, chapter)
@@ -69,7 +83,7 @@ export async function writeChapter(
 
   const materials = await collectMaterials(root, contract)
   const assembled = assembleContext(contract, materials, modelConfig)
-  if (assembled.decision.decision === 'capacity-conflict') {
+  if (assembled.decision.decision !== 'ready') {
     throw validationError(assembled.decision.message, assembled.decision)
   }
   const context = assembled.context
@@ -89,11 +103,17 @@ export async function writeChapter(
   }
   await saveRun(root, run)
 
+  let seq = 0
+  const emit = (event: Omit<GenerationEvent, 'seq' | 'runId' | 'chapter'>): void => {
+    options.onEvent?.({ ...event, seq: seq++, runId: run.runId, chapter })
+  }
   let text = ''
   const onDelta = (delta: string): void => {
     text += delta
     options.onDelta?.(delta)
+    emit({ type: 'delta', text: delta })
   }
+  emit({ type: 'started' })
 
   try {
     const result = await streamChapter({
@@ -103,7 +123,9 @@ export async function writeChapter(
       signal: options.signal,
       onDelta,
     })
+    text = normalizeText(text)
     if (!text.trim()) throw modelError('模型返回了空正文')
+    emit({ type: 'usage', usage: result.usage })
     const draft = await saveDraft(root, chapter, text)
     const nextMeta: DraftMeta = {
       chapter,
@@ -115,6 +137,7 @@ export async function writeChapter(
     await saveDraftMeta(root, nextMeta)
     const finished = finishRun(run, 'completed', { usage: result.usage })
     await saveRun(root, finished)
+    emit({ type: 'completed', draft })
     return {
       chapter,
       run: finished,
@@ -133,6 +156,11 @@ export async function writeChapter(
       partialPath: savedPartial ? path.relative(root, savedPartial).split(path.sep).join('/') : undefined,
     })
     await saveRun(root, finished)
+    emit(
+      cancelled
+        ? { type: 'cancelled', error: '生成已取消' }
+        : { type: 'failed', error: error instanceof Error ? error.message : String(error) },
+    )
     if (error instanceof WeaveError) throw error
     throw modelError(`生成失败：${error instanceof Error ? error.message : String(error)}`)
   }
@@ -145,9 +173,9 @@ export async function amendChapter(root: string, chapter: number, force = false)
   if (existing && !force) {
     throw conflictError(`第 ${chapter} 章已有草稿；如需覆盖请加 --force`)
   }
-  const bytes = await import('node:fs/promises').then(fs => fs.readFile(path.join(root, commit.contentPath)))
-  const text = Buffer.from(bytes).toString('utf8')
-  await atomicWrite(draftPath(root, chapter), bytes)
+  const bytes = await readFile(path.join(root, commit.contentPath))
+  const text = normalizeText(Buffer.from(bytes).toString('utf8'))
+  await atomicWrite(draftPath(root, chapter), text)
   const meta: DraftMeta = {
     chapter,
     contentHash: hashText(text),
@@ -165,16 +193,19 @@ export interface FinalizeResult {
   projection: ProjectionState | null
   projectionFailed: boolean
   impact: ImpactReport | null
+  draftEdited: boolean
 }
 
 export async function finalizeChapter(root: string, chapter: number): Promise<FinalizeResult> {
   const contract = await loadContract(root, chapter)
   await requirePassingContractCheck(root, contract)
   await assertNoPendingImpacts(root)
+  await assertProjectionCurrent(root)
 
   const draftFile = draftPath(root, chapter)
-  const draft = await readTextIfExists(draftFile)
-  if (draft === null) throw conflictError(`第 ${chapter} 章没有草稿`)
+  const rawDraft = await readTextIfExists(draftFile)
+  if (rawDraft === null) throw conflictError(`第 ${chapter} 章没有草稿`)
+  const draft = normalizeText(rawDraft)
   if (!draft.trim()) throw validationError(`第 ${chapter} 章草稿为空`)
 
   const current = await currentCommit(root, chapter)
@@ -188,6 +219,7 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
   if (!current && meta?.baseCommit) {
     throw conflictError('草稿引用的正式版本已不在主线中；请重新创建草稿')
   }
+  const draftEdited = meta ? hashText(draft) !== meta.contentHash : false
 
   const contentHash = hashText(draft)
   const history = await commitsForChapter(root, chapter)
@@ -209,17 +241,20 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     contentPath,
   })
   await ensureUniqueCommit(root, commit)
+
+  // Formal prose and immutable history are both durable before the commit file.
+  await atomicWrite(finalPath(root, chapter), draft)
   await writeCommit(root, commit)
 
   const previousHead = await readMainline(root)
   const selected = { ...previousHead.selectedCommitByChapter, [String(chapter)]: commit.commitId }
   const head = await appendMainline(root, selected)
-  await materializeFinal(root, commit)
   await clearDraft(root, chapter)
 
   let projection: ProjectionState | null = null
   let projectionFailed = false
   try {
+    if (revision > 1) await invalidateProjection(root, chapter)
     projection = await rebuildProjection(root)
   } catch (error) {
     projectionFailed = true
@@ -246,11 +281,11 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     projection,
     projectionFailed,
     impact,
+    draftEdited,
   }
 }
 
 async function clearDraft(root: string, chapter: number): Promise<void> {
-  const { rm } = await import('node:fs/promises')
   await rm(draftPath(root, chapter), { force: true })
   await rm(draftMetaPath(root, chapter), { force: true })
 }

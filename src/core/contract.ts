@@ -1,6 +1,6 @@
 import path from 'node:path'
 import type { ChapterContract, CharacterRecord, CharacterRegistry } from './types.ts'
-import { atomicWriteJson, readJson, readJsonIfExists } from './io.ts'
+import { atomicWriteJson, fileHash, listFiles, readJsonIfExists } from './io.ts'
 import { objectHash } from './hash.ts'
 import { projectPaths } from './project.ts'
 import { validationError } from './errors.ts'
@@ -13,6 +13,7 @@ export interface ContractCheckError {
 
 export interface ContractCheckRecord {
   contractHash: string
+  canonHash: string
   ok: boolean
   errors: ContractCheckError[]
   checkedAt: string
@@ -98,6 +99,7 @@ export function validateContract(contract: ChapterContract, registry: CharacterR
     ['openingState', 'openingState'],
     ['endingState', 'endingState'],
     ['goal', 'goal'],
+    ['obstacle', 'obstacle'],
     ['previousLink', 'previousLink'],
     ['nextLink', 'nextLink'],
   ]
@@ -124,16 +126,16 @@ export function validateContract(contract: ChapterContract, registry: CharacterR
   const registryByName = new Map(registry.characters.map(character => [character.name, character]))
   for (const name of contract.characters) {
     const character = registryByName.get(name)
-    if (registry.characters.length > 0 && !character) {
+    if (!character) {
       errors.push({ code: 'UNKNOWN_CHARACTER', field: 'characters', message: `人物“${name}”不在 canon/characters.json 中` })
       continue
     }
-    if (character) checkCharacterAvailability(character, contract.chapter, name, errors)
+    checkCharacterAvailability(character, contract.chapter, name, errors)
   }
   const pov = registryByName.get(contract.pov)
-  if (registry.characters.length > 0 && !pov) {
+  if (!pov) {
     errors.push({ code: 'UNKNOWN_POV', field: 'pov', message: `视角人物“${contract.pov}”不在人物表中` })
-  } else if (pov) {
+  } else {
     checkCharacterAvailability(pov, contract.chapter, contract.pov, errors)
   }
 
@@ -196,11 +198,22 @@ export function contractHash(contract: ChapterContract): string {
   return objectHash(contract)
 }
 
+export async function canonSnapshotHash(root: string): Promise<string> {
+  const dir = projectPaths(root).canon
+  const files = await listFiles(dir)
+  const entries: Array<[string, string]> = []
+  for (const name of files) {
+    entries.push([name, await fileHash(path.join(dir, name))])
+  }
+  return objectHash(entries)
+}
+
 export async function writeContractCheck(root: string, contract: ChapterContract): Promise<ContractCheckRecord> {
   const registry = await loadCharacters(root)
   const errors = validateContract(contract, registry)
   const record: ContractCheckRecord = {
     contractHash: contractHash(contract),
+    canonHash: await canonSnapshotHash(root),
     ok: errors.length === 0,
     errors,
     checkedAt: new Date().toISOString(),
@@ -217,6 +230,9 @@ export async function requirePassingContractCheck(root: string, contract: Chapte
   }
   if (record.contractHash !== currentHash) {
     throw validationError(`第 ${contract.chapter} 章合同在检查后已修改；请重新执行 weave contract check ${contract.chapter}`)
+  }
+  if (record.canonHash !== (await canonSnapshotHash(root))) {
+    throw validationError(`设定在合同检查后已修改；请重新执行 weave contract check ${contract.chapter}`)
   }
   if (!record.ok) {
     throw validationError(`第 ${contract.chapter} 章合同检查未通过`, record.errors)
