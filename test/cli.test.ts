@@ -2213,6 +2213,13 @@ test('P2.1 routes methods, checks style and rewrites only the target paragraph',
 
     assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
     assert.ok(JSON.stringify(model.requests[0]).includes('structure-causality'))
+    const runFile = (await readdir(path.join(dir, '.weave', 'runs'))).find(name => name.endsWith('.json'))!
+    const runRecord = JSON.parse(await readFile(path.join(dir, '.weave', 'runs', runFile), 'utf8')) as {
+      methodSelection: { modules: Array<{ id: string }>; reasons: string[]; estimatedTokens: number }
+    }
+    assert.ok(runRecord.methodSelection.modules.some(item => item.id === 'structure-causality'))
+    assert.ok(runRecord.methodSelection.reasons.length > 0)
+    assert.ok(runRecord.methodSelection.estimatedTokens > 0)
     const routed = await runCli(dir, ['method', 'route', '1', '--json'])
     assert.equal(routed.code, 0, routed.stderr)
     const selection = parseJson<{ modules: Array<{ id: string }>; estimatedTokens: number }>(routed.stdout)
@@ -2222,7 +2229,39 @@ test('P2.1 routes methods, checks style and rewrites only the target paragraph',
     const tight = await runCli(dir, ['method', 'route', '1', '--max-tokens', '1', '--json'])
     assert.equal(tight.code, 0, tight.stderr)
     assert.equal(parseJson<{ modules: unknown[] }>(tight.stdout).modules.length, 0)
+    const shortForm = await runCli(dir, ['method', 'route', '1', '--platform', 'short-form', '--json'])
+    assert.equal(shortForm.code, 0, shortForm.stderr)
+    assert.equal(parseJson<{ modules: unknown[] }>(shortForm.stdout).modules.length, 0)
     await mkdir(path.join(dir, 'methods'), { recursive: true })
+    await writeFile(path.join(dir, 'methods', 'fixture.md'), [
+      'version: 2',
+      'tags: 因果',
+      '',
+      '## Signal',
+      '因果链断裂。',
+      '## Diagnosis',
+      '找出断裂点。',
+      '## Process',
+      '重写因果链。',
+      '## Output Contract',
+      '场景状态改变。',
+      '## Positive Example',
+      '她交出账本，因此失去证据。',
+      '## Negative Example',
+      '她去了码头。',
+      '## Self Check',
+      '能否回答为什么。',
+      '## Scope',
+      'long-form',
+      '## Not For',
+      'short-form',
+    ].join('\n'))
+    const custom = await runCli(dir, ['method', 'show', 'fixture', '--json'])
+    assert.equal(custom.code, 0, custom.stderr)
+    const customPayload = parseJson<{ version: number; scope: string; notFor: string }>(custom.stdout)
+    assert.equal(customPayload.version, 2)
+    assert.equal(customPayload.scope, 'long-form')
+    assert.equal(customPayload.notFor, 'short-form')
     await writeFile(path.join(dir, 'methods', 'disabled.json'), '["structure-causality"]\n')
     const afterDisable = await runCli(dir, ['method', 'list', '--json'])
     assert.equal(afterDisable.code, 0, afterDisable.stderr)
@@ -2302,6 +2341,20 @@ test('P2.2 indexes Chinese chunks, searches short terms, deconstructs and export
     const chunk = await runCli(dir, ['chunk', chunkId!, '--json'])
     assert.equal(chunk.code, 0, chunk.stderr)
     assert.match(parseJson<{ parentText: string }>(chunk.stdout).parentText, /账本/)
+
+    const vectorFile = path.join(dir, 'vectors.json')
+    await writeFile(vectorFile, `${JSON.stringify({
+      query: [1, 0],
+      chunks: {
+        'ch-1-001': [0, 1],
+        'ch-2-001': [1, 0],
+      },
+    })}\n`)
+    const hybrid = await runCli(dir, ['search', '账本', '--vectors', 'vectors.json', '--json'])
+    assert.equal(hybrid.code, 0, hybrid.stderr)
+    const hybridPayload = parseJson<{ fusion: string; results: Array<{ chunkId: string }> }>(hybrid.stdout)
+    assert.equal(hybridPayload.fusion, 'rrf')
+    assert.ok(hybridPayload.results.some(item => item.chunkId === 'ch-2-001'))
 
     const short = await runCli(dir, ['search', '账', '--json'])
     assert.equal(short.code, 0, short.stderr)

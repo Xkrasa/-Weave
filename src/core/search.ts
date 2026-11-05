@@ -20,6 +20,12 @@ export interface SearchResult {
   }
 }
 
+export interface VectorFixture {
+  query: number[]
+  chunks: Record<string, number[]>
+  weight?: number
+}
+
 function open(root: string): DatabaseSync {
   const db = new DatabaseSync(projectPaths(root).indexDb)
   db.exec(`
@@ -137,8 +143,9 @@ export async function searchBook(
     storyline?: string
     time?: string
     limit?: number
+    vectors?: VectorFixture
   } = {},
-): Promise<{ query: string; results: SearchResult[]; fallback: boolean }> {
+): Promise<{ query: string; results: SearchResult[]; fallback: boolean; fusion: 'keyword' | 'rrf' }> {
   if (!query.trim()) throw conflictError('搜索词不能为空')
   const db = open(root)
   try {
@@ -189,11 +196,20 @@ export async function searchBook(
         .sort((a, b) => b.score - a.score || Number(a.row.chapter) - Number(b.row.chapter) || Number(a.row.paragraph) - Number(b.row.paragraph))
         .slice(0, options.limit ?? 8)
       if (scored.length > 0) {
-        return { query, fallback: false, results: scored.map(item => toResult(item.row)) }
+        const keywordResults = scored.map(item => toResult(item.row))
+        const fused = options.vectors
+          ? fuseVectors(db, keywordResults, options.vectors, options.limit ?? 8, matches)
+          : null
+        return {
+          query,
+          fallback: false,
+          results: fused ?? keywordResults,
+          fusion: fused ? 'rrf' : 'keyword',
+        }
       }
     }
     const rows = db.prepare('SELECT * FROM search_chunks').all() as Array<Record<string, unknown>>
-    const results = rows
+    const keywordResults = rows
       .filter(row =>
         String(row.text).includes(query)
         && matches(row),
@@ -201,10 +217,71 @@ export async function searchBook(
       .sort((a, b) => Number(a.chapter) - Number(b.chapter) || Number(a.paragraph) - Number(b.paragraph))
       .slice(0, options.limit ?? 8)
       .map(toResult)
-    return { query, fallback: true, results }
+    const fused = options.vectors
+      ? fuseVectors(db, keywordResults, options.vectors, options.limit ?? 8, matches)
+      : null
+    return { query, fallback: true, results: fused ?? keywordResults, fusion: fused ? 'rrf' : 'keyword' }
   } finally {
     db.close()
   }
+}
+
+function fuseVectors(
+  db: DatabaseSync,
+  keywordResults: SearchResult[],
+  vectors: VectorFixture,
+  limit: number,
+  matches: (row: Record<string, unknown>) => boolean,
+): SearchResult[] | null {
+  if (vectors.query.length === 0) return null
+  const rows = (db.prepare('SELECT * FROM search_chunks').all() as Array<Record<string, unknown>>)
+    .filter(matches)
+  const scored = rows.map(row => {
+    const chunkId = String(row.chunk_id)
+    const vector = vectors.chunks[chunkId]
+    if (!vector || vector.length !== vectors.query.length
+      || !vector.every(value => typeof value === 'number' && Number.isFinite(value))) return null
+    const score = cosine(vectors.query, vector)
+    return Number.isFinite(score) && score > 0 ? { row, score } : null
+  }).filter((item): item is { row: Record<string, unknown>; score: number } => Boolean(item))
+    .sort((a, b) => b.score - a.score)
+    .map(item => toResult(item.row))
+  if (scored.length === 0) return null
+  return reciprocalRankFusion(keywordResults, scored, limit, vectors.weight ?? 1)
+}
+
+export function reciprocalRankFusion(
+  keywordResults: SearchResult[],
+  vectorResults: SearchResult[],
+  limit = 8,
+  weight = 1,
+): SearchResult[] {
+  const scores = new Map<string, number>()
+  const byId = new Map<string, SearchResult>()
+  for (const [index, result] of keywordResults.entries()) {
+    scores.set(result.chunkId, (scores.get(result.chunkId) ?? 0) + 1 / (60 + index + 1))
+    byId.set(result.chunkId, result)
+  }
+  for (const [index, result] of vectorResults.entries()) {
+    scores.set(result.chunkId, (scores.get(result.chunkId) ?? 0) + weight / (60 + index + 1))
+    byId.set(result.chunkId, result)
+  }
+  return [...scores.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([chunkId]) => byId.get(chunkId)!)
+}
+
+function cosine(left: number[], right: number[]): number {
+  let dot = 0
+  let leftNorm = 0
+  let rightNorm = 0
+  for (let index = 0; index < left.length; index += 1) {
+    dot += left[index]! * right[index]!
+    leftNorm += left[index]! ** 2
+    rightNorm += right[index]! ** 2
+  }
+  return leftNorm === 0 || rightNorm === 0 ? 0 : dot / Math.sqrt(leftNorm * rightNorm)
 }
 
 export async function readSearchChunk(

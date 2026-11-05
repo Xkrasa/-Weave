@@ -45,7 +45,12 @@ import {
 } from './core/revisions.ts'
 import { loadMethods, selectMethods, styleCheck } from './core/methods.ts'
 import { loadAuthorSamples } from './core/style.ts'
-import { rebuildSearchIndex, readSearchChunk, searchBook } from './core/search.ts'
+import {
+  rebuildSearchIndex,
+  readSearchChunk,
+  searchBook,
+  type VectorFixture,
+} from './core/search.ts'
 import { deconstructFile } from './core/deconstruct.ts'
 import { atomicWriteJson, ensureDir } from './core/io.ts'
 import {
@@ -328,12 +333,34 @@ async function commandWaivers(root: string, parsed: Parsed, json: boolean): Prom
 async function commandSearch(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const query = parsed.positionals[0]
   if (!query) throw usageError('用法：weave search <query> [--chapter <n>] [--entity <id>] [--limit <n>]')
+  const vectorFile = optionalString(parsed, 'vectors')
+  let vectors: VectorFixture | undefined
+  if (vectorFile) {
+    try {
+      const raw = JSON.parse(await readFile(path.resolve(vectorFile), 'utf8')) as VectorFixture
+      if (!Array.isArray(raw.query) || !raw.query.every(value => typeof value === 'number' && Number.isFinite(value))
+        || !raw.chunks || typeof raw.chunks !== 'object'
+        || Object.values(raw.chunks).some(value =>
+          !Array.isArray(value)
+          || value.length !== raw.query.length
+          || !value.every(item => typeof item === 'number' && Number.isFinite(item)))
+        || (raw.weight !== undefined && (!Number.isFinite(raw.weight) || raw.weight < 0))) {
+        throw new Error('vectors 文件格式错误')
+      }
+      vectors = raw
+    } catch (error) {
+      throw usageError(`无法读取 vectors 文件：${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  const limit = optionalNumber(parsed, 'limit')
+  if (limit !== undefined && limit <= 0) throw usageError('--limit 必须是正整数')
   const result = await searchBook(root, query, {
     chapter: optionalNumber(parsed, 'chapter'),
     entity: optionalString(parsed, 'entity'),
     storyline: optionalString(parsed, 'storyline'),
     time: optionalString(parsed, 'time'),
-    limit: optionalNumber(parsed, 'limit'),
+    limit,
+    vectors,
   })
   if (json) outputJson(result)
   else {
@@ -431,9 +458,14 @@ async function commandMethod(root: string, parsed: Parsed, json: boolean): Promi
   }
   if (action === 'route') {
     const chapter = parseChapter(parsed.positionals[1])
+    const platform = String(parsed.flags.platform ?? 'long-form')
+    if (platform !== 'long-form' && platform !== 'short-form') {
+      throw usageError('--platform 必须是 long-form 或 short-form')
+    }
     const selection = await selectMethods(root, chapter, {
       maxTokens: optionalNumber(parsed, 'max-tokens'),
-      purpose: 'route',
+      purpose: 'write',
+      platform,
     })
     if (json) outputJson(selection)
     else {
@@ -942,6 +974,9 @@ async function commandExport(root: string, parsed: Parsed, json: boolean): Promi
   if (countModeRaw !== 'cjk' && countModeRaw !== 'all') {
     throw usageError('--count-mode 必须是 cjk 或 all')
   }
+  if (parsed.flags['count-mode'] !== undefined && platformRaw !== 'custom') {
+    throw usageError('--count-mode 只能与 --platform custom 一起使用')
+  }
   const result = await exportBook(
     root,
     raw as ExportFormat,
@@ -1050,9 +1085,9 @@ function printHelp(): void {
   weave knowledge <characterId> [--chapter <n>]
   weave knowledge check <chapter>
   weave rewrite <chapter> --paragraph <id> --goal <text>
-  weave method list|show <id>|route <chapter>
+  weave method list|show <id>|route <chapter> [--platform long-form|short-form] [--max-tokens <n>]
   weave style check <chapter>|samples
-  weave search <query> [--chapter <n>] [--entity <id>] [--storyline <id>] [--time <label>] [--limit <n>]
+  weave search <query> [--chapter <n>] [--entity <id>] [--storyline <id>] [--time <label>] [--vectors <file>] [--limit <n>]
   weave chunk <chunkId>
   weave index rebuild
   weave deconstruct <file> [--split-pattern <regex>] [--save]

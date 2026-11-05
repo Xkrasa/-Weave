@@ -11,6 +11,7 @@ import type {
 import { assertNoPendingImpacts, createImpactReport } from './impact.ts'
 import { loadCharacters, loadContract, contractHash, requirePassingContractCheck } from './contract.ts'
 import { collectMaterials } from './materials.ts'
+import { selectMethods } from './methods.ts'
 import { assembleContext } from './context.ts'
 import { streamChapter } from './model.ts'
 import { loadModelConfig, loadProject } from './project.ts'
@@ -106,6 +107,7 @@ export async function writeChapter(
   }
 
   const materials = await collectMaterials(root, contract)
+  const methodSelection = await selectMethods(root, contract.chapter)
   const assembled = assembleContext(contract, materials, modelConfig)
   if (assembled.decision.decision !== 'ready') {
     throw validationError(assembled.decision.message, assembled.decision)
@@ -124,6 +126,7 @@ export async function writeChapter(
     contextHash: context.contextHash,
     promptHash: hashText(`${context.system}\n${context.user}`),
     materialSourceIds: context.included.map(item => item.sourceId),
+    methodSelection,
   }
   await saveRun(root, run)
 

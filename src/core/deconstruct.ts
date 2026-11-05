@@ -64,7 +64,10 @@ export async function deconstructFile(
     }
   })
   const totalCharacters = reportChapters.reduce((sum, item) => sum + item.characters, 0)
-  const dialogue = (text.match(/“[^”]*”|"[^"]*"/g) ?? []).join('')
+  const dialogueCharacters = reportChapters.reduce(
+    (sum, item) => sum + item.dialogueRatio * item.characters,
+    0,
+  )
   return {
     source: path.basename(file),
     format: ext === '.epub' ? 'epub' : ext === '.md' ? 'md' : 'txt',
@@ -75,9 +78,7 @@ export async function deconstructFile(
       chapters: reportChapters.length,
       characters: totalCharacters,
       averageChapterCharacters: reportChapters.length === 0 ? 0 : Math.round(totalCharacters / reportChapters.length),
-      dialogueRatio: totalCharacters === 0
-        ? 0
-        : [...dialogue].length / Math.max(1, [...text.replace(/\s/g, '')].length),
+      dialogueRatio: totalCharacters === 0 ? 0 : dialogueCharacters / totalCharacters,
     },
     notice: '仅供参考结构；不是项目事实，不得直接进入正文或 Canon。',
   }

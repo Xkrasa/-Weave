@@ -289,6 +289,11 @@ export interface RunRecord {
   contextHash?: string
   promptHash?: string
   materialSourceIds: string[]
+  methodSelection?: {
+    modules: Array<{ id: string; version: number; reason: string }>
+    reasons: string[]
+    estimatedTokens: number
+  }
   partialPath?: string
   error?: string
   usage?: RunUsage
