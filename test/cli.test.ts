@@ -1621,6 +1621,9 @@ test('P1.6 revises only selected findings, merges, rechecks and finalizes', asyn
     assert.equal(report.passed, true)
     assert.equal(report.exitCode, 0)
     assert.equal(report.findings[0]?.status, 'verified')
+    const recheckBody = JSON.stringify(model.requests[7])
+    assert.ok(recheckBody.includes('她发现缺页上留着港务局的印，决定追查下去。'))
+    assert.equal(recheckBody.includes('林岚在码头翻开账本。'), false)
     assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
   } finally {
     await model.close()
@@ -1740,6 +1743,41 @@ test('P1.6 recheck keeps unresolved blocking findings and appends new ones', asy
     assert.equal(report.findings[0]?.status, 'open')
     assert.equal(report.findings[1]?.findingId, 'f2')
     assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 7)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.6 keeps manual-only and revision-only paragraphs independently', async () => {
+  const revision = JSON.stringify({
+    paragraphs: [{
+      paragraphId: 'p002',
+      text: '她发现缺页上留着港务局的印，决定追查下去。',
+      findingIds: ['f1'],
+    }],
+  })
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload(true), revision])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 7)
+    const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
+    const revisionId = parseJson<{ revisionId: string }>(revised.stdout).revisionId
+    await writeFile(
+      path.join(dir, 'chapters', 'drafts', '001.md'),
+      '林岚在清晨的码头翻开账本。\n\n她发现缺页上留着港务局的印。\n',
+    )
+    const merged = await runCli(dir, ['merge', '1', '--revision', revisionId, '--json'])
+    assert.equal(merged.code, 0, merged.stderr)
+    const mergedReport = parseJson<{ report: { hunks: Array<{ paragraphId: string; status: string }> } }>(merged.stdout)
+    assert.equal(mergedReport.report.hunks.find(hunk => hunk.paragraphId === 'p001')?.status, 'manual-only')
+    assert.equal(mergedReport.report.hunks.find(hunk => hunk.paragraphId === 'p002')?.status, 'revision-only')
+    const text = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
+    assert.match(text, /清晨的码头/)
+    assert.match(text, /决定追查下去/)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })

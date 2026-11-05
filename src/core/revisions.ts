@@ -464,10 +464,11 @@ function paragraphsOf(draft: string): DraftParagraph[] {
   const parts = draft.split(/\n{2,}/)
   const paragraphs: DraftParagraph[] = []
   for (const part of parts) {
-    if (!part.trim()) continue
+    const text = part.trim()
+    if (!text) continue
     paragraphs.push({
       paragraphId: `p${String(paragraphs.length + 1).padStart(3, '0')}`,
-      text: part,
+      text,
     })
   }
   return paragraphs
