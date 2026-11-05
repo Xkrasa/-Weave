@@ -131,25 +131,32 @@ export async function replayLedgerProjectionFrom(
   const head = await readMainline(root)
   const db = open(root)
   try {
-    const snapshot = db.prepare(
-      'SELECT MAX(chapter) AS chapter FROM ledger_projection_snapshots WHERE chapter < ?',
-    ).get(fromChapter) as Record<string, unknown> | undefined
-    const base = snapshot?.chapter == null ? 0 : Number(snapshot.chapter)
     db.exec('BEGIN IMMEDIATE')
-    db.prepare('DELETE FROM ledger_projection WHERE chapter > ?').run(base)
-    db.prepare('DELETE FROM ledger_projection_snapshots WHERE chapter > ?').run(base)
-    db.exec('DELETE FROM ledger_view')
-    const applied = await apply(db, root, head, base, [...LEDGER_PROJECTIONS])
-    const state = writeStates(db, projectionNames('all'), {
-      mainlineRevision: head.mainlineRevision,
-      appliedThrough: applied,
-      invalidFrom: invalidate ? fromChapter : null,
-      replayBaseChapter: base,
-      status: 'current',
-      updatedAt: new Date().toISOString(),
-    }, NAME)
+    let aggregateState: LedgerProjectionState | null = null
+    for (const name of LEDGER_PROJECTIONS) {
+      const snapshot = db.prepare(
+        'SELECT MAX(chapter) AS chapter FROM ledger_view_snapshots WHERE projection = ? AND chapter < ?',
+      ).get(name, fromChapter) as Record<string, unknown> | undefined
+      const base = snapshot?.chapter == null ? 0 : Number(snapshot.chapter)
+      db.prepare('DELETE FROM ledger_view WHERE projection = ? AND chapter > ?').run(name, base)
+      if (name === NAME) {
+        db.prepare('DELETE FROM ledger_projection WHERE chapter > ?').run(base)
+        db.prepare('DELETE FROM ledger_projection_snapshots WHERE chapter > ?').run(base)
+      }
+      const applied = await apply(db, root, head, base, [name])
+      const state = writeState(db, {
+        name,
+        mainlineRevision: head.mainlineRevision,
+        appliedThrough: applied,
+        invalidFrom: invalidate ? fromChapter : null,
+        replayBaseChapter: base,
+        status: 'current',
+        updatedAt: new Date().toISOString(),
+      })
+      if (name === NAME) aggregateState = state
+    }
     db.exec('COMMIT')
-    return state
+    return aggregateState!
   } catch (error) {
     db.exec('ROLLBACK')
     throw error

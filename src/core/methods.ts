@@ -12,6 +12,7 @@ export interface MethodModule {
   version: number
   tags: string[]
   scope: string
+  platforms?: string[]
   notFor?: string
   signal: string
   diagnosis: string
@@ -34,6 +35,7 @@ const BUILT_INS: MethodModule[] = [
     version: 1,
     tags: ['structure', 'causality', 'plot', '结构', '因果', '目标'],
     scope: 'long-form chapter',
+    platforms: ['generic', 'qidian', 'fanqie', 'long-form'],
     signal: '章节目标、阻力或结果之间缺少因果链；事件只是依次发生。',
     diagnosis: '先判断目标是否被具体阻力改变，再判断结果是否产生新的代价。',
     process: '写出本章目标 → 阻力 → 选择 → 结果 → 下一章压力；删除不改变状态的段落。',
@@ -47,6 +49,7 @@ const BUILT_INS: MethodModule[] = [
     version: 1,
     tags: ['character', 'motivation', 'pov', '人物', '动机', '视角'],
     scope: 'long-form chapter',
+    platforms: ['generic', 'qidian', 'fanqie', 'long-form'],
     signal: '人物行为像作者安排，而不是由目标、恐惧或误判推动。',
     diagnosis: '检查人物此刻知道什么、误以为什么、最怕失去什么。',
     process: '列出视角人物的当前目标与错误信念；让行动同时服务目标和暴露局限。',
@@ -60,6 +63,7 @@ const BUILT_INS: MethodModule[] = [
     version: 1,
     tags: ['scene', 'conflict', 'pacing', '场景', '冲突', '节奏'],
     scope: 'long-form chapter',
+    platforms: ['generic', 'qidian', 'fanqie', 'long-form'],
     signal: '场景空转；人物聊天但没有新信息、新阻力或新决定。',
     diagnosis: '区分信息交换、关系变化和局势变化；没有变化的场景应合并或删除。',
     process: '给场景设定一个可见目标和一个反对力量；让场景结束在变化上。',
@@ -73,6 +77,7 @@ const BUILT_INS: MethodModule[] = [
     version: 1,
     tags: ['style', 'voice', 'ai', '文风', '模板', '抒情'],
     scope: 'long-form chapter',
+    platforms: ['generic', 'qidian', 'fanqie', 'long-form'],
     signal: '段落尾总结、抽象抒情、所有人同腔调、连续同构句式。',
     diagnosis: '先修结构和人物，再清理模板化表达；不要把结构问题当文风问题。',
     process: '删段尾总结；把抽象情绪换成动作或选择；给不同人物不同句长和词汇。',
@@ -106,7 +111,7 @@ export async function selectMethods(
   options: {
     maxTokens?: number
     purpose?: 'write' | 'rewrite' | 'route'
-    platform?: 'long-form' | 'short-form'
+    platform?: 'long-form' | 'short-form' | 'generic' | 'qidian' | 'fanqie'
   } = {},
 ): Promise<MethodSelection> {
   const contract = await loadContract(root, chapter)
@@ -119,6 +124,9 @@ export async function selectMethods(
     }
     if (platform === 'short-form' && /long-form/.test(module.scope.toLowerCase())) return false
     if (platform === 'long-form' && /short-form/.test(module.scope.toLowerCase())) return false
+    if (module.platforms && !module.platforms.includes(platform) && !module.platforms.includes('*')) {
+      return false
+    }
     if (module.notFor && module.notFor.toLowerCase().includes(platform)) return false
     if (purpose !== 'rewrite' && module.notFor && /revision/i.test(module.notFor)) return false
     return true
@@ -270,6 +278,11 @@ function parseMethodMarkdown(id: string, text: string): MethodModule | null {
   const scope = sections.get('scope')
     ?? /(?:scope|范围):\s*(.+)/i.exec(text)?.[1]?.trim()
     ?? 'long-form'
+  const platforms = (sections.get('platforms')
+    ?? sections.get('platform')
+    ?? /(?:platforms?|平台):\s*(.+)/i.exec(text)?.[1]
+    ?? '')
+    .split(',').map(item => item.trim()).filter(Boolean)
   const signal = sections.get('signal') ?? ''
   const process = sections.get('process') ?? ''
   if (!signal || !process) return null
@@ -278,6 +291,7 @@ function parseMethodMarkdown(id: string, text: string): MethodModule | null {
     version,
     tags,
     scope,
+    platforms: platforms.length > 0 ? platforms : undefined,
     notFor: sections.get('not for') ?? sections.get('不适用') ?? undefined,
     signal,
     diagnosis: sections.get('diagnosis') ?? '',

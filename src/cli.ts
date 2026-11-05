@@ -49,6 +49,7 @@ import {
   rebuildSearchIndex,
   readSearchChunk,
   searchBook,
+  searchIndexHealth,
   type VectorFixture,
 } from './core/search.ts'
 import { deconstructFile } from './core/deconstruct.ts'
@@ -79,7 +80,7 @@ interface Parsed {
   flags: Record<string, string | true>
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank'])
 let eventStreamStarted = false
 
 async function main(): Promise<number> {
@@ -362,6 +363,7 @@ async function commandSearch(root: string, parsed: Parsed, json: boolean): Promi
     location: optionalString(parsed, 'location'),
     limit,
     vectors,
+    rerank: parsed.flags.rerank === true,
   })
   if (json) outputJson(result)
   else {
@@ -383,7 +385,14 @@ async function commandChunk(root: string, parsed: Parsed, json: boolean): Promis
 }
 
 async function commandIndex(root: string, parsed: Parsed, json: boolean): Promise<number> {
-  if (parsed.positionals[0] !== 'rebuild') throw usageError('用法：weave index rebuild')
+  const action = parsed.positionals[0]
+  if (action === 'status') {
+    const result = await searchIndexHealth(root)
+    if (json) outputJson(result)
+    else console.log(JSON.stringify(result, null, 2))
+    return 0
+  }
+  if (action !== 'rebuild') throw usageError('用法：weave index rebuild|status')
   const result = await rebuildSearchIndex(root)
   if (json) outputJson({ ok: true, ...result })
   else console.log(`索引已重建：${result.chunks} 个段落，${result.terms} 个词项`)
@@ -457,16 +466,39 @@ async function commandMethod(root: string, parsed: Parsed, json: boolean): Promi
     }
     return 0
   }
+  if (action === 'history') {
+    const chapter = parseChapter(parsed.positionals[1])
+    const runsDir = projectPaths(root).runs
+    const records: Array<{ runId: string; methodSelection: unknown }> = []
+    for (const name of await readdir(runsDir).catch(() => [])) {
+      if (!name.endsWith('.json')) continue
+      try {
+        const record = JSON.parse(await readFile(path.join(runsDir, name), 'utf8')) as {
+          chapter?: number
+          runId?: string
+          methodSelection?: unknown
+        }
+        if (record.chapter === chapter && record.methodSelection) {
+          records.push({ runId: String(record.runId ?? name), methodSelection: record.methodSelection })
+        }
+      } catch {
+        // Ignore incomplete run records.
+      }
+    }
+    if (json) outputJson({ chapter, records })
+    else for (const record of records) console.log(`${record.runId}\t${JSON.stringify(record.methodSelection)}`)
+    return 0
+  }
   if (action === 'route') {
     const chapter = parseChapter(parsed.positionals[1])
     const platform = String(parsed.flags.platform ?? 'long-form')
-    if (platform !== 'long-form' && platform !== 'short-form') {
-      throw usageError('--platform 必须是 long-form 或 short-form')
+    if (!['long-form', 'short-form', 'generic', 'qidian', 'fanqie'].includes(platform)) {
+      throw usageError('--platform 必须是 long-form、short-form、generic、qidian 或 fanqie')
     }
     const selection = await selectMethods(root, chapter, {
       maxTokens: optionalNumber(parsed, 'max-tokens'),
       purpose: 'write',
-      platform,
+      platform: platform as 'long-form' | 'short-form' | 'generic' | 'qidian' | 'fanqie',
     })
     if (json) outputJson(selection)
     else {
@@ -1086,11 +1118,12 @@ function printHelp(): void {
   weave knowledge <characterId> [--chapter <n>]
   weave knowledge check <chapter>
   weave rewrite <chapter> --paragraph <id> --goal <text>
-  weave method list|show <id>|route <chapter> [--platform long-form|short-form] [--max-tokens <n>]
+  weave method list|show <id>|route <chapter> [--platform long-form|short-form|generic|qidian|fanqie] [--max-tokens <n>]
+  weave method history <chapter>
   weave style check <chapter>|samples
-  weave search <query> [--chapter <n>] [--entity <id>] [--location <name>] [--storyline <id>] [--time <label>] [--vectors <file>] [--limit <n>]
+  weave search <query> [--chapter <n>] [--entity <id>] [--location <name>] [--storyline <id>] [--time <label>] [--vectors <file>] [--rerank] [--limit <n>]
   weave chunk <chunkId>
-  weave index rebuild
+  weave index rebuild|status
   weave deconstruct <file> [--split-pattern <regex>] [--save]
   weave loops list|show <loopId>
   weave timeline series

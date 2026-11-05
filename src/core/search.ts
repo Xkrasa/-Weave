@@ -152,6 +152,7 @@ export async function searchBook(
     location?: string
     limit?: number
     vectors?: VectorFixture
+    rerank?: boolean
   } = {},
 ): Promise<{ query: string; results: SearchResult[]; fallback: boolean; fusion: 'keyword' | 'rrf' }> {
   if (!query.trim()) throw conflictError('搜索词不能为空')
@@ -209,10 +210,11 @@ export async function searchBook(
         const fused = options.vectors
           ? fuseVectors(db, keywordResults, options.vectors, options.limit ?? 8, matches)
           : null
+        const results = fused ?? keywordResults
         return {
           query,
           fallback: false,
-          results: fused ?? keywordResults,
+          results: options.rerank ? rerankResults(results, query) : results,
           fusion: fused ? 'rrf' : 'keyword',
         }
       }
@@ -229,7 +231,51 @@ export async function searchBook(
     const fused = options.vectors
       ? fuseVectors(db, keywordResults, options.vectors, options.limit ?? 8, matches)
       : null
-    return { query, fallback: true, results: fused ?? keywordResults, fusion: fused ? 'rrf' : 'keyword' }
+    const results = fused ?? keywordResults
+    return {
+      query,
+      fallback: true,
+      results: options.rerank ? rerankResults(results, query) : results,
+      fusion: fused ? 'rrf' : 'keyword',
+    }
+  } finally {
+    db.close()
+  }
+}
+
+export function rerankResults(results: SearchResult[], query: string): SearchResult[] {
+  const terms = [...new Set(tokenize(query))]
+  return [...results]
+    .map(result => {
+      const text = result.text.toLowerCase()
+      const coverage = terms.filter(term => text.includes(term.toLowerCase())).length
+      return { result, coverage }
+    })
+    .sort((a, b) => b.coverage - a.coverage || a.result.chunkId.localeCompare(b.result.chunkId))
+    .map(item => item.result)
+}
+
+export async function searchIndexHealth(root: string): Promise<{
+  chunks: number
+  terms: number
+  mainlineRevision: number | null
+  currentMainlineRevision: number
+  current: boolean
+}> {
+  const db = open(root)
+  try {
+    const chunks = Number((db.prepare('SELECT COUNT(*) AS count FROM search_chunks').get() as Record<string, unknown>)?.count ?? 0)
+    const terms = Number((db.prepare('SELECT COUNT(*) AS count FROM search_terms').get() as Record<string, unknown>)?.count ?? 0)
+    const state = db.prepare('SELECT mainline_revision FROM search_state WHERE id = 1')
+      .get() as Record<string, unknown> | undefined
+    const head = await readMainline(root)
+    return {
+      chunks,
+      terms,
+      mainlineRevision: state ? Number(state.mainline_revision) : null,
+      currentMainlineRevision: head.mainlineRevision,
+      current: Boolean(state) && Number(state!.mainline_revision) === head.mainlineRevision,
+    }
   } finally {
     db.close()
   }

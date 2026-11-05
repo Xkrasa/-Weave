@@ -17,6 +17,7 @@ export interface AuthorSample {
   id: string
   text: string
   source: string
+  tags: string[]
 }
 
 const DEFAULT_STYLE: StyleConstitution = {
@@ -48,9 +49,20 @@ export async function loadAuthorSamples(root: string, limit = 3): Promise<Author
   const names = (await listFiles(dir)).filter(name => name.endsWith('.md') || name.endsWith('.txt')).slice(0, limit)
   const samples: AuthorSample[] = []
   for (const name of names) {
-    const text = await readTextIfExists(path.join(dir, name))
-    if (!text?.trim()) continue
-    samples.push({ id: name.replace(/\.(md|txt)$/i, ''), text: text.trim(), source: name })
+    const raw = await readTextIfExists(path.join(dir, name))
+    if (!raw?.trim()) continue
+    const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/.exec(raw)
+    const tags = (frontmatter?.[1].match(/^(?:tags|标签):\s*(.+)$/im)?.[1] ?? '')
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean)
+    const text = frontmatter ? raw.slice(frontmatter[0].length) : raw
+    samples.push({
+      id: name.replace(/\.(md|txt)$/i, ''),
+      text: text.trim(),
+      source: name,
+      tags,
+    })
   }
   return samples
 }

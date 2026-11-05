@@ -2220,6 +2220,9 @@ test('P2.1 routes methods, checks style and rewrites only the target paragraph',
     assert.ok(runRecord.methodSelection.modules.some(item => item.id === 'structure-causality'))
     assert.ok(runRecord.methodSelection.reasons.length > 0)
     assert.ok(runRecord.methodSelection.estimatedTokens > 0)
+    const history = await runCli(dir, ['method', 'history', '1', '--json'])
+    assert.equal(history.code, 0, history.stderr)
+    assert.ok(parseJson<{ records: unknown[] }>(history.stdout).records.length > 0)
     const routed = await runCli(dir, ['method', 'route', '1', '--json'])
     assert.equal(routed.code, 0, routed.stderr)
     const selection = parseJson<{ modules: Array<{ id: string }>; estimatedTokens: number }>(routed.stdout)
@@ -2232,6 +2235,9 @@ test('P2.1 routes methods, checks style and rewrites only the target paragraph',
     const shortForm = await runCli(dir, ['method', 'route', '1', '--platform', 'short-form', '--json'])
     assert.equal(shortForm.code, 0, shortForm.stderr)
     assert.equal(parseJson<{ modules: unknown[] }>(shortForm.stdout).modules.length, 0)
+    const qidian = await runCli(dir, ['method', 'route', '1', '--platform', 'qidian', '--json'])
+    assert.equal(qidian.code, 0, qidian.stderr)
+    assert.ok(parseJson<{ modules: unknown[] }>(qidian.stdout).modules.length > 0)
     await mkdir(path.join(dir, 'methods'), { recursive: true })
     await writeFile(path.join(dir, 'methods', 'fixture.md'), [
       'version: 2',
@@ -2271,7 +2277,10 @@ test('P2.1 routes methods, checks style and rewrites only the target paragraph',
     )
 
     await mkdir(path.join(dir, 'canon', 'samples'), { recursive: true })
-    await writeFile(path.join(dir, 'canon', 'samples', 'voice.md'), '林岚把账本按在桌上。\n')
+    await writeFile(
+      path.join(dir, 'canon', 'samples', 'voice.md'),
+      '---\ntags: 对话,克制\n---\n林岚把账本按在桌上。\n',
+    )
     await writeFile(path.join(dir, 'canon', 'style.json'), `${JSON.stringify({
       sentenceLength: { min: 5, max: 10 },
       dialogueRatio: { min: 0, max: 1 },
@@ -2279,7 +2288,9 @@ test('P2.1 routes methods, checks style and rewrites only the target paragraph',
     }, null, 2)}\n`)
     const samples = await runCli(dir, ['style', 'samples', '--json'])
     assert.equal(samples.code, 0, samples.stderr)
-    assert.equal(parseJson<{ samples: unknown[] }>(samples.stdout).samples.length, 1)
+    const samplePayload = parseJson<{ samples: Array<{ tags: string[] }> }>(samples.stdout)
+    assert.equal(samplePayload.samples.length, 1)
+    assert.deepEqual(samplePayload.samples[0]?.tags, ['对话', '克制'])
 
     const style = await runCli(dir, ['style', 'check', '1', '--json'])
     assert.equal(style.code, 0, style.stderr)
@@ -2329,6 +2340,11 @@ test('P2.2 indexes Chinese chunks, searches short terms, deconstructs and export
     const rebuiltAgain = await runCli(dir, ['index', 'rebuild', '--json'])
     assert.equal(rebuiltAgain.code, 0, rebuiltAgain.stderr)
     assert.deepEqual(parseJson<{ chunks: number; terms: number }>(rebuiltAgain.stdout), firstIndex)
+    const indexStatus = await runCli(dir, ['index', 'status', '--json'])
+    assert.equal(indexStatus.code, 0, indexStatus.stderr)
+    const indexStatusPayload = parseJson<{ current: boolean; chunks: number }>(indexStatus.stdout)
+    assert.equal(indexStatusPayload.current, true)
+    assert.equal(indexStatusPayload.chunks, firstIndex.chunks)
 
     const search = await runCli(dir, ['search', '账本', '--json'])
     assert.equal(search.code, 0, search.stderr)
@@ -2354,6 +2370,10 @@ test('P2.2 indexes Chinese chunks, searches short terms, deconstructs and export
         'ch-2-001': [1, 0],
       },
     })}\n`)
+    const reranked = await runCli(dir, ['search', '账本', '--rerank', '--json'])
+    assert.equal(reranked.code, 0, reranked.stderr)
+    assert.ok(parseJson<{ results: unknown[] }>(reranked.stdout).results.length > 0)
+
     const hybrid = await runCli(dir, ['search', '账本', '--vectors', 'vectors.json', '--json'])
     assert.equal(hybrid.code, 0, hybrid.stderr)
     const hybridPayload = parseJson<{ fusion: string; results: Array<{ chunkId: string }> }>(hybrid.stdout)
