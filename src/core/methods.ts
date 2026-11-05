@@ -1,7 +1,7 @@
 import path from 'node:path'
 import type { ChapterContract } from './types.ts'
 import type { ReviewReport } from './stage-types.ts'
-import { listFiles, readTextIfExists } from './io.ts'
+import { listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
 import { loadContract } from './contract.ts'
 import { loadStage, readDraft } from './stages.ts'
 import { projectPaths } from './project.ts'
@@ -91,17 +91,24 @@ export async function loadMethods(root: string): Promise<MethodModule[]> {
     const parsed = parseMethodMarkdown(name.replace(/\.md$/, ''), text)
     if (parsed) byId.set(parsed.id, parsed)
   }
-  return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id))
+  const disabled = await readJsonIfExists<string[] | { ids?: string[] }>(path.join(dir, 'disabled.json'))
+  const disabledIds = new Set(Array.isArray(disabled) ? disabled : disabled?.ids ?? [])
+  return [...byId.values()]
+    .filter(module => !disabledIds.has(module.id))
+    .sort((a, b) => a.id.localeCompare(b.id))
 }
 
 export async function selectMethods(
   root: string,
   chapter: number,
-  options: { maxTokens?: number } = {},
+  options: { maxTokens?: number; purpose?: 'write' | 'rewrite' | 'route' } = {},
 ): Promise<MethodSelection> {
   const contract = await loadContract(root, chapter)
   const review = await loadStage<ReviewReport>(root, 'review', chapter)
-  const modules = await loadMethods(root)
+  const purpose = options.purpose ?? 'write'
+  const modules = (await loadMethods(root)).filter(module =>
+    purpose === 'rewrite' || purpose === 'route' || !/revision/.test(module.scope.toLowerCase()),
+  )
   const text = [
     contract.goal,
     contract.obstacle ?? '',
@@ -127,6 +134,10 @@ export async function selectMethods(
     const estimated = Math.ceil(scores.reduce((sum, item) => sum + methodText(item.module).length, 0) / 1.6)
     if (estimated <= maxTokens) break
     scores.pop()
+  }
+  if (scores.length === 1
+    && Math.ceil(methodText(scores[0]!.module).length / 1.6) > maxTokens) {
+    scores.length = 0
   }
   return {
     modules: scores.map(item => ({

@@ -190,7 +190,7 @@ export async function rewriteParagraph(
   const paragraphs = paragraphsOf(draft)
   const target = paragraphs.find(paragraph => paragraph.paragraphId === paragraphId)
   if (!target) throw validationError(`未找到段落：${paragraphId}`)
-  const selection = await selectMethods(root, chapter)
+  const selection = await selectMethods(root, chapter, { purpose: 'rewrite' })
   const library = await loadMethods(root)
   const methods = library.filter(module => selection.modules.some(item => item.id === module.id))
   const contract = await loadContract(root, chapter)

@@ -5,6 +5,8 @@ import { conflictError } from './errors.ts'
 export interface DeconstructReport {
   source: string
   format: 'txt' | 'md'
+  provenance: 'reference'
+  savedPath?: string
   requiresManualSplit: boolean
   chapters: Array<{
     index: number
@@ -28,12 +30,15 @@ export interface DeconstructReport {
   notice: string
 }
 
-export async function deconstructFile(file: string): Promise<DeconstructReport> {
+export async function deconstructFile(
+  file: string,
+  options: { splitPattern?: string } = {},
+): Promise<DeconstructReport> {
   const ext = path.extname(file).toLowerCase()
   if (ext === '.epub') throw conflictError('当前版本暂不支持 EPUB 拆书；请先转为 txt 或 md')
   if (ext !== '.txt' && ext !== '.md') throw conflictError('拆书只支持 txt 或 md 文件')
   const text = (await readFile(file, 'utf8')).replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n')
-  const chapters = splitChapters(text, ext === '.md')
+  const chapters = splitChapters(text, ext === '.md', options.splitPattern)
   const reportChapters = chapters.map((chapter, index) => {
     const paragraphs = chapter.text.split(/\n{2,}/).filter(item => item.trim())
     const dialogue = (chapter.text.match(/“[^”]*”|"[^"]*"/g) ?? []).join('')
@@ -57,6 +62,7 @@ export async function deconstructFile(file: string): Promise<DeconstructReport> 
   return {
     source: path.basename(file),
     format: ext === '.md' ? 'md' : 'txt',
+    provenance: 'reference',
     requiresManualSplit: chapters.length <= 1,
     chapters: reportChapters,
     totals: {
@@ -71,12 +77,18 @@ export async function deconstructFile(file: string): Promise<DeconstructReport> 
   }
 }
 
-function splitChapters(text: string, markdown: boolean): Array<{ title: string; text: string }> {
+function splitChapters(
+  text: string,
+  markdown: boolean,
+  splitPattern?: string,
+): Array<{ title: string; text: string }> {
   const lines = text.split('\n')
   const chapters: Array<{ title: string; text: string[] }> = []
   let current: { title: string; text: string[] } | null = null
+  const custom = splitPattern ? new RegExp(splitPattern, 'm') : null
   for (const line of lines) {
-    const title = chapterTitle(line, markdown)
+    const customTitle = custom?.test(line.trim()) ? line.trim().slice(0, 80) : null
+    const title = customTitle ?? chapterTitle(line, markdown)
     if (title) {
       if (current) chapters.push(current)
       current = { title, text: [] }

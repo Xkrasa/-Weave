@@ -3,6 +3,7 @@ import { projectPaths } from './project.ts'
 import { readCommit, readMainline, finalPath } from './ledger.ts'
 import { readTextIfExists } from './io.ts'
 import { conflictError } from './errors.ts'
+import { loadContract } from './contract.ts'
 
 export interface SearchResult {
   chunkId: string
@@ -69,6 +70,8 @@ export async function rebuildSearchIndex(root: string): Promise<{ chunks: number
       if (!commit) continue
       const text = await readTextIfExists(finalPath(root, chapter))
       if (!text) continue
+      const contract = await loadContract(root, chapter).catch(() => null)
+      const storyline = contract?.threads.join(',') ?? ''
       const paragraphs = paragraphsWithOffsets(text)
       for (const paragraph of paragraphs) {
         const chunkId = `ch-${chapter}-${String(paragraph.index).padStart(3, '0')}`
@@ -96,7 +99,7 @@ export async function rebuildSearchIndex(root: string): Promise<{ chunks: number
           paragraph.startByte,
           paragraph.endByte,
           [...new Set(entities)].join(','),
-          '',
+          storyline,
           commitId,
           commit.contentHash,
           tokens.length,
@@ -121,7 +124,7 @@ export async function rebuildSearchIndex(root: string): Promise<{ chunks: number
 export async function searchBook(
   root: string,
   query: string,
-  options: { chapter?: number; entity?: string; limit?: number } = {},
+  options: { chapter?: number; entity?: string; storyline?: string; limit?: number } = {},
 ): Promise<{ query: string; results: SearchResult[]; fallback: boolean }> {
   if (!query.trim()) throw conflictError('搜索词不能为空')
   const db = open(root)
@@ -138,14 +141,16 @@ export async function searchBook(
     if (totalDocs === 0) throw conflictError('检索索引为空；请先执行 weave index rebuild')
     const filterChapter = options.chapter
     const filterEntity = options.entity
+    const filterStoryline = options.storyline
+    const matches = (row: Record<string, unknown>): boolean =>
+      (filterChapter === undefined || Number(row.chapter) === filterChapter)
+      && (!filterEntity || String(row.entities).split(',').includes(filterEntity))
+      && (!filterStoryline || String(row.storyline).split(',').includes(filterStoryline))
     const queryTerms = tokenize(query)
     const fallback = query.length <= 1 || queryTerms.length === 0
     if (!fallback) {
       const rows = db.prepare('SELECT * FROM search_chunks').all() as Array<Record<string, unknown>>
-      const filtered = rows.filter(row =>
-        (filterChapter === undefined || Number(row.chapter) === filterChapter)
-        && (!filterEntity || String(row.entities).split(',').includes(filterEntity)),
-      )
+      const filtered = rows.filter(matches)
       const df = new Map<string, number>()
       for (const term of queryTerms) {
         const count = db.prepare('SELECT COUNT(DISTINCT chunk_id) AS count FROM search_terms WHERE term = ?')
@@ -177,8 +182,7 @@ export async function searchBook(
     const results = rows
       .filter(row =>
         String(row.text).includes(query)
-        && (filterChapter === undefined || Number(row.chapter) === filterChapter)
-        && (!filterEntity || String(row.entities).split(',').includes(filterEntity)),
+        && matches(row),
       )
       .sort((a, b) => Number(a.chapter) - Number(b.chapter) || Number(a.paragraph) - Number(b.paragraph))
       .slice(0, options.limit ?? 8)

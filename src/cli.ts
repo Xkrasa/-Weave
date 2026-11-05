@@ -46,6 +46,7 @@ import { loadMethods, selectMethods, styleCheck } from './core/methods.ts'
 import { loadAuthorSamples } from './core/style.ts'
 import { rebuildSearchIndex, readSearchChunk, searchBook } from './core/search.ts'
 import { deconstructFile } from './core/deconstruct.ts'
+import { atomicWriteJson, ensureDir } from './core/io.ts'
 import {
   checkKnowledge,
   collectLedgerSources,
@@ -72,7 +73,7 @@ interface Parsed {
   flags: Record<string, string | true>
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save'])
 let eventStreamStarted = false
 
 async function main(): Promise<number> {
@@ -109,7 +110,7 @@ async function main(): Promise<number> {
     case 'index':
       return commandIndex(root, parsed, json)
     case 'deconstruct':
-      return commandDeconstruct(parsed, json)
+      return commandDeconstruct(root, parsed, json)
     case 'rewrite':
       return commandRewrite(root, parsed, json)
     case 'method':
@@ -329,6 +330,7 @@ async function commandSearch(root: string, parsed: Parsed, json: boolean): Promi
   const result = await searchBook(root, query, {
     chapter: optionalNumber(parsed, 'chapter'),
     entity: optionalString(parsed, 'entity'),
+    storyline: optionalString(parsed, 'storyline'),
     limit: optionalNumber(parsed, 'limit'),
   })
   if (json) outputJson(result)
@@ -358,16 +360,27 @@ async function commandIndex(root: string, parsed: Parsed, json: boolean): Promis
   return 0
 }
 
-async function commandDeconstruct(parsed: Parsed, json: boolean): Promise<number> {
+async function commandDeconstruct(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const file = parsed.positionals[0]
-  if (!file) throw usageError('用法：weave deconstruct <file>')
-  const report = await deconstructFile(path.resolve(file))
+  if (!file) throw usageError('用法：weave deconstruct <file> [--split-pattern <regex>] [--save]')
+  const source = path.resolve(file)
+  const report = await deconstructFile(source, {
+    splitPattern: optionalString(parsed, 'split-pattern'),
+  })
+  if (parsed.flags.save === true) {
+    const dir = path.join(projectPaths(root).references, 'deconstruct')
+    await ensureDir(dir)
+    const target = path.join(dir, `${path.basename(source, path.extname(source))}.json`)
+    await atomicWriteJson(target, report)
+    report.savedPath = target
+  }
   if (json) outputJson(report)
   else {
     console.log(`拆书报告：${report.source}，${report.totals.chapters} 章`)
     for (const chapter of report.chapters) {
       console.log(`- ${chapter.index}. ${chapter.title}（${chapter.characters} 字，${chapter.structureTags.join('、')}）`)
     }
+    if (report.savedPath) console.log(`已保存：${report.savedPath}`)
   }
   return 0
 }
@@ -418,6 +431,7 @@ async function commandMethod(root: string, parsed: Parsed, json: boolean): Promi
     const chapter = parseChapter(parsed.positionals[1])
     const selection = await selectMethods(root, chapter, {
       maxTokens: optionalNumber(parsed, 'max-tokens'),
+      purpose: 'route',
     })
     if (json) outputJson(selection)
     else {
@@ -1027,10 +1041,10 @@ function printHelp(): void {
   weave rewrite <chapter> --paragraph <id> --goal <text>
   weave method list|show <id>|route <chapter>
   weave style check <chapter>|samples
-  weave search <query> [--chapter <n>] [--entity <id>] [--limit <n>]
+  weave search <query> [--chapter <n>] [--entity <id>] [--storyline <id>] [--limit <n>]
   weave chunk <chunkId>
   weave index rebuild
-  weave deconstruct <file>
+  weave deconstruct <file> [--split-pattern <regex>] [--save]
   weave loops list|show <loopId>
   weave timeline series
   weave check <chapter>

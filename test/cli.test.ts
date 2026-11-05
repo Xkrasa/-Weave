@@ -2218,6 +2218,17 @@ test('P2.1 routes methods, checks style and rewrites only the target paragraph',
     assert.ok(selection.modules.length <= 3)
     assert.ok(selection.modules.length > 0)
     assert.ok(selection.estimatedTokens > 0)
+    const tight = await runCli(dir, ['method', 'route', '1', '--max-tokens', '1', '--json'])
+    assert.equal(tight.code, 0, tight.stderr)
+    assert.equal(parseJson<{ modules: unknown[] }>(tight.stdout).modules.length, 0)
+    await mkdir(path.join(dir, 'methods'), { recursive: true })
+    await writeFile(path.join(dir, 'methods', 'disabled.json'), '["structure-causality"]\n')
+    const afterDisable = await runCli(dir, ['method', 'list', '--json'])
+    assert.equal(afterDisable.code, 0, afterDisable.stderr)
+    assert.equal(
+      parseJson<{ modules: Array<{ id: string }> }>(afterDisable.stdout).modules.some(item => item.id === 'structure-causality'),
+      false,
+    )
 
     await mkdir(path.join(dir, 'canon', 'samples'), { recursive: true })
     await writeFile(path.join(dir, 'canon', 'samples', 'voice.md'), '林岚把账本按在桌上。\n')
@@ -2300,13 +2311,26 @@ test('P2.2 indexes Chinese chunks, searches short terms, deconstructs and export
     assert.equal(filtered.code, 0, filtered.stderr)
     assert.ok(parseJson<{ results: Array<{ chapter: number }> }>(filtered.stdout).results.every(item => item.chapter === 2))
 
+    const storyline = await runCli(dir, ['search', '账本', '--storyline', '账本主线', '--json'])
+    assert.equal(storyline.code, 0, storyline.stderr)
+    assert.ok(parseJson<{ results: unknown[] }>(storyline.stdout).results.length > 0)
+
     const sample = path.join(dir, 'sample.txt')
     await writeFile(sample, '第一章 起点\n林岚来到码头。\n\n第二章 账本\n她翻开账本。\n')
-    const deconstructed = await runCli(dir, ['deconstruct', 'sample.txt', '--json'])
+    const deconstructed = await runCli(dir, ['deconstruct', 'sample.txt', '--save', '--json'])
     assert.equal(deconstructed.code, 0, deconstructed.stderr)
-    const report = parseJson<{ totals: { chapters: number }; chapters: Array<{ openingExcerpt: string }> }>(deconstructed.stdout)
+    const report = parseJson<{
+      provenance: string
+      savedPath?: string
+      totals: { chapters: number }
+      chapters: Array<{ openingExcerpt: string; sceneFunctions: string[]; repeatedPatterns: string[] }>
+    }>(deconstructed.stdout)
     assert.equal(report.totals.chapters, 2)
+    assert.equal(report.provenance, 'reference')
+    assert.ok(report.savedPath)
     assert.ok(report.chapters.every(item => [...item.openingExcerpt].length <= 80))
+    assert.ok(report.chapters.every(item => Array.isArray(item.sceneFunctions)))
+    assert.ok(report.chapters.every(item => Array.isArray(item.repeatedPatterns)))
 
     const exported = await runCli(dir, ['export', '--format', 'merged', '--platform', 'qidian', '--json'])
     assert.equal(exported.code, 0, exported.stderr)
