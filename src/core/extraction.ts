@@ -1,4 +1,4 @@
-import type { BeliefAttitude, ChapterContract, LedgerBelief, LedgerFact, ModelConfig } from './types.ts'
+import type { BeliefAttitude, ChapterContract, LedgerBelief, LedgerFact, LoopChange, ModelConfig } from './types.ts'
 import type {
   EvidenceSpan,
   ExtractedRecord,
@@ -84,6 +84,15 @@ export async function runExtraction(
         confidence: 0.9,
         validFromChapter: chapter,
         validToChapter: null,
+        evidence: [{ quote: '正文中的逐字引文', occurrence: 1 }],
+      }],
+      loops: [{
+        loopId: 'loop-1',
+        kind: 'plant',
+        summary: '账本缺页的来源',
+        targetFromChapter: chapter + 2,
+        targetToChapter: chapter + 5,
+        relatedEntities: ['人物名'],
         evidence: [{ quote: '正文中的逐字引文', occurrence: 1 }],
       }],
     }, null, 2),
@@ -298,6 +307,46 @@ export async function runExtraction(
     seenBeliefIds.add(beliefId)
   })
 
+  const loops: LoopChange[] = []
+  const loopsRaw = Array.isArray(raw.loops) ? raw.loops : []
+  loopsRaw.forEach((item, index) => {
+    const loopRaw = objectOrNull(item)
+    if (!loopRaw) {
+      rejected.push({ reason: '伏笔变化不是对象', raw: item })
+      return
+    }
+    const loopId = typeof loopRaw.loopId === 'string' && loopRaw.loopId.trim()
+      ? loopRaw.loopId.trim()
+      : `loop-${chapter}-${index + 1}`
+    const kind = loopRaw.kind
+    if (kind !== 'plant' && kind !== 'advance' && kind !== 'payoff' && kind !== 'abandon') {
+      rejected.push({ recordId: loopId, reason: '伏笔变化 kind 非法', raw: item })
+      return
+    }
+    const summary = typeof loopRaw.summary === 'string' ? loopRaw.summary.trim() : ''
+    if (!summary) {
+      rejected.push({ recordId: loopId, reason: '伏笔变化缺少 summary', raw: item })
+      return
+    }
+    const before = rejected.length
+    const evidence = resolveEvidenceList(draft, chapter, loopRaw.evidence, loopId, rejected)
+    if (evidence.length === 0 || rejected.length > before) {
+      rejected.push({ recordId: loopId, reason: '伏笔变化存在无效证据', raw: item })
+      return
+    }
+    loops.push({
+      loopId,
+      kind,
+      chapter,
+      summary,
+      targetFromChapter: typeof loopRaw.targetFromChapter === 'number' ? loopRaw.targetFromChapter : undefined,
+      targetToChapter: typeof loopRaw.targetToChapter === 'number' ? loopRaw.targetToChapter : undefined,
+      relatedEntities: stringArray(loopRaw.relatedEntities),
+      reason: typeof loopRaw.reason === 'string' ? loopRaw.reason : undefined,
+      evidence,
+    })
+  })
+
   if (records.length === 0 && !noEventsReason) {
     rejected.push({ reason: '没有抽取到记录，且未提供 noEventsReason', raw: null })
   }
@@ -313,6 +362,7 @@ export async function runExtraction(
     timeline,
     facts,
     beliefs,
+    loops,
     rejected,
     model,
     usage: result.usage,

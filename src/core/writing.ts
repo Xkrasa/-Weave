@@ -46,6 +46,11 @@ import {
   markProjectionFailed,
   replayProjectionFrom,
 } from './projections.ts'
+import {
+  assertLedgerProjectionCurrent,
+  markLedgerProjectionFailed,
+  replayLedgerProjectionFrom,
+} from './ledger-projection.ts'
 import { conflictError, modelError, reviewBlockedError, validationError, WeaveError } from './errors.ts'
 import { loadStage, requireStage } from './stages.ts'
 import type {
@@ -54,7 +59,14 @@ import type {
   ExtractionReport,
   ReviewReport,
 } from './stage-types.ts'
-import { assertValidLedger, buildLedgerDelta, collectLedger } from './story-ledger.ts'
+import {
+  applyLoopChanges,
+  assertValidLedger,
+  buildLedgerDelta,
+  checkKnowledge,
+  collectLedger,
+  collectLoopState,
+} from './story-ledger.ts'
 
 export interface WriteResult {
   chapter: number
@@ -75,6 +87,10 @@ export async function writeChapter(
   await requirePassingContractCheck(root, contract)
   await assertFinalIntegrity(root)
   await assertProjectionCurrent(root)
+  await assertLedgerProjectionCurrent(root)
+  const registry = await loadCharacters(root)
+  const knowledge = await checkKnowledge(root, chapter, contract, registry)
+  if (!knowledge.ok) throw validationError('章节合同要求的信息边界未满足', knowledge.errors)
   const modelConfig = await loadModelConfig(root)
   const meta = await loadDraftMeta(root, chapter)
   const current = await currentCommit(root, chapter)
@@ -200,6 +216,7 @@ export interface FinalizeResult {
   mainlineRevision: number
   projection: ProjectionState | null
   projectionFailed: boolean
+  ledgerProjectionFailed: boolean
   impact: ImpactReport | null
   draftEdited: boolean
 }
@@ -210,6 +227,7 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
   await requirePassingContractCheck(root, contract)
   await assertNoPendingImpacts(root)
   await assertProjectionCurrent(root)
+  await assertLedgerProjectionCurrent(root)
 
   const draftFile = draftPath(root, chapter)
   const rawDraft = await readTextIfExists(draftFile)
@@ -272,6 +290,11 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
       usedBeliefIds: new Set(priorChapters.beliefs.map(belief => belief.beliefId)),
       contract,
     })
+    const knowledge = await checkKnowledge(root, chapter, contract, registry, delta.beliefs)
+    if (!knowledge.ok) throw validationError('定稿时信息边界校验失败', knowledge.errors)
+    const previousLoops = await collectLoopState(root, chapter - 1)
+    const loopCheck = applyLoopChanges(previousLoops.loops, delta.loops ?? [], chapter)
+    if (loopCheck.errors.length > 0) throw validationError('定稿时伏笔账本校验失败', loopCheck.errors)
     ledger = delta
     commitEvidence = [
       ...delta.events.flatMap(event => event.evidence),
@@ -324,6 +347,15 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     projectionFailed = true
     projection = await markProjectionFailed(root, error instanceof Error ? error.message : String(error))
   }
+  let ledgerProjectionFailed = false
+  if (commit.schemaVersion === 3) {
+    try {
+      await replayLedgerProjectionFrom(root, chapter, revision > 1)
+    } catch {
+      ledgerProjectionFailed = true
+      await markLedgerProjectionFailed(root)
+    }
+  }
 
   let impact: ImpactReport | null = null
   if (revision > 1) {
@@ -344,6 +376,7 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     mainlineRevision: head.mainlineRevision,
     projection,
     projectionFailed,
+    ledgerProjectionFailed,
     impact,
     draftEdited,
   }

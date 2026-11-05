@@ -137,9 +137,39 @@ export interface LedgerEvent {
   chapter: number
   summary: string
   storyTime?: string
+  storyDay?: number
+  storyDate?: string
   participants: string[]
   location?: string
   causedBy: string[]
+  evidence: EvidenceSpan[]
+}
+
+export type OpenLoopStatus = 'planted' | 'active' | 'advanced' | 'paid_off' | 'abandoned'
+
+export interface LoopChange {
+  loopId: string
+  kind: 'plant' | 'advance' | 'payoff' | 'abandon'
+  chapter: number
+  summary: string
+  targetFromChapter?: number
+  targetToChapter?: number
+  relatedEntities: string[]
+  reason?: string
+  evidence: EvidenceSpan[]
+}
+
+export interface OpenLoop {
+  loopId: string
+  summary: string
+  status: OpenLoopStatus
+  plantedChapter: number
+  lastAdvancedChapter: number
+  targetFromChapter?: number
+  targetToChapter?: number
+  paidOffChapter?: number
+  relatedEntities: string[]
+  abandonReason?: string
   evidence: EvidenceSpan[]
 }
 
@@ -185,6 +215,7 @@ export interface LedgerDelta {
   events: LedgerEvent[]
   facts: LedgerFact[]
   beliefs: LedgerBelief[]
+  loops?: LoopChange[]
 }
 
 export interface CommitRecord {
@@ -205,6 +236,7 @@ export interface CommitRecord {
   eventCount?: number
   factCount?: number
   beliefCount?: number
+  loopCount?: number
   ledger?: LedgerDelta
   evidence: EvidenceSpan[]
 }
@@ -220,6 +252,7 @@ export interface ImpactItem {
   targetChapter: number
   level: 'confirmed' | 'likely' | 'unknown'
   reason: string
+  dependencies?: string[]
   status: 'pending' | 'accepted' | 'revision-planned' | 'deferred'
   decidedAt?: string
 }

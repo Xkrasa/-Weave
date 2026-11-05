@@ -15,6 +15,13 @@ import {
   rebuildProjection,
   replayProjectionFrom,
 } from './projections.ts'
+import {
+  assertLedgerProjectionCurrent,
+  rebuildLedgerProjection,
+  replayLedgerProjectionFrom,
+  readLedgerProjectionState,
+  type LedgerProjectionState,
+} from './ledger-projection.ts'
 import { conflictError } from './errors.ts'
 
 export interface ChapterStatus {
@@ -36,6 +43,7 @@ export interface ProjectStatus {
   chapters: ChapterStatus[]
   drafts: number[]
   projection: ProjectionState | null
+  ledgerProjection: LedgerProjectionState | null
   impacts: Array<{ chapter: number; pending: number; targets: number[] }>
   pendingImpacts: number
 }
@@ -80,6 +88,7 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
     chapters,
     drafts: drafts.sort((a, b) => a - b),
     projection: await readProjectionState(root),
+    ledgerProjection: await readLedgerProjectionState(root),
     impacts,
     pendingImpacts: impacts.reduce((sum, item) => sum + item.pending, 0),
   }
@@ -129,6 +138,21 @@ export async function doctor(root: string): Promise<DoctorResult> {
   }
 
   const commits = await listCommits(root)
+  const ledgerState = await readLedgerProjectionState(root)
+  if (commits.some(commit => commit.schemaVersion === 3)) {
+    if (!ledgerState) {
+      errors.push('存在 v3 账本提交但账本投影缺失；请执行 weave rebuild --projection ledger')
+    } else {
+      if (ledgerState.mainlineRevision !== head.mainlineRevision) {
+        errors.push('账本投影主线版本与当前主线不一致')
+      }
+      if (ledgerState.status !== 'current') errors.push(`账本投影状态为 ${ledgerState.status}`)
+      const maxChapter = Math.max(0, ...selectedChapters)
+      if (ledgerState.appliedThrough < maxChapter) {
+        errors.push('账本投影未应用到最新章节')
+      }
+    }
+  }
   for (const commit of commits) {
     checkedCommits += 1
     const version = path.join(root, commit.contentPath)
@@ -170,6 +194,9 @@ export async function doctor(root: string): Promise<DoctorResult> {
       if (commit.beliefCount !== ledger.beliefs.length) {
         errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的 beliefCount 不一致`)
       }
+      if ((commit.loopCount ?? 0) !== (ledger.loops?.length ?? 0)) {
+        errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的 loopCount 不一致`)
+      }
     }
   }
 
@@ -209,21 +236,45 @@ export async function doctor(root: string): Promise<DoctorResult> {
 }
 
 export interface RebuildResult {
-  projection: ProjectionState
+  projection: ProjectionState | null
+  ledgerProjection: LedgerProjectionState | null
   chapters: number
   replayBaseChapter: number | null
 }
 
-export async function rebuildBook(root: string, force = false): Promise<RebuildResult> {
+export async function rebuildBook(
+  root: string,
+  options: {
+    force?: boolean
+    projection?: 'all' | 'content' | 'ledger'
+    fromChapter?: number
+  } = {},
+): Promise<RebuildResult> {
+  const { force = false, projection = 'all', fromChapter } = options
   if (!force) await assertFinalIntegrity(root)
-  const state = await readProjectionState(root)
-  const projection = !force && state?.invalidFrom && state.status !== 'current'
-    ? await replayProjectionFrom(root, state.invalidFrom, { materialize: true })
-    : await rebuildProjection(root, { materialize: true })
+  let contentProjection: ProjectionState | null = null
+  let ledgerProjection: LedgerProjectionState | null = null
+  if (projection === 'all' || projection === 'content') {
+    const state = await readProjectionState(root)
+    contentProjection = fromChapter && fromChapter > 1
+      ? await replayProjectionFrom(root, fromChapter, { materialize: true })
+      : !force && state?.invalidFrom && state.status !== 'current'
+        ? await replayProjectionFrom(root, state.invalidFrom, { materialize: true })
+        : await rebuildProjection(root, { materialize: true })
+  }
+  if (projection === 'all' || projection === 'ledger') {
+    const state = await readLedgerProjectionState(root)
+    ledgerProjection = fromChapter
+      ? await rebuildLedgerProjection(root, { fromChapter })
+      : !force && state?.invalidFrom && state.status !== 'current'
+        ? await replayLedgerProjectionFrom(root, state.invalidFrom)
+        : await rebuildLedgerProjection(root)
+  }
   return {
-    projection,
-    chapters: projection.appliedThrough,
-    replayBaseChapter: projection.replayBaseChapter,
+    projection: contentProjection,
+    ledgerProjection,
+    chapters: contentProjection?.appliedThrough ?? ledgerProjection?.appliedThrough ?? 0,
+    replayBaseChapter: contentProjection?.replayBaseChapter ?? ledgerProjection?.replayBaseChapter ?? null,
   }
 }
 
@@ -238,6 +289,7 @@ export async function exportBook(root: string, format: ExportFormat): Promise<Ex
   const project = await loadProject(root)
   await assertFinalIntegrity(root)
   await assertProjectionCurrent(root)
+  await assertLedgerProjectionCurrent(root)
   const head = await readMainline(root)
   const chapters = Object.keys(head.selectedCommitByChapter).map(Number).sort((a, b) => a - b)
   if (chapters.length === 0) throw conflictError('还没有已定稿章节可以导出')

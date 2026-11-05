@@ -124,6 +124,7 @@ export function buildCommit(input: {
     body.eventCount = input.ledger.events.length
     body.factCount = input.ledger.facts.length
     body.beliefCount = input.ledger.beliefs.length
+    body.loopCount = input.ledger.loops?.length ?? 0
   }
   body.commitId = objectHash({
     schemaVersion,

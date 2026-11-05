@@ -6,11 +6,15 @@ import type {
   LedgerDelta,
   LedgerEvent,
   LedgerFact,
+  LoopChange,
+  OpenLoop,
 } from './types.ts'
 import type { ExtractionReport } from './stage-types.ts'
 import { readCommit, readMainline } from './ledger.ts'
 import { validationError } from './errors.ts'
 import { objectHash } from './hash.ts'
+import { validateTimeline } from './timeline.ts'
+import type { TimelineEvent } from './stage-types.ts'
 
 export interface LedgerValidationContext {
   priorFacts?: Map<string, LedgerFact>
@@ -30,12 +34,18 @@ export function buildLedgerDelta(
   extraction: ExtractionReport,
   contract?: ChapterContract,
 ): LedgerDelta {
+  const timelineByRecord = new Map(
+    (extraction.timeline ?? [])
+      .filter(event => event.recordId)
+      .map(event => [event.recordId!, event]),
+  )
   const events: LedgerEvent[] = extraction.records.map(record => {
     const causedBy = Array.isArray(record.payload.causedBy)
       ? record.payload.causedBy
         .filter((value): value is string => typeof value === 'string')
         .map(value => value.startsWith('event-') ? value : eventIdFor(chapter, value))
       : []
+    const timeline = timelineByRecord.get(record.recordId)
     return {
       eventId: eventIdFor(chapter, record.recordId),
       chapter,
@@ -44,6 +54,8 @@ export function buildLedgerDelta(
       causedBy,
       evidence: record.evidence,
       ...(record.storyTime ? { storyTime: record.storyTime } : {}),
+      ...(timeline?.dayOffset !== undefined ? { storyDay: timeline.dayOffset } : {}),
+      ...(timeline?.storyDate ? { storyDate: timeline.storyDate } : {}),
       ...(record.location ? { location: record.location } : {}),
     }
   })
@@ -58,6 +70,7 @@ export function buildLedgerDelta(
     events,
     facts: extraction.facts ?? [],
     beliefs: extraction.beliefs ?? [],
+    loops: extraction.loops ?? [],
   }
 }
 
@@ -194,6 +207,23 @@ export function validateLedgerDelta(
     }
     if (belief.evidence.length === 0) errors.push(`信念 ${belief.beliefId} 缺少证据`)
   }
+  for (const change of delta.loops ?? []) {
+    if (!change.loopId || !change.summary.trim()) {
+      errors.push('伏笔变化缺少 loopId 或 summary')
+    }
+    if (change.chapter !== chapter) errors.push(`伏笔变化 ${change.loopId} 的章节不是 ${chapter}`)
+    if (change.evidence.length === 0) errors.push(`伏笔变化 ${change.loopId} 缺少证据`)
+    if (change.kind === 'abandon' && !change.reason) {
+      errors.push(`伏笔 ${change.loopId} 的废弃缺少原因`)
+    }
+    if (
+      change.targetFromChapter !== undefined
+      && change.targetToChapter !== undefined
+      && change.targetToChapter < change.targetFromChapter
+    ) {
+      errors.push(`伏笔 ${change.loopId} 的预计兑现区间非法`)
+    }
+  }
   return errors
 }
 
@@ -255,6 +285,195 @@ export function effectiveBeliefs(beliefs: LedgerBelief[], characterId: string, c
     && belief.validFromChapter <= chapter
     && (belief.validToChapter === null || belief.validToChapter > chapter),
   )
+}
+
+export function applyLoopChanges(
+  existing: OpenLoop[],
+  changes: LoopChange[],
+  chapter: number,
+): { loops: OpenLoop[]; errors: string[]; warnings: string[] } {
+  const loops = new Map(existing.map(loop => [loop.loopId, { ...loop }]))
+  const errors: string[] = []
+  const warnings: string[] = []
+  for (const change of changes) {
+    const current = loops.get(change.loopId)
+    if (change.kind === 'plant') {
+      if (current) {
+        errors.push(`伏笔 ${change.loopId} 重复埋设`)
+        continue
+      }
+      loops.set(change.loopId, {
+        loopId: change.loopId,
+        summary: change.summary,
+        status: 'planted',
+        plantedChapter: chapter,
+        lastAdvancedChapter: chapter,
+        targetFromChapter: change.targetFromChapter,
+        targetToChapter: change.targetToChapter,
+        relatedEntities: change.relatedEntities,
+        evidence: change.evidence,
+      })
+      continue
+    }
+    if (!current) {
+      errors.push(`伏笔 ${change.loopId} 尚未埋设，不能 ${change.kind}`)
+      continue
+    }
+    if (current.status === 'paid_off' || current.status === 'abandoned') {
+      errors.push(`伏笔 ${change.loopId} 已结束，不能 ${change.kind}`)
+      continue
+    }
+    if (change.kind === 'abandon' && !change.reason) {
+      errors.push(`伏笔 ${change.loopId} 废弃缺少原因`)
+      continue
+    }
+    if (change.kind === 'payoff') {
+      current.status = 'paid_off'
+      current.paidOffChapter = chapter
+      current.lastAdvancedChapter = chapter
+      current.evidence = [...current.evidence, ...change.evidence]
+    } else if (change.kind === 'abandon') {
+      current.status = 'abandoned'
+      current.abandonReason = change.reason
+      current.evidence = [...current.evidence, ...change.evidence]
+    } else {
+      current.status = 'advanced'
+      current.lastAdvancedChapter = chapter
+      current.evidence = [...current.evidence, ...change.evidence]
+    }
+    loops.set(change.loopId, current)
+  }
+  for (const loop of loops.values()) {
+    if (
+      loop.status !== 'paid_off'
+      && loop.status !== 'abandoned'
+      && loop.targetToChapter !== undefined
+      && chapter > loop.targetToChapter
+    ) {
+      warnings.push(`伏笔 ${loop.loopId} 已超过预计兑现章节 ${loop.targetToChapter}`)
+    }
+  }
+  return { loops: [...loops.values()].sort((a, b) => a.loopId.localeCompare(b.loopId)), errors, warnings }
+}
+
+export async function collectLoopState(root: string, throughChapter?: number): Promise<{
+  loops: OpenLoop[]
+  errors: string[]
+  warnings: string[]
+}> {
+  const head = await readMainline(root)
+  let loops: OpenLoop[] = []
+  let errors: string[] = []
+  let warnings: string[] = []
+  const chapters = Object.keys(head.selectedCommitByChapter)
+    .map(Number)
+    .filter(chapter => throughChapter === undefined || chapter <= throughChapter)
+    .sort((a, b) => a - b)
+  for (const chapter of chapters) {
+    const commitId = head.selectedCommitByChapter[String(chapter)]
+    if (!commitId) continue
+    const commit = await readCommit(root, commitId)
+    if (!commit?.ledger?.loops) continue
+    const applied = applyLoopChanges(loops, commit.ledger.loops, chapter)
+    loops = applied.loops
+    errors = [...errors, ...applied.errors]
+    warnings = [...warnings, ...applied.warnings]
+  }
+  return { loops, errors, warnings }
+}
+
+export interface SeriesTimeline {
+  events: TimelineEvent[]
+  errors: string[]
+  warnings: string[]
+  passed: boolean
+}
+
+export async function seriesTimeline(
+  root: string,
+  registry: CharacterRegistry,
+  throughChapter?: number,
+): Promise<SeriesTimeline> {
+  const ledger = await collectLedger(root, throughChapter)
+  const events: TimelineEvent[] = ledger.events.map(event => ({
+    eventId: event.eventId,
+    chapter: event.chapter,
+    summary: event.summary,
+    ...(event.storyDate ? { storyDate: event.storyDate } : {}),
+    ...(event.storyDay !== undefined ? { dayOffset: event.storyDay } : {}),
+    participants: event.participants,
+    causedBy: event.causedBy,
+    type: 'main',
+    evidence: event.evidence,
+  }))
+  const check = validateTimeline(events, registry)
+  return {
+    events: check.events,
+    errors: check.errors,
+    warnings: check.warnings,
+    passed: check.passed,
+  }
+}
+
+export interface KnowledgeCheckResult {
+  ok: boolean
+  errors: Array<{ character: string; fact: string; reason: string }>
+}
+
+export async function checkKnowledge(
+  root: string,
+  chapter: number,
+  contract: ChapterContract,
+  registry: CharacterRegistry,
+  extraBeliefs: LedgerBelief[] = [],
+): Promise<KnowledgeCheckResult> {
+  const ledger = await collectLedger(root, chapter)
+  const beliefs = [...ledger.beliefs, ...extraBeliefs]
+  const errors: KnowledgeCheckResult['errors'] = []
+  const people = new Map(registry.characters.map(character => [character.name, character]))
+  for (const use of contract.knowledge ?? []) {
+    const learned = effectiveBeliefs(beliefs, use.character, chapter)
+      .some(belief => belief.proposition.includes(use.fact) || use.fact.includes(belief.proposition))
+    const staticKnown = (people.get(use.character)?.knows ?? [])
+      .some(item =>
+        (item.fact.includes(use.fact) || use.fact.includes(item.fact))
+        && item.fromChapter <= chapter,
+      )
+    if (!learned && !staticKnown) {
+      errors.push({
+        character: use.character,
+        fact: use.fact,
+        reason: `第 ${chapter} 章时人物“${use.character}”尚未获知“${use.fact}”`,
+      })
+    }
+  }
+  return { ok: errors.length === 0, errors }
+}
+
+export async function entityState(root: string, entityId: string, chapter: number): Promise<{
+  entityId: string
+  chapter: number
+  facts: LedgerFact[]
+}> {
+  const ledger = await collectLedger(root, chapter)
+  return {
+    entityId,
+    chapter,
+    facts: effectiveFacts(ledger.facts, chapter).filter(fact => fact.subject === entityId),
+  }
+}
+
+export async function knowledgeState(root: string, characterId: string, chapter: number): Promise<{
+  characterId: string
+  chapter: number
+  beliefs: LedgerBelief[]
+}> {
+  const ledger = await collectLedger(root, chapter)
+  return {
+    characterId,
+    chapter,
+    beliefs: effectiveBeliefs(ledger.beliefs, characterId, chapter),
+  }
 }
 
 export function assertValidLedger(

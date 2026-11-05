@@ -27,6 +27,7 @@ export async function createImpactReport(
       targetChapter,
       level: item.level,
       reason: item.reason,
+      dependencies: item.dependencies,
       status: 'pending',
     })
   }
@@ -48,27 +49,47 @@ export function classifyImpact(
   target: ChapterContract | null,
   targetText: string,
   targetChapter: number,
-): { level: ImpactItem['level']; reason: string } {
-  if (!target) return { level: 'unknown', reason: `第 ${targetChapter} 章合同缺失，无法建立依赖` }
+): { level: ImpactItem['level']; reason: string; dependencies: string[] } {
+  if (!target) return { level: 'unknown', reason: `第 ${targetChapter} 章合同缺失，无法建立依赖`, dependencies: [] }
   const sharedCharacters = source.characters.filter(name => target.characters.includes(name))
   if (sharedCharacters.length > 0) {
-    return { level: 'confirmed', reason: `共享人物：${sharedCharacters.join('、')}` }
+    return {
+      level: 'confirmed',
+      reason: `共享人物：${sharedCharacters.join('、')}`,
+      dependencies: sharedCharacters.map(name => `character:${name}`),
+    }
   }
   if (source.location && target.location === source.location) {
-    return { level: 'confirmed', reason: `同一地点：${source.location}` }
+    return {
+      level: 'confirmed',
+      reason: `同一地点：${source.location}`,
+      dependencies: [`location:${source.location}`],
+    }
   }
   const sharedThreads = source.threads.filter(thread => target.threads.includes(thread))
   if (sharedThreads.length > 0) {
-    return { level: 'confirmed', reason: `共同故事线：${sharedThreads.join('、')}` }
+    return {
+      level: 'confirmed',
+      reason: `共同故事线：${sharedThreads.join('、')}`,
+      dependencies: sharedThreads.map(thread => `thread:${thread}`),
+    }
   }
   const mentioned = source.characters.filter(name => name && targetText.includes(name))
   if (mentioned.length > 0) {
-    return { level: 'likely', reason: `后文提及：${mentioned.join('、')}` }
+    return {
+      level: 'likely',
+      reason: `后文提及：${mentioned.join('、')}`,
+      dependencies: mentioned.map(name => `text:${name}`),
+    }
   }
   if (source.location && targetText.includes(source.location)) {
-    return { level: 'likely', reason: `后文提及地点：${source.location}` }
+    return {
+      level: 'likely',
+      reason: `后文提及地点：${source.location}`,
+      dependencies: [`text:${source.location}`],
+    }
   }
-  return { level: 'unknown', reason: '没有可机读的依赖关系，需人工判断' }
+  return { level: 'unknown', reason: '没有可机读的依赖关系，需人工判断', dependencies: [] }
 }
 
 export async function loadImpactReport(root: string, chapter: number): Promise<ImpactReport | null> {

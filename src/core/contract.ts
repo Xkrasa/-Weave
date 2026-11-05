@@ -1,5 +1,5 @@
 import path from 'node:path'
-import type { ChapterContract, CharacterRecord, CharacterRegistry } from './types.ts'
+import type { ChapterContract, CharacterRecord, CharacterRegistry, LedgerBelief } from './types.ts'
 import { atomicWriteJson, fileHash, listFiles, readJsonIfExists } from './io.ts'
 import { objectHash } from './hash.ts'
 import { projectPaths } from './project.ts'
@@ -89,7 +89,11 @@ export async function loadCharacters(root: string): Promise<CharacterRegistry> {
   return (await readJsonIfExists<CharacterRegistry>(target)) ?? { characters: [] }
 }
 
-export function validateContract(contract: ChapterContract, registry: CharacterRegistry): ContractCheckError[] {
+export function validateContract(
+  contract: ChapterContract,
+  registry: CharacterRegistry,
+  beliefs: LedgerBelief[] = [],
+): ContractCheckError[] {
   const errors: ContractCheckError[] = []
   const requiredStrings: Array<[keyof ChapterContract, string]> = [
     ['title', 'title'],
@@ -146,13 +150,19 @@ export function validateContract(contract: ChapterContract, registry: CharacterR
       continue
     }
     const known = (character.knows ?? []).find(item => item.fact === use.fact)
-    if (!known) {
+    const learned = beliefs.some(belief =>
+      belief.characterId === use.character
+      && (belief.proposition.includes(use.fact) || use.fact.includes(belief.proposition))
+      && belief.validFromChapter <= contract.chapter
+      && (belief.validToChapter === null || belief.validToChapter > contract.chapter),
+    )
+    if (!known && !learned) {
       errors.push({
         code: 'UNKNOWN_KNOWLEDGE',
         field: 'knowledge',
         message: `人物“${use.character}”尚未获知“${use.fact}”`,
       })
-    } else if (known.fromChapter > contract.chapter) {
+    } else if (known && known.fromChapter > contract.chapter) {
       errors.push({
         code: 'FUTURE_KNOWLEDGE',
         field: 'knowledge',
@@ -210,7 +220,9 @@ export async function canonSnapshotHash(root: string): Promise<string> {
 
 export async function writeContractCheck(root: string, contract: ChapterContract): Promise<ContractCheckRecord> {
   const registry = await loadCharacters(root)
-  const errors = validateContract(contract, registry)
+  const { collectLedger } = await import('./story-ledger.ts')
+  const ledger = await collectLedger(root, contract.chapter)
+  const errors = validateContract(contract, registry, ledger.beliefs)
   const record: ContractCheckRecord = {
     contractHash: contractHash(contract),
     canonHash: await canonSnapshotHash(root),

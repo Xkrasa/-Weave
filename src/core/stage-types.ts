@@ -1,4 +1,4 @@
-import type { LedgerBelief, LedgerFact, RunUsage } from './types.ts'
+import type { LedgerBelief, LedgerFact, LoopChange, RunUsage } from './types.ts'
 
 export type StageKind = 'content-check' | 'extraction' | 'audit' | 'review' | 'timeline'
 
@@ -40,6 +40,7 @@ export interface ExtractionReport {
   timeline: TimelineEvent[]
   facts: LedgerFact[]
   beliefs: LedgerBelief[]
+  loops: LoopChange[]
   rejected: RejectedRecord[]
   model: string
   usage?: RunUsage

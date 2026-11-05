@@ -27,7 +27,19 @@ import { runContentCheck } from './core/content-check.ts'
 import { runExtraction } from './core/extraction.ts'
 import { runCoverageAudit, runTimelineReport } from './core/audit.ts'
 import { runReview } from './core/review.ts'
-import { collectLedgerSources, effectiveBeliefs, effectiveFacts } from './core/story-ledger.ts'
+import { applyWaivers, createWaivers, loadWaivers, revokeWaiver } from './core/waivers.ts'
+import {
+  checkKnowledge,
+  collectLedgerSources,
+  effectiveBeliefs,
+  effectiveFacts,
+  entityState,
+  collectLoopState,
+  knowledgeState,
+  seriesTimeline,
+} from './core/story-ledger.ts'
+import { loadCharacters } from './core/contract.ts'
+import { assertLedgerProjectionCurrent } from './core/ledger-projection.ts'
 import { draftHash, loadStage, readDraft, requireStage, saveStage } from './core/stages.ts'
 import type {
   ContentCheckReport,
@@ -41,7 +53,7 @@ interface Parsed {
   flags: Record<string, string | true>
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings'])
 let eventStreamStarted = false
 
 async function main(): Promise<number> {
@@ -67,6 +79,16 @@ async function main(): Promise<number> {
       return commandStatus(root, json)
     case 'contract':
       return commandContract(root, parsed, json)
+    case 'waive':
+      return commandWaive(root, parsed, json)
+    case 'waivers':
+      return commandWaivers(root, parsed, json)
+    case 'loops':
+      return commandLoops(root, parsed, json)
+    case 'state':
+      return commandState(root, parsed, json)
+    case 'knowledge':
+      return commandKnowledge(root, parsed, json)
     case 'ledger':
       return commandLedger(root, parsed, json)
     case 'check':
@@ -135,7 +157,8 @@ async function commandStatus(root: string, json: boolean): Promise<number> {
     for (const chapter of status.chapters) {
       console.log(`  第${chapter.chapter}章 ${chapter.title} rev-${chapter.revision} ${chapter.commitId.slice(0, 19)}…`)
     }
-    console.log(`投影：${status.projection ? `${status.projection.status} @ ${status.projection.appliedThrough}` : '未建立'}`)
+    console.log(`内容投影：${status.projection ? `${status.projection.status} @ ${status.projection.appliedThrough}` : '未建立'}`)
+    console.log(`账本投影：${status.ledgerProjection ? `${status.ledgerProjection.status} @ ${status.ledgerProjection.appliedThrough}` : '未建立'}`)
     console.log(`未处理影响：${status.pendingImpacts}`)
   }
   return 0
@@ -207,6 +230,111 @@ async function checkAllContracts(root: string, json: boolean): Promise<number> {
     for (const failure of failures) console.error(`- 第 ${failure.chapter} 章：${JSON.stringify(failure.errors)}`)
   }
   return ok ? 0 : 3
+}
+
+async function commandWaive(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const reason = requiredString(parsed, 'reason')
+  const scopeRaw = String(parsed.flags.scope ?? 'chapter')
+  if (!['chapter', 'entity', 'storyline', 'project'].includes(scopeRaw)) {
+    throw usageError('--scope 必须是 chapter、entity、storyline 或 project')
+  }
+  const scope = scopeRaw as 'chapter' | 'entity' | 'storyline' | 'project'
+  const findingId = optionalString(parsed, 'finding')
+  const allWarnings = parsed.flags['all-warnings'] === true
+  if (!findingId && !allWarnings) throw usageError('请提供 --finding <id> 或 --all-warnings')
+  const created = await createWaivers(
+    root,
+    chapter,
+    findingId ? [findingId] : [],
+    {
+      reason,
+      scope,
+      scopeRef: optionalString(parsed, 'scope-ref'),
+      untilChapter: optionalNumber(parsed, 'until'),
+      allWarnings,
+    },
+  )
+  if (json) outputJson({ ok: true, waivers: created })
+  else console.log(`已创建/复用 ${created.length} 条豁免`)
+  return 0
+}
+
+async function commandWaivers(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0] ?? 'list'
+  if (action === 'list') {
+    const waivers = await loadWaivers(root)
+    if (json) outputJson({ waivers })
+    else console.log(JSON.stringify({ waivers }, null, 2))
+    return 0
+  }
+  if (action === 'revoke') {
+    const waiverId = parsed.positionals[1]
+    if (!waiverId) throw usageError('用法：weave waivers revoke <waiverId>')
+    const waiver = await revokeWaiver(root, waiverId)
+    if (json) outputJson(waiver)
+    else console.log(`已撤销豁免 ${waiver.waiverId}`)
+    return 0
+  }
+  throw usageError('用法：weave waivers list|revoke <waiverId>')
+}
+
+async function commandLoops(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const state = await collectLoopState(root)
+  const action = parsed.positionals[0] ?? 'list'
+  if (action === 'list') {
+    if (json) outputJson(state)
+    else console.log(JSON.stringify(state, null, 2))
+    return state.errors.length > 0 ? 3 : 0
+  }
+  if (action === 'show') {
+    const loopId = parsed.positionals[1]
+    if (!loopId) throw usageError('用法：weave loops show <loopId>')
+    const loop = state.loops.find(item => item.loopId === loopId)
+    if (!loop) throw validationError(`未找到伏笔：${loopId}`)
+    if (json) outputJson(loop)
+    else console.log(JSON.stringify(loop, null, 2))
+    return 0
+  }
+  throw usageError('用法：weave loops list|show <loopId>')
+}
+
+async function commandState(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const entityId = parsed.positionals[0]
+  if (!entityId) throw usageError('用法：weave state <entityId> [--chapter <n>]')
+  const head = await readMainline(root)
+  const latest = Math.max(0, ...Object.keys(head.selectedCommitByChapter).map(Number))
+  const chapter = optionalNumber(parsed, 'chapter') ?? latest
+  if (chapter <= 0) throw validationError('项目还没有已定稿章节')
+  const state = await entityState(root, entityId, chapter)
+  if (json) outputJson(state)
+  else console.log(JSON.stringify(state, null, 2))
+  return 0
+}
+
+async function commandKnowledge(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  if (parsed.positionals[0] === 'check') {
+    const chapter = parseChapter(parsed.positionals[1])
+    const contract = await loadContract(root, chapter)
+    const registry = await loadCharacters(root)
+    const result = await checkKnowledge(root, chapter, contract, registry)
+    if (json) outputJson(result)
+    else {
+      console.log(result.ok ? `第 ${chapter} 章信息边界检查通过` : `第 ${chapter} 章信息边界检查失败`)
+      for (const error of result.errors) console.log(`- ${error.reason}`)
+    }
+    return result.ok ? 0 : 3
+  }
+  const characterId = parsed.positionals[0]
+  if (!characterId) throw usageError('用法：weave knowledge <characterId>|check <chapter> [--chapter <n>]')
+  const head = await readMainline(root)
+  const latest = Math.max(0, ...Object.keys(head.selectedCommitByChapter).map(Number))
+  const chapter = optionalNumber(parsed, 'chapter') ?? latest
+  if (chapter <= 0) throw validationError('项目还没有已定稿章节')
+  const state = await knowledgeState(root, characterId, chapter)
+  if (json) outputJson(state)
+  else console.log(JSON.stringify(state, null, 2))
+  return 0
 }
 
 async function commandLedger(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -314,15 +442,17 @@ async function commandReview(root: string, parsed: Parsed, json: boolean): Promi
   await requireStage<ContentCheckReport>(root, 'content-check', chapter, hash)
   const extraction = await requireStage<ExtractionReport>(root, 'extraction', chapter, hash)
   const audit = await requireStage<CoverageAudit>(root, 'audit', chapter, hash)
+  await assertLedgerProjectionCurrent(root)
   const waiveWarnings = parsed.flags['waive-warnings'] === true
   const waiveReason = optionalString(parsed, 'waive-reason')?.trim()
   if (waiveWarnings && !waiveReason) {
     throw usageError('--waive-warnings 需要同时提供 --waive-reason')
   }
   const config = await loadModelConfig(root)
-  const report = await runReview(
+  let report = await runReview(
     root, chapter, contract, draft, extraction, audit, config, new AbortController().signal,
   )
+  report = await applyWaivers(root, chapter, report)
   if (waiveWarnings) {
     for (const finding of report.findings) {
       if (finding.severity === 'warning') {
@@ -343,6 +473,17 @@ async function commandReview(root: string, parsed: Parsed, json: boolean): Promi
 }
 
 async function commandTimeline(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  if (parsed.positionals[0] === 'series') {
+    const registry = await loadCharacters(root)
+    const report = await seriesTimeline(root, registry)
+    if (json) outputJson(report)
+    else {
+      console.log(`系列时间线：${report.passed ? '通过' : '未通过'}`)
+      for (const error of report.errors) console.log(`- ${error}`)
+      for (const warning of report.warnings) console.log(`- 警告：${warning}`)
+    }
+    return report.passed ? 0 : 3
+  }
   const chapter = parseChapter(parsed.positionals[0])
   const draft = await readDraft(root, chapter)
   const extraction = await loadStage<ExtractionReport>(root, 'extraction', chapter)
@@ -427,6 +568,7 @@ async function commandFinalize(root: string, parsed: Parsed, json: boolean): Pro
       mainlineRevision: result.mainlineRevision,
       projection: result.projection,
       projectionFailed: result.projectionFailed,
+      ledgerProjectionFailed: result.ledgerProjectionFailed,
       impact: result.impact,
       draftEdited: result.draftEdited,
     })
@@ -435,6 +577,7 @@ async function commandFinalize(root: string, parsed: Parsed, json: boolean): Pro
     console.log(`提交：${result.commit.commitId}`)
     if (result.draftEdited) console.log('注意：草稿在生成后被手工修改，本次定稿使用了修改后的内容')
     if (result.projectionFailed) console.error('警告：投影更新失败，请执行 weave rebuild')
+    if (result.ledgerProjectionFailed) console.error('警告：账本投影更新失败，请执行 weave rebuild --projection ledger')
     if (result.impact) {
       console.log(`影响面：${result.impact.items.length} 个后续章节待复查`)
       for (const item of result.impact.items) {
@@ -499,9 +642,21 @@ async function commandResolveImpact(root: string, parsed: Parsed, json: boolean)
 }
 
 async function commandRebuild(root: string, parsed: Parsed, json: boolean): Promise<number> {
-  const result = await rebuildBook(root, parsed.flags.force === true)
+  const projection = String(parsed.flags.projection ?? 'all')
+  if (projection !== 'all' && projection !== 'content' && projection !== 'ledger') {
+    throw usageError('--projection 必须是 all、content 或 ledger')
+  }
+  const result = await rebuildBook(root, {
+    force: parsed.flags.force === true,
+    projection,
+    fromChapter: optionalNumber(parsed, 'from'),
+  })
   if (json) outputJson({ ok: true, ...result })
-  else console.log(`已重建投影：主线版本 ${result.projection.mainlineRevision}，覆盖到第 ${result.chapters} 章`)
+  else {
+    console.log(`已重建投影：覆盖到第 ${result.chapters} 章`)
+    if (result.projection) console.log(`内容投影：${result.projection.status} @ ${result.projection.appliedThrough}`)
+    if (result.ledgerProjection) console.log(`账本投影：${result.ledgerProjection.status} @ ${result.ledgerProjection.appliedThrough}`)
+  }
   return 0
 }
 
@@ -609,10 +764,17 @@ function printHelp(): void {
   weave contract show|set <chapter> [--file <path>]
   weave contract check <chapter> | --all
   weave ledger event|fact|entity|beliefs <id> [--chapter <n>]
+  weave state <entityId> [--chapter <n>]
+  weave knowledge <characterId> [--chapter <n>]
+  weave knowledge check <chapter>
+  weave loops list|show <loopId>
+  weave timeline series
   weave check <chapter>
   weave extract <chapter>
   weave audit <chapter>
   weave review <chapter> [--waive-warnings --waive-reason <text>]
+  weave waive <chapter> --finding <id>|--all-warnings --reason <text> [--scope ...] [--until <n>]
+  weave waivers list|revoke <waiverId>
   weave timeline <chapter>
   weave write <chapter> [--json|--events] [--cancel-after-ms <n>]
   weave amend <chapter> [--force]
@@ -620,7 +782,7 @@ function printHelp(): void {
   weave impact <chapter>
   weave resolve-impact <chapter> --target <n> --decision accept|revise|defer
   weave resolve-impact <chapter> --all --decision accept
-  weave rebuild [--force]
+  weave rebuild [--projection all|content|ledger] [--from <chapter>] [--force]
   weave export --format merged|split|txt
   weave doctor
 

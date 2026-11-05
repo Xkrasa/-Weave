@@ -408,13 +408,14 @@ test('amend keeps history, creates a new revision, records impact, and blocks ne
     assert.equal(finalized.code, 0, finalized.stderr)
     const payload = parseJson<{
       commit: { revision: number; commitId: string }
-      impact: { items: Array<{ targetChapter: number; level: string }> }
+      impact: { items: Array<{ targetChapter: number; level: string; dependencies: string[] }> }
       projection: { status: string; invalidFrom: number | null }
       draftEdited: boolean
     }>(finalized.stdout)
     assert.equal(payload.commit.revision, 2)
     assert.equal(payload.impact.items[0]?.targetChapter, 2)
     assert.equal(payload.impact.items[0]?.level, 'confirmed')
+    assert.ok(payload.impact.items[0]?.dependencies.includes('character:林岚'))
     assert.notEqual(payload.commit.commitId, original.commitId)
     assert.equal(payload.projection.status, 'current')
     assert.equal(payload.projection.invalidFrom, 1)
@@ -801,6 +802,12 @@ function ledgerExtractionPayload(
   return JSON.stringify(extraction)
 }
 
+function loopExtractionPayload(loops: unknown[]): string {
+  const extraction = JSON.parse(ledgerExtractionPayload()) as Record<string, unknown>
+  extraction.loops = loops
+  return JSON.stringify(extraction)
+}
+
 function reviewPayload(blocking = false): string {
   return JSON.stringify({
     summary: blocking ? '存在阻断问题' : '整体成立',
@@ -1114,6 +1121,15 @@ test('P1.1 writes a v3 ledger and exposes event/fact/entity/belief queries', asy
 
     const doctorResult = await runCli(dir, ['doctor', '--json'])
     assert.equal(doctorResult.code, 0, doctorResult.stdout + doctorResult.stderr)
+
+    const status = await runCli(dir, ['status', '--json'])
+    assert.equal(status.code, 0, status.stderr)
+    const statusPayload = parseJson<{ ledgerProjection: { status: string; appliedThrough: number } }>(status.stdout)
+    assert.equal(statusPayload.ledgerProjection.status, 'current')
+    assert.equal(statusPayload.ledgerProjection.appliedThrough, 1)
+    const rebuilt = await runCli(dir, ['rebuild', '--projection', 'ledger', '--from', '1', '--json'])
+    assert.equal(rebuilt.code, 0, rebuilt.stderr)
+    assert.equal(parseJson<{ ledgerProjection: { status: string } }>(rebuilt.stdout).ledgerProjection.status, 'current')
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
@@ -1329,6 +1345,208 @@ test('P1.1 keeps v2 commits readable while ledger queries ignore them', async ()
     assert.equal(exported.code, 0, exported.stderr)
     const ledger = await runCli(dir, ['ledger', 'event', 'event-1-r1', '--json'])
     assert.equal(ledger.code, 3)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.2 exposes state/knowledge and keeps non-POV beliefs out of the prompt', async () => {
+  const beliefs = [{
+    beliefId: 'belief-lin-ledger',
+    characterId: '林岚',
+    proposition: '账本缺页与港务局有关',
+    attitude: 'suspects',
+    sourceRecordId: 'r1',
+    learnedAtChapter: 1,
+    confidence: 0.6,
+    validFromChapter: 1,
+    validToChapter: null,
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }, {
+    beliefId: 'belief-zhou-secret',
+    characterId: '周',
+    proposition: '林岚偷走了账本',
+    attitude: 'believes',
+    sourceRecordId: 'r1',
+    learnedAtChapter: 1,
+    confidence: 0.5,
+    validFromChapter: 1,
+    validToChapter: null,
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }]
+  const model = new FakeModel([
+    P05_DRAFT,
+    ledgerExtractionPayload([
+      {
+        factId: 'fact-lin-location',
+        subject: '林岚',
+        predicate: 'location',
+        object: '海港',
+        validFromChapter: 1,
+        validToChapter: null,
+        sourceRecordId: 'r1',
+        origin: 'derived',
+        confidence: 0.9,
+        evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+      },
+    ], beliefs),
+    coveragePayload(),
+    reviewPayload(),
+    '第二章正文：林岚继续查账。\n',
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await setCharacters(dir, [
+      { name: '林岚', status: 'alive', introducedIn: 1, knows: [{ fact: '账本缺页', fromChapter: 1 }] },
+      { name: '周', status: 'alive', introducedIn: 1 },
+    ])
+    await setContract(dir, 1, { characters: ['林岚', '周'] })
+    assert.equal((await checkContract(dir, 1)).code, 0)
+    assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+
+    const state = await runCli(dir, ['state', '林岚', '--chapter', '1', '--json'])
+    assert.equal(state.code, 0, state.stderr)
+    assert.equal(parseJson<{ facts: Array<{ factId: string }> }>(state.stdout).facts[0]?.factId, 'fact-lin-location')
+    const knowledge = await runCli(dir, ['knowledge', '周', '--chapter', '1', '--json'])
+    assert.equal(knowledge.code, 0, knowledge.stderr)
+    assert.ok(parseJson<{ beliefs: Array<{ beliefId: string }> }>(knowledge.stdout).beliefs.some(item => item.beliefId === 'belief-zhou-secret'))
+
+    await setContract(dir, 2, {
+      characters: ['林岚', '周'],
+      pov: '林岚',
+      knowledge: [{ character: '林岚', fact: '不存在的秘密' }],
+    })
+    assert.equal((await checkContract(dir, 2)).code, 3)
+    assert.equal((await runCli(dir, ['knowledge', 'check', '2', '--json'])).code, 3)
+    const requestsBeforeBlock = model.requests.length
+    assert.equal((await runCli(dir, ['write', '2', '--json'], { WEAVE_API_KEY: SECRET })).code, 3)
+    assert.equal(model.requests.length, requestsBeforeBlock)
+
+    await setContract(dir, 2, {
+      characters: ['林岚', '周'],
+      pov: '林岚',
+      knowledge: [{ character: '林岚', fact: '账本缺页与港务局有关' }],
+    })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    assert.equal((await runCli(dir, ['knowledge', 'check', '2', '--json'])).code, 0)
+    const written = await runCli(dir, ['write', '2', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(written.code, 0, written.stderr)
+    const body = JSON.stringify(model.requests[4])
+    assert.equal(body.includes('林岚偷走了账本'), false)
+    assert.ok(body.includes('账本缺页与港务局有关'))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.3 tracks loop lifecycle and series timeline', async () => {
+  const loops = [{
+    loopId: 'loop-ledger',
+    kind: 'plant',
+    summary: '账本缺页的来源',
+    targetFromChapter: 2,
+    targetToChapter: 5,
+    relatedEntities: ['林岚'],
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }, {
+    loopId: 'loop-ledger',
+    kind: 'advance',
+    summary: '港务局印被确认',
+    relatedEntities: ['林岚'],
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }, {
+    loopId: 'loop-ledger',
+    kind: 'payoff',
+    summary: '账本来源揭晓',
+    relatedEntities: ['林岚'],
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }]
+  const model = new FakeModel([P05_DRAFT, loopExtractionPayload(loops), coveragePayload(), reviewPayload()])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+    const list = await runCli(dir, ['loops', 'list', '--json'])
+    assert.equal(list.code, 0, list.stderr)
+    const payload = parseJson<{ loops: Array<{ loopId: string; status: string; paidOffChapter: number }> }>(list.stdout)
+    assert.equal(payload.loops[0]?.loopId, 'loop-ledger')
+    assert.equal(payload.loops[0]?.status, 'paid_off')
+    assert.equal(payload.loops[0]?.paidOffChapter, 1)
+
+    const timeline = await runCli(dir, ['timeline', 'series', '--json'])
+    assert.equal(timeline.code, 0, timeline.stderr)
+    assert.equal(parseJson<{ passed: boolean; events: unknown[] }>(timeline.stdout).passed, true)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.3 rejects a payoff before planting', async () => {
+  const loops = [{
+    loopId: 'loop-unplanted',
+    kind: 'payoff',
+    summary: '从未埋设的伏笔',
+    relatedEntities: ['林岚'],
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }]
+  const model = new FakeModel([P05_DRAFT, loopExtractionPayload(loops), coveragePayload(), reviewPayload()])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 3)
+    const payload = parseJson<{ error: { details: string[] } }>(finalized.stdout)
+    assert.ok(payload.error.details.some(error => error.includes('尚未埋设')))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.5 project-scoped waiver suppresses a blocking finding', async () => {
+  const model = new FakeModel([
+    P05_DRAFT,
+    extractionPayload(),
+    coveragePayload(),
+    reviewPayload(true),
+    reviewPayload(true),
+  ])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    const firstReview = await runCli(dir, ['review', '1', '--json'])
+    assert.equal(firstReview.code, 7)
+    const waived = await runCli(dir, [
+      'waive', '1', '--finding', 'f1', '--reason', '这是作者有意保留的模糊点', '--scope', 'project', '--json',
+    ])
+    assert.equal(waived.code, 0, waived.stderr)
+    const listed = await runCli(dir, ['waivers', 'list', '--json'])
+    assert.equal(listed.code, 0, listed.stderr)
+    assert.equal(parseJson<{ waivers: unknown[] }>(listed.stdout).waivers.length, 1)
+
+    const secondReview = await runCli(dir, ['review', '1', '--json'])
+    assert.equal(secondReview.code, 0, secondReview.stdout + secondReview.stderr)
+    const reviewPayloadResult = parseJson<{ passed: boolean; findings: Array<{ status: string }> }>(secondReview.stdout)
+    assert.equal(reviewPayloadResult.passed, true)
+    assert.equal(reviewPayloadResult.findings[0]?.status, 'waived')
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })

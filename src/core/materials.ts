@@ -5,6 +5,7 @@ import { listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
 import { loadCharacters, loadContract } from './contract.ts'
 import { projectPaths } from './project.ts'
 import { currentCommit, finalPath, readMainline } from './ledger.ts'
+import { collectLedger, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
 import { conflictError } from './errors.ts'
 
 interface ReferenceManifestEntry {
@@ -34,7 +35,14 @@ export async function collectMaterials(root: string, contract: ChapterContract):
   }
 
   const registry = await loadCharacters(root)
-  const relevant = registry.characters.filter(character => contract.characters.includes(character.name))
+  const relevant = registry.characters
+    .filter(character => contract.characters.includes(character.name))
+    .map(character => ({
+      name: character.name,
+      status: character.status,
+      introducedIn: character.introducedIn,
+      ...(character.deathChapter !== undefined ? { deathChapter: character.deathChapter } : {}),
+    }))
   if (relevant.length > 0) {
     materials.push(
       material(
@@ -44,6 +52,24 @@ export async function collectMaterials(root: string, contract: ChapterContract):
         true,
         '本章人物状态',
         JSON.stringify({ characters: relevant }, null, 2),
+      ),
+    )
+  }
+
+  const priorChapter = Math.max(0, contract.chapter - 1)
+  const ledger = await collectLedger(root, priorChapter)
+  const povFacts = effectiveFacts(ledger.facts, priorChapter)
+    .filter(fact => fact.subject === contract.pov)
+  const povBeliefs = effectiveBeliefs(ledger.beliefs, contract.pov, priorChapter)
+  if (povFacts.length > 0 || povBeliefs.length > 0) {
+    materials.push(
+      material(
+        'pov:knowledge',
+        'derived-locator',
+        'derived',
+        true,
+        `视角人物当前状态（${contract.pov}）`,
+        JSON.stringify({ facts: povFacts, beliefs: povBeliefs }, null, 2),
       ),
     )
   }
