@@ -1080,6 +1080,7 @@ test('P1.1 writes a v3 ledger and exposes event/fact/entity/belief queries', asy
         eventCount: number
         factCount: number
         beliefCount: number
+        ledger: { contract: { chapter: number; planned: string[] } }
       }
     }>(finalized.stdout)
     assert.equal(payload.commit.schemaVersion, 3)
@@ -1087,6 +1088,8 @@ test('P1.1 writes a v3 ledger and exposes event/fact/entity/belief queries', asy
     assert.equal(payload.commit.eventCount, 1)
     assert.equal(payload.commit.factCount, 1)
     assert.equal(payload.commit.beliefCount, 1)
+    assert.equal(payload.commit.ledger.contract.chapter, 1)
+    assert.deepEqual(payload.commit.ledger.contract.planned, ['林岚发现账本缺页'])
 
     const event = await runCli(dir, ['ledger', 'event', 'event-1-r1', '--json'])
     assert.equal(event.code, 0, event.stderr)

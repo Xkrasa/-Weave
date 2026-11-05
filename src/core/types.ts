@@ -145,6 +145,7 @@ export interface LedgerEvent {
 
 export interface LedgerFact {
   factId: string
+  chapter: number
   subject: string
   predicate: string
   object: string
@@ -161,6 +162,7 @@ export type BeliefAttitude = 'knows' | 'believes' | 'suspects' | 'misbelieves' |
 
 export interface LedgerBelief {
   beliefId: string
+  chapter: number
   characterId: string
   proposition: string
   attitude: BeliefAttitude
@@ -172,7 +174,14 @@ export interface LedgerBelief {
   evidence: EvidenceSpan[]
 }
 
+export interface LedgerContractRef {
+  chapter: number
+  contractHash: string
+  planned: string[]
+}
+
 export interface LedgerDelta {
+  contract?: LedgerContractRef
   events: LedgerEvent[]
   facts: LedgerFact[]
   beliefs: LedgerBelief[]

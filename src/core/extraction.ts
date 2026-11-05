@@ -10,6 +10,7 @@ import { completeText } from './model.ts'
 import { draftHash, parseJsonObject, resolveEvidence, saveStage } from './stages.ts'
 import { validationError } from './errors.ts'
 import { eventIdFor, normalizeAttitude } from './story-ledger.ts'
+import { hashText } from './hash.ts'
 
 const SYSTEM_PROMPT = [
   '你是小说事实抽取器，不是写作模型。',
@@ -108,15 +109,15 @@ export async function runExtraction(
       rejected.push({ reason: '记录不是对象', raw: item })
       return
     }
+    const kind = recordRaw.kind === 'state_change' ? 'state_change' : 'event'
+    const recordSummary = typeof recordRaw.summary === 'string' ? recordRaw.summary.trim() : ''
     const recordId = typeof recordRaw.recordId === 'string' && recordRaw.recordId.trim()
       ? recordRaw.recordId.trim()
-      : `r${index + 1}`
+      : `r-${hashText(recordSummary || `record-${index + 1}`).slice(7, 19)}`
     if (seenRecordIds.has(recordId)) {
       rejected.push({ recordId, reason: 'recordId 重复', raw: item })
       return
     }
-    const kind = recordRaw.kind === 'state_change' ? 'state_change' : 'event'
-    const recordSummary = typeof recordRaw.summary === 'string' ? recordRaw.summary.trim() : ''
     if (!recordSummary) {
       rejected.push({ recordId, reason: '缺少 summary', raw: item })
       return
@@ -230,6 +231,7 @@ export async function runExtraction(
     const supersedes = typeof factRaw.supersedes === 'string' ? factRaw.supersedes : null
     facts.push({
       factId,
+      chapter,
       subject,
       predicate,
       object,
@@ -268,6 +270,11 @@ export async function runExtraction(
       rejected.push({ recordId: beliefId, reason: '信念存在无效证据', raw: item })
       return
     }
+    const attitude = normalizeAttitude(beliefRaw.attitude)
+    if (!attitude) {
+      rejected.push({ recordId: beliefId, reason: '信念态度非法', raw: item })
+      return
+    }
     const sourceRecordId = typeof beliefRaw.sourceRecordId === 'string' ? beliefRaw.sourceRecordId : undefined
     const sourceEvent = typeof beliefRaw.sourceEvent === 'string'
       ? beliefRaw.sourceEvent
@@ -277,9 +284,10 @@ export async function runExtraction(
       : typeof beliefRaw.learnedAtChapter === 'number' ? beliefRaw.learnedAtChapter : chapter
     beliefs.push({
       beliefId,
+      chapter,
       characterId,
       proposition,
-      attitude: normalizeAttitude(beliefRaw.attitude),
+      attitude,
       sourceEvent,
       learnedAtChapter: typeof beliefRaw.learnedAtChapter === 'number' ? beliefRaw.learnedAtChapter : chapter,
       confidence: typeof beliefRaw.confidence === 'number' ? beliefRaw.confidence : 1,

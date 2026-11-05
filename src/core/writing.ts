@@ -231,10 +231,10 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
   const draftEdited = meta ? hashText(draft) !== meta.contentHash : false
   const currentDraftHash = hashText(draft)
 
-  const commitSchemaVersion: 1 | 2 | 3 = 3
+  const commitSchemaVersion: 1 | 2 | 3 = project.workflowVersion === 2 ? 3 : 2
   let extractionHash: string | undefined
   let reviewHash: string | undefined
-  let ledger: CommitRecord['ledger'] = { events: [], facts: [], beliefs: [] }
+  let ledger: CommitRecord['ledger']
   let commitEvidence: CommitRecord['evidence'] = []
   if (project.workflowVersion === 2) {
     await requireStage<ContentCheckReport>(root, 'content-check', chapter, currentDraftHash)
@@ -260,16 +260,18 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
       })
     }
     reviewHash = objectHash(review)
-    const delta = buildLedgerDelta(chapter, extraction)
-    const prior = await collectLedger(root, chapter - 1)
+    const delta = buildLedgerDelta(chapter, extraction, contract)
+    const priorChapters = await collectLedger(root, chapter - 1)
+    const currentLedger = current ? await collectLedger(root, chapter) : priorChapters
     const registry = await loadCharacters(root)
-    assertValidLedger(
-      chapter,
-      delta,
-      registry,
-      new Set(prior.facts.map(fact => fact.factId)),
-      new Set(prior.events.map(event => event.eventId)),
-    )
+    assertValidLedger(chapter, delta, registry, {
+      priorFacts: new Map(currentLedger.facts.map(fact => [fact.factId, fact])),
+      priorEvents: new Map(currentLedger.events.map(event => [event.eventId, event])),
+      usedFactIds: new Set(priorChapters.facts.map(fact => fact.factId)),
+      usedEventIds: new Set(priorChapters.events.map(event => event.eventId)),
+      usedBeliefIds: new Set(priorChapters.beliefs.map(belief => belief.beliefId)),
+      contract,
+    })
     ledger = delta
     commitEvidence = [
       ...delta.events.flatMap(event => event.evidence),
@@ -300,7 +302,7 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     extractionHash,
     reviewHash,
     evidence: commitEvidence,
-    ledger,
+    ledger: commitSchemaVersion === 3 ? ledger : undefined,
   })
   await ensureUniqueCommit(root, commit)
 

@@ -142,10 +142,11 @@ export async function doctor(root: string): Promise<DoctorResult> {
     }
     if (commit.schemaVersion >= 2) {
       const versionText = text.toString('utf8')
-      if (commit.evidenceCount !== commit.evidence.length) {
+      const evidence = commit.evidence ?? []
+      if ((commit.evidenceCount ?? 0) !== evidence.length) {
         errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的 evidenceCount 与证据数量不一致`)
       }
-      for (const span of commit.evidence) {
+      for (const span of evidence) {
         if (span.sourceContentHash !== commit.contentHash) {
           errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的证据来源哈希不一致`)
           continue
