@@ -1,5 +1,8 @@
+import type { EvidenceSpan } from './stage-types.ts'
+
 export interface ProjectConfig {
-  schemaVersion: 2
+  schemaVersion: 3
+  workflowVersion: 1 | 2
   title: string
   language: string
   targetWords: number
@@ -17,6 +20,8 @@ export interface ModelConfig {
   temperature: number
   timeoutMs: number
   snapshotEvery: number
+  extractionModel?: string
+  reviewModel?: string
 }
 
 export interface KnowledgeFact {
@@ -29,6 +34,7 @@ export interface CharacterRecord {
   status: 'alive' | 'dead'
   introducedIn: number
   deathChapter?: number
+  birthDate?: string
   knows?: KnowledgeFact[]
 }
 
@@ -126,7 +132,7 @@ export interface GenerationEvent {
 }
 
 export interface CommitRecord {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   commitId: string
   chapter: number
   revision: number
@@ -136,7 +142,10 @@ export interface CommitRecord {
   contextHash: string
   contentPath: string
   createdAt: string
-  evidence: never[]
+  extractionHash?: string
+  reviewHash?: string
+  evidenceCount?: number
+  evidence: EvidenceSpan[]
 }
 
 export interface MainlineHead {

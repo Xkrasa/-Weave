@@ -95,9 +95,14 @@ export function buildCommit(input: {
   contractHash: string
   contextHash: string
   contentPath: string
+  schemaVersion?: 1 | 2
+  extractionHash?: string
+  reviewHash?: string
+  evidence?: CommitRecord['evidence']
 }): CommitRecord {
-  const body = {
-    schemaVersion: 1 as const,
+  const schemaVersion = input.schemaVersion ?? 1
+  const body: CommitRecord = {
+    schemaVersion,
     commitId: '',
     chapter: input.chapter,
     revision: input.revision,
@@ -107,15 +112,20 @@ export function buildCommit(input: {
     contextHash: input.contextHash,
     contentPath: input.contentPath,
     createdAt: new Date().toISOString(),
-    evidence: [] as never[],
+    evidence: input.evidence ?? [],
   }
+  if (input.extractionHash) body.extractionHash = input.extractionHash
+  if (input.reviewHash) body.reviewHash = input.reviewHash
+  if (input.evidence) body.evidenceCount = input.evidence.length
   body.commitId = objectHash({
-    schemaVersion: 1,
+    schemaVersion,
     chapter: input.chapter,
     supersedes: input.supersedes,
     contentHash: input.contentHash,
     contractHash: input.contractHash,
     contextHash: input.contextHash,
+    extractionHash: input.extractionHash ?? null,
+    reviewHash: input.reviewHash ?? null,
   })
   return body
 }

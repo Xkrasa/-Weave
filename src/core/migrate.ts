@@ -1,11 +1,11 @@
 import path from 'node:path'
 import { copyFile, readdir } from 'node:fs/promises'
-import type { ModelConfig, ProjectConfig } from './types.ts'
+import type { ModelConfig } from './types.ts'
 import { atomicWriteJson, ensureDir, readJsonIfExists } from './io.ts'
 import { projectPaths } from './project.ts'
 import { conflictError } from './errors.ts'
 
-export const CURRENT_SCHEMA_VERSION = 2
+export const CURRENT_SCHEMA_VERSION = 3
 
 export interface MigrationResult {
   migrated: boolean
@@ -30,6 +30,7 @@ export async function ensureProjectMigrated(root: string): Promise<MigrationResu
   }
 
   const backupDir = await backupBeforeMigration(root, version)
+  const project = raw as Record<string, unknown>
   if (version < 2) {
     const config = await readJsonIfExists<Partial<ModelConfig>>(paths.modelConfig)
     if (!config) throw conflictError('迁移失败：模型配置缺失')
@@ -37,8 +38,12 @@ export async function ensureProjectMigrated(root: string): Promise<MigrationResu
       config.snapshotEvery = 10
     }
     await atomicWriteJson(paths.modelConfig, config)
-    const project = raw as unknown as ProjectConfig
     project.schemaVersion = 2
+    await atomicWriteJson(paths.project, project)
+  }
+  if (version < 3) {
+    project.workflowVersion = 1
+    project.schemaVersion = 3
     await atomicWriteJson(paths.project, project)
   }
 

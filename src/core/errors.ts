@@ -1,4 +1,4 @@
-export type WeaveExitCode = 2 | 3 | 4 | 5 | 6
+export type WeaveExitCode = 2 | 3 | 4 | 5 | 6 | 7
 
 export class WeaveError extends Error {
   readonly code: string
@@ -28,4 +28,8 @@ export function conflictError(message: string, details?: unknown): WeaveError {
 
 export function modelError(message: string, details?: unknown): WeaveError {
   return new WeaveError('MODEL', message, 5, details)
+}
+
+export function reviewBlockedError(message: string, details?: unknown): WeaveError {
+  return new WeaveError('REVIEW_BLOCKED', message, 7, details)
 }

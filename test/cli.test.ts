@@ -48,10 +48,11 @@ async function tempDir(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), 'weave-test-'))
 }
 
-async function initBook(baseUrl: string, options: string[] = []): Promise<string> {
+async function initBook(baseUrl: string, options: string[] = [], workflow = 'p0'): Promise<string> {
   const dir = await tempDir()
   const result = await runCli(dir, [
-    'init', '.', '--title', '潮汐账本', '--model', 'fake-model', '--base-url', baseUrl, ...options,
+    'init', '.', '--title', '潮汐账本', '--model', 'fake-model', '--base-url', baseUrl,
+    '--workflow', workflow, ...options,
   ])
   assert.equal(result.code, 0, result.stderr)
   return dir
@@ -591,10 +592,12 @@ test('migrates a v1 project with a pre-migration backup', async () => {
 
     const status = await runCli(dir, ['status', '--json'])
     assert.equal(status.code, 0, status.stderr)
-    const payload = parseJson<{ schemaVersion: number }>(status.stdout)
-    assert.equal(payload.schemaVersion, 2)
+    const payload = parseJson<{ schemaVersion: number; workflowVersion: number }>(status.stdout)
+    assert.equal(payload.schemaVersion, 3)
+    assert.equal(payload.workflowVersion, 1)
     const migrated = JSON.parse(await readFile(projectFile, 'utf8')) as Record<string, unknown>
-    assert.equal(migrated.schemaVersion, 2)
+    assert.equal(migrated.schemaVersion, 3)
+    assert.equal(migrated.workflowVersion, 1)
     const migratedConfig = JSON.parse(await readFile(configFile, 'utf8')) as Record<string, unknown>
     assert.equal(migratedConfig.snapshotEvery, 10)
     const backups = await readdir(path.join(dir, '.weave', 'backups'))
@@ -720,6 +723,275 @@ test('golden 8-chapter project supports amend, snapshot replay, impact revision 
     for (let chapter = 1; chapter <= 8; chapter += 1) {
       assert.match(merged, new RegExp(`第${chapter}章`))
     }
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+const P05_DRAFT = '林岚在码头翻开账本。\n\n她发现缺页上留着港务局的印。'
+
+function extractionPayload(quote = '她发现缺页上留着港务局的印。', timeline = true): string {
+  return JSON.stringify({
+    summary: '林岚发现账本缺页。',
+    noEventsReason: null,
+    records: [{
+      recordId: 'r1',
+      kind: 'event',
+      summary: '林岚发现账本缺页',
+      participants: ['林岚'],
+      location: '海港',
+      storyTime: '第一天',
+      payload: {},
+      evidence: [{ quote, occurrence: 1 }],
+    }],
+    timeline: timeline
+      ? [{
+          eventId: 'e1',
+          recordId: 'r1',
+          summary: '林岚发现账本缺页',
+          dayOffset: 0,
+          durationDays: 0,
+          participants: ['林岚'],
+          causedBy: [],
+          type: 'main',
+          evidence: [{ quote: '林岚在码头翻开账本。', occurrence: 1 }],
+        }]
+      : [],
+  })
+}
+
+function reviewPayload(blocking = false): string {
+  return JSON.stringify({
+    summary: blocking ? '存在阻断问题' : '整体成立',
+    findings: [{
+      dimension: '叙事衔接',
+      severity: blocking ? 'blocking' : 'warning',
+      description: blocking ? '缺页来源没有交代' : '章末可以更具体',
+      quote: '她发现缺页上留着港务局的印。',
+      occurrence: 1,
+    }],
+  })
+}
+
+async function prepareP05(model: FakeModel): Promise<string> {
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  await contract1(dir)
+  const written = await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })
+  assert.equal(written.code, 0, written.stderr)
+  const checked = await runCli(dir, ['check', '1', '--json'])
+  assert.equal(checked.code, 0, checked.stderr)
+  return dir
+}
+
+test('P0.5 workflow produces an evidence-backed commit v2', async () => {
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), reviewPayload()])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    const extracted = await runCli(dir, ['extract', '1', '--json'])
+    assert.equal(extracted.code, 0, extracted.stdout + extracted.stderr)
+    const extraction = parseJson<{ passed: boolean; records: Array<{ evidence: Array<{ byteStart: number }> }> }>(extracted.stdout)
+    assert.equal(extraction.passed, true)
+    assert.ok(extraction.records[0]!.evidence[0]!.byteStart >= 0)
+
+    const timeline = await runCli(dir, ['timeline', '1', '--json'])
+    assert.equal(timeline.code, 0, timeline.stdout + timeline.stderr)
+
+    const audited = await runCli(dir, ['audit', '1', '--json'])
+    assert.equal(audited.code, 0, audited.stdout + audited.stderr)
+    const audit = parseJson<{ passed: boolean; contract: { missed: string[] }; timeline: { passed: boolean } }>(audited.stdout)
+    assert.equal(audit.passed, true)
+    assert.deepEqual(audit.contract.missed, [])
+    assert.equal(audit.timeline.passed, true)
+
+    const reviewed = await runCli(dir, ['review', '1', '--json'])
+    assert.equal(reviewed.code, 0, reviewed.stdout + reviewed.stderr)
+
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 0, finalized.stdout + finalized.stderr)
+    const payload = parseJson<{
+      commit: { schemaVersion: number; evidenceCount: number; extractionHash: string; reviewHash: string }
+    }>(finalized.stdout)
+    assert.equal(payload.commit.schemaVersion, 2)
+    assert.equal(payload.commit.evidenceCount, 1)
+    assert.ok(payload.commit.extractionHash)
+    assert.ok(payload.commit.reviewHash)
+
+    const doctorResult = await runCli(dir, ['doctor', '--json'])
+    assert.equal(doctorResult.code, 0, doctorResult.stdout + doctorResult.stderr)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P0.5 rejects evidence that cannot be located in the draft', async () => {
+  const model = new FakeModel([P05_DRAFT, extractionPayload('正文中不存在的引文')])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    const extracted = await runCli(dir, ['extract', '1', '--json'])
+    assert.equal(extracted.code, 3, extracted.stderr)
+    const payload = parseJson<{ passed: boolean; rejected: Array<{ reason: string }> }>(extracted.stdout)
+    assert.equal(payload.passed, false)
+    assert.ok(payload.rejected.some(item => item.reason.includes('不在草稿中')))
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 3)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P0.5 timeline errors block the coverage audit', async () => {
+  const extraction = JSON.parse(extractionPayload()) as Record<string, unknown>
+  extraction.timeline = [
+    {
+      eventId: 'e1',
+      recordId: 'r1',
+      summary: '先发生',
+      dayOffset: 0,
+      durationDays: 5,
+      participants: ['林岚'],
+      causedBy: [],
+      type: 'main',
+      evidence: [{ quote: '林岚在码头翻开账本。', occurrence: 1 }],
+    },
+    {
+      eventId: 'e2',
+      recordId: 'r1',
+      summary: '与上一事件重叠',
+      dayOffset: 3,
+      durationDays: 0,
+      participants: ['林岚'],
+      causedBy: [],
+      type: 'main',
+      evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+    },
+  ]
+  const model = new FakeModel([P05_DRAFT, JSON.stringify(extraction)])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    const audited = await runCli(dir, ['audit', '1', '--json'])
+    assert.equal(audited.code, 3)
+    const payload = parseJson<{ passed: boolean; timeline: { errors: string[] } }>(audited.stdout)
+    assert.equal(payload.passed, false)
+    assert.ok(payload.timeline.errors.some(error => error.includes('重叠')))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P0.5 blocking review returns exit code 7 and prevents finalization', async () => {
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), reviewPayload(true)])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    const reviewed = await runCli(dir, ['review', '1', '--json'])
+    assert.equal(reviewed.code, 7)
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 7)
+    const commits = path.join(dir, 'ledger', 'commits')
+    assert.deepEqual((await readdir(commits)).filter(name => name.endsWith('.json')), [])
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P0.5 stage reports are invalidated when the draft changes', async () => {
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), reviewPayload()])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), `${P05_DRAFT}\n\n新增一段。\n`)
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 4)
+    const payload = parseJson<{ error: { message: string } }>(finalized.stdout)
+    assert.match(payload.error.message, /草稿已变化/)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P0.5 content check blocks extraction before any model call', async () => {
+  const model = new FakeModel([])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await contract1(dir)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'TODO 待补本章正文。\n')
+    const checked = await runCli(dir, ['check', '1', '--json'])
+    assert.equal(checked.code, 3)
+    const payload = parseJson<{ passed: boolean; findings: Array<{ code: string }> }>(checked.stdout)
+    assert.equal(payload.passed, false)
+    assert.ok(payload.findings.some(finding => finding.code === 'PLACEHOLDER'))
+    const extracted = await runCli(dir, ['extract', '1', '--json'])
+    assert.equal(extracted.code, 3)
+    assert.equal(model.requests.length, 0)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P0.5 audit fails when a contract node is not covered', async () => {
+  const extraction = JSON.parse(extractionPayload()) as Record<string, unknown>
+  const records = extraction.records as Array<Record<string, unknown>>
+  records[0]!.summary = '无关事件'
+  const model = new FakeModel([P05_DRAFT, JSON.stringify(extraction)])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    const audited = await runCli(dir, ['audit', '1', '--json'])
+    assert.equal(audited.code, 3)
+    const payload = parseJson<{ passed: boolean; contract: { missed: string[] } }>(audited.stdout)
+    assert.equal(payload.passed, false)
+    assert.deepEqual(payload.contract.missed, ['林岚发现账本缺页'])
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P0.5 duplicate evidence requires an occurrence and is rejected without one', async () => {
+  const duplicateDraft = '林岚看着账本。\n\n林岚看着账本。'
+  const extraction = {
+    summary: '重复引文',
+    noEventsReason: null,
+    records: [{
+      recordId: 'r1',
+      kind: 'event',
+      summary: '林岚看着账本',
+      participants: ['林岚'],
+      payload: {},
+      evidence: [{ quote: '林岚看着账本。' }],
+    }],
+    timeline: [],
+  }
+  const model = new FakeModel([JSON.stringify(extraction)])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await contract1(dir)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), duplicateDraft)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    const extracted = await runCli(dir, ['extract', '1', '--json'])
+    assert.equal(extracted.code, 3)
+    const payload = parseJson<{ passed: boolean; rejected: Array<{ reason: string }> }>(extracted.stdout)
+    assert.equal(payload.passed, false)
+    assert.ok(payload.rejected.some(item => item.reason.includes('无法唯一确定')))
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })

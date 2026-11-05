@@ -5,6 +5,20 @@ export interface StreamResult {
   usage: RunUsage
 }
 
+export async function completeText(input: {
+  config: ModelConfig
+  system: string
+  user: string
+  signal: AbortSignal
+}): Promise<{ text: string; usage: RunUsage }> {
+  let text = ''
+  const result = await streamChapter({
+    ...input,
+    onDelta: delta => { text += delta },
+  })
+  return { text, usage: result.usage }
+}
+
 export async function streamChapter(input: {
   config: ModelConfig
   system: string

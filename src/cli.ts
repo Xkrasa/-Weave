@@ -1,8 +1,21 @@
 #!/usr/bin/env node
 import path from 'node:path'
 import { readFile, readdir } from 'node:fs/promises'
-import { findProjectRoot, initProject, projectPaths } from './core/project.ts'
-import { normalizeContract, saveContract, loadContract, writeContractCheck, contractHash } from './core/contract.ts'
+import {
+  findProjectRoot,
+  initProject,
+  loadModelConfig,
+  loadProject,
+  projectPaths,
+} from './core/project.ts'
+import {
+  contractHash,
+  loadContract,
+  normalizeContract,
+  requirePassingContractCheck,
+  saveContract,
+  writeContractCheck,
+} from './core/contract.ts'
 import { writeChapter, amendChapter, finalizeChapter } from './core/writing.ts'
 import { createImpactReport, loadImpactReport, resolveImpact } from './core/impact.ts'
 import { currentCommit } from './core/ledger.ts'
@@ -10,13 +23,24 @@ import { doctor, exportBook, projectStatus, rebuildBook, type ExportFormat } fro
 import { WeaveError, usageError, validationError } from './core/errors.ts'
 import { ensureProjectMigrated } from './core/migrate.ts'
 import type { GenerationEvent } from './core/types.ts'
+import { runContentCheck } from './core/content-check.ts'
+import { runExtraction } from './core/extraction.ts'
+import { runCoverageAudit, runTimelineReport } from './core/audit.ts'
+import { runReview } from './core/review.ts'
+import { draftHash, loadStage, readDraft, requireStage, saveStage } from './core/stages.ts'
+import type {
+  ContentCheckReport,
+  CoverageAudit,
+  ExtractionReport,
+  ReviewReport,
+} from './core/stage-types.ts'
 
 interface Parsed {
   positionals: string[]
   flags: Record<string, string | true>
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings'])
 let eventStreamStarted = false
 
 async function main(): Promise<number> {
@@ -42,6 +66,16 @@ async function main(): Promise<number> {
       return commandStatus(root, json)
     case 'contract':
       return commandContract(root, parsed, json)
+    case 'check':
+      return commandCheck(root, parsed, json)
+    case 'extract':
+      return commandExtract(root, parsed, json)
+    case 'audit':
+      return commandAudit(root, parsed, json)
+    case 'review':
+      return commandReview(root, parsed, json)
+    case 'timeline':
+      return commandTimeline(root, parsed, json)
     case 'write':
       return commandWrite(root, parsed, json)
     case 'amend':
@@ -75,6 +109,7 @@ async function commandInit(parsed: Parsed, json: boolean): Promise<number> {
     contextWindow: optionalNumber(parsed, 'context-window'),
     maxOutputTokens: optionalNumber(parsed, 'max-output'),
     snapshotEvery: optionalNumber(parsed, 'snapshot-every'),
+    workflowVersion: parseWorkflow(parsed),
   })
   if (json) {
     outputJson({ ok: true, root: result.root, project: result.project, config: result.config })
@@ -91,6 +126,7 @@ async function commandStatus(root: string, json: boolean): Promise<number> {
   if (json) outputJson({ ok: true, ...status })
   else {
     console.log(`${status.title}（${status.language}）`)
+    console.log(`项目版本：v${status.schemaVersion}；工作流：${status.workflowVersion === 2 ? 'p05' : 'p0'}`)
     console.log(`主线版本：${status.mainlineRevision}`)
     console.log(`已定稿：${status.chapters.length} 章；草稿：${status.drafts.length} 章`)
     for (const chapter of status.chapters) {
@@ -168,6 +204,99 @@ async function checkAllContracts(root: string, json: boolean): Promise<number> {
     for (const failure of failures) console.error(`- 第 ${failure.chapter} 章：${JSON.stringify(failure.errors)}`)
   }
   return ok ? 0 : 3
+}
+
+async function commandCheck(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const contract = await loadContract(root, chapter)
+  await requirePassingContractCheck(root, contract)
+  const draft = await readDraft(root, chapter)
+  const report = await runContentCheck(root, chapter, contract, draft)
+  await saveStage(root, 'content-check', chapter, report)
+  if (json) outputJson(report)
+  else {
+    console.log(`第 ${chapter} 章内容检查：${report.passed ? '通过' : '未通过'}`)
+    console.log(`字数：${report.stats.characters}/${report.stats.targetWords}`)
+    for (const finding of report.findings) console.log(`- [${finding.severity}] ${finding.code}: ${finding.message}`)
+  }
+  return report.passed ? 0 : 3
+}
+
+async function commandExtract(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const contract = await loadContract(root, chapter)
+  await requirePassingContractCheck(root, contract)
+  const draft = await readDraft(root, chapter)
+  const hash = draftHash(draft)
+  await requireStage<ContentCheckReport>(root, 'content-check', chapter, hash)
+  const config = await loadModelConfig(root)
+  const report = await runExtraction(root, chapter, contract, draft, config, new AbortController().signal)
+  if (json) outputJson(report)
+  else {
+    console.log(`第 ${chapter} 章抽取：${report.passed ? '通过' : '未通过'}；记录 ${report.records.length} 条`)
+    for (const rejected of report.rejected) console.log(`- 拒绝：${rejected.reason}`)
+  }
+  return report.passed ? 0 : 3
+}
+
+async function commandAudit(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const contract = await loadContract(root, chapter)
+  const draft = await readDraft(root, chapter)
+  const hash = draftHash(draft)
+  const extraction = await requireStage<ExtractionReport>(root, 'extraction', chapter, hash)
+  const report = await runCoverageAudit(root, chapter, contract, draft, extraction)
+  if (json) outputJson(report)
+  else {
+    console.log(`第 ${chapter} 章覆盖审计：${report.passed ? '通过' : '未通过'}`)
+    console.log(`合同节点：${report.contract.covered.length}/${report.contract.planned.length}`)
+    for (const missed of report.contract.missed) console.log(`- 未覆盖：${missed}`)
+    for (const error of report.timeline.errors) console.log(`- 时间线：${error}`)
+  }
+  return report.passed ? 0 : 3
+}
+
+async function commandReview(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const contract = await loadContract(root, chapter)
+  const draft = await readDraft(root, chapter)
+  const hash = draftHash(draft)
+  await requireStage<ContentCheckReport>(root, 'content-check', chapter, hash)
+  const extraction = await requireStage<ExtractionReport>(root, 'extraction', chapter, hash)
+  const audit = await requireStage<CoverageAudit>(root, 'audit', chapter, hash)
+  const config = await loadModelConfig(root)
+  const report = await runReview(
+    root, chapter, contract, draft, extraction, audit, config, new AbortController().signal,
+  )
+  if (parsed.flags['waive-warnings'] === true) {
+    for (const finding of report.findings) {
+      if (finding.severity === 'warning') finding.status = 'waived'
+    }
+    await saveStage(root, 'review', chapter, report)
+  }
+  if (json) outputJson(report)
+  else {
+    console.log(`第 ${chapter} 章审查：${report.passed ? '通过' : '存在阻断问题'}`)
+    for (const finding of report.findings) {
+      console.log(`- [${finding.severity}] ${finding.dimension}: ${finding.description}`)
+    }
+  }
+  return report.passed ? 0 : 7
+}
+
+async function commandTimeline(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const draft = await readDraft(root, chapter)
+  const extraction = await loadStage<ExtractionReport>(root, 'extraction', chapter)
+  if (!extraction) throw validationError(`第 ${chapter} 章缺少抽取报告；请先运行 weave extract`)
+  const report = await runTimelineReport(root, chapter, draft, extraction)
+  if (json) outputJson(report)
+  else {
+    console.log(`第 ${chapter} 章时间线：${report.passed ? '通过' : '未通过'}`)
+    for (const error of report.errors) console.log(`- ${error}`)
+    for (const warning of report.warnings) console.log(`- 警告：${warning}`)
+  }
+  return report.passed ? 0 : 3
 }
 
 async function commandWrite(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -373,6 +502,14 @@ function parseArgs(argv: string[]): Parsed {
   return { positionals, flags }
 }
 
+function parseWorkflow(parsed: Parsed): 1 | 2 | undefined {
+  const value = parsed.flags.workflow
+  if (value === undefined) return undefined
+  if (value === 'p0') return 1
+  if (value === 'p05') return 2
+  throw usageError('--workflow 必须是 p0 或 p05')
+}
+
 function parseChapter(value: string | undefined): number {
   const chapter = Number(value)
   if (!Number.isSafeInteger(chapter) || chapter <= 0) {
@@ -409,10 +546,15 @@ function printHelp(): void {
   console.log(`Weave 0.1.0
 
 用法：
-  weave init [dir] --title <name> --model <model> --base-url <url> [--snapshot-every <n>]
+  weave init [dir] --title <name> --model <model> --base-url <url> [--snapshot-every <n>] [--workflow p0|p05]
   weave status
   weave contract show|set <chapter> [--file <path>]
   weave contract check <chapter> | --all
+  weave check <chapter>
+  weave extract <chapter>
+  weave audit <chapter>
+  weave review <chapter> [--waive-warnings]
+  weave timeline <chapter>
   weave write <chapter> [--json|--events] [--cancel-after-ms <n>]
   weave amend <chapter> [--force]
   weave finalize <chapter>

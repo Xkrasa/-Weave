@@ -13,7 +13,7 @@ import { loadContract, contractHash, requirePassingContractCheck } from './contr
 import { collectMaterials } from './materials.ts'
 import { assembleContext } from './context.ts'
 import { streamChapter } from './model.ts'
-import { loadModelConfig } from './project.ts'
+import { loadModelConfig, loadProject } from './project.ts'
 import { atomicWrite, normalizeText, readTextIfExists } from './io.ts'
 import { hashText, objectHash } from './hash.ts'
 import {
@@ -46,7 +46,14 @@ import {
   markProjectionFailed,
   replayProjectionFrom,
 } from './projections.ts'
-import { conflictError, modelError, validationError, WeaveError } from './errors.ts'
+import { conflictError, modelError, reviewBlockedError, validationError, WeaveError } from './errors.ts'
+import { loadStage, requireStage } from './stages.ts'
+import type {
+  ContentCheckReport,
+  CoverageAudit,
+  ExtractionReport,
+  ReviewReport,
+} from './stage-types.ts'
 
 export interface WriteResult {
   chapter: number
@@ -197,6 +204,7 @@ export interface FinalizeResult {
 }
 
 export async function finalizeChapter(root: string, chapter: number): Promise<FinalizeResult> {
+  const project = await loadProject(root)
   const contract = await loadContract(root, chapter)
   await requirePassingContractCheck(root, contract)
   await assertNoPendingImpacts(root)
@@ -220,8 +228,41 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     throw conflictError('草稿引用的正式版本已不在主线中；请重新创建草稿')
   }
   const draftEdited = meta ? hashText(draft) !== meta.contentHash : false
+  const currentDraftHash = hashText(draft)
 
-  const contentHash = hashText(draft)
+  let commitSchemaVersion: 1 | 2 = 1
+  let extractionHash: string | undefined
+  let reviewHash: string | undefined
+  let commitEvidence: CommitRecord['evidence'] = []
+  if (project.workflowVersion === 2) {
+    commitSchemaVersion = 2
+    await requireStage<ContentCheckReport>(root, 'content-check', chapter, currentDraftHash)
+    const extraction = await requireStage<ExtractionReport>(root, 'extraction', chapter, currentDraftHash)
+    const audit = await requireStage<CoverageAudit>(root, 'audit', chapter, currentDraftHash)
+    extractionHash = objectHash(extraction)
+    if (audit.extractionHash !== extractionHash) {
+      throw conflictError('覆盖审计绑定的抽取结果已变化；请重新运行 weave audit')
+    }
+    const review = await loadStage<ReviewReport>(root, 'review', chapter)
+    if (!review) throw validationError(`第 ${chapter} 章缺少 review 报告；请先运行 weave review`)
+    if (review.draftHash !== currentDraftHash) {
+      throw conflictError('审稿报告绑定的草稿已变化；请重新运行 weave review')
+    }
+    if (review.extractionHash !== extractionHash || review.auditHash !== objectHash(audit)) {
+      throw conflictError('审稿报告绑定的抽取或审计已变化；请重新运行 weave review')
+    }
+    if (!review.passed) {
+      throw reviewBlockedError('存在未解决的 blocking 审稿意见，暂不能定稿', {
+        chapter,
+        blockingCount: review.blockingCount,
+        findings: review.findings.filter(finding => finding.severity === 'blocking'),
+      })
+    }
+    reviewHash = objectHash(review)
+    commitEvidence = extraction.records.flatMap(record => record.evidence)
+  }
+
+  const contentHash = currentDraftHash
   const history = await commitsForChapter(root, chapter)
   const revision = history.reduce((max, item) => Math.max(max, item.revision), 0) + 1
   const version = versionPath(root, chapter, revision)
@@ -239,6 +280,10 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     contractHash: contractHash(contract),
     contextHash,
     contentPath,
+    schemaVersion: commitSchemaVersion,
+    extractionHash,
+    reviewHash,
+    evidence: commitEvidence,
   })
   await ensureUniqueCommit(root, commit)
 

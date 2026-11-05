@@ -56,6 +56,7 @@ async function main(): Promise<void> {
     let result = await run(dir, [
       'init', '.', '--title', '百五十章验收', '--model', 'fake',
       '--base-url', 'http://127.0.0.1:1/v1', '--snapshot-every', '10',
+      '--workflow', 'p0',
     ])
     assert.equal(result.code, 0, result.stderr)
 

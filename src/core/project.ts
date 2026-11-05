@@ -10,6 +10,7 @@ export interface ProjectPaths {
   project: string
   modelConfig: string
   checks: string
+  stages: string
   drafts: string
   runs: string
   indexDb: string
@@ -37,6 +38,7 @@ export function projectPaths(root: string): ProjectPaths {
     project: path.join(metadata, 'project.json'),
     modelConfig: path.join(metadata, 'config.json'),
     checks: path.join(metadata, 'checks'),
+    stages: path.join(metadata, 'stages'),
     drafts: path.join(metadata, 'drafts'),
     runs: path.join(metadata, 'runs'),
     indexDb: path.join(metadata, 'index.db'),
@@ -78,7 +80,7 @@ export async function exists(target: string): Promise<boolean> {
 
 export async function loadProject(root: string): Promise<ProjectConfig> {
   const project = await readJson<ProjectConfig>(projectPaths(root).project)
-  if (project.schemaVersion !== 2) {
+  if (project.schemaVersion !== 3) {
     throw conflictError(`不支持的项目版本：${String(project.schemaVersion)}`)
   }
   return project
@@ -98,6 +100,7 @@ export interface InitOptions {
   contextWindow?: number
   maxOutputTokens?: number
   snapshotEvery?: number
+  workflowVersion?: 1 | 2
 }
 
 export async function initProject(dir: string, options: InitOptions = {}): Promise<{ root: string; project: ProjectConfig; config: ModelConfig }> {
@@ -109,7 +112,8 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
 
   const title = options.title?.trim() || path.basename(root)
   const project: ProjectConfig = {
-    schemaVersion: 2,
+    schemaVersion: 3,
+    workflowVersion: options.workflowVersion ?? 2,
     title,
     language: options.language?.trim() || 'zh-CN',
     targetWords: positiveInt(options.targetWords, 1_000_000, 'targetWords'),
@@ -131,6 +135,7 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
   for (const dirPath of [
     paths.metadata,
     paths.checks,
+    paths.stages,
     paths.drafts,
     paths.runs,
     paths.canon,

@@ -5,6 +5,7 @@ import { atomicWrite, ensureDir, listFiles, readTextIfExists } from './io.ts'
 import { hashFileBytes } from './hash.ts'
 import { projectPaths, loadProject, loadModelConfig } from './project.ts'
 import { loadDraftMeta } from './runs.ts'
+import { textAtSpan } from './stages.ts'
 import { assertFinalIntegrity, currentCommit, finalPath, listCommits, readCommit, readMainline } from './ledger.ts'
 import { loadContract } from './contract.ts'
 import { impactSummary, pendingImpactItems } from './impact.ts'
@@ -30,6 +31,7 @@ export interface ProjectStatus {
   title: string
   language: string
   schemaVersion: number
+  workflowVersion: number
   mainlineRevision: number
   chapters: ChapterStatus[]
   drafts: number[]
@@ -73,6 +75,7 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
     title: project.title,
     language: project.language,
     schemaVersion: project.schemaVersion,
+    workflowVersion: project.workflowVersion,
     mainlineRevision: head.mainlineRevision,
     chapters,
     drafts: drafts.sort((a, b) => a - b),
@@ -136,6 +139,21 @@ export async function doctor(root: string): Promise<DoctorResult> {
     }
     if (hashFileBytes(text) !== commit.contentHash) {
       errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的历史版本哈希不一致`)
+    }
+    if (commit.schemaVersion === 2) {
+      const versionText = text.toString('utf8')
+      if (commit.evidenceCount !== commit.evidence.length) {
+        errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的 evidenceCount 与证据数量不一致`)
+      }
+      for (const span of commit.evidence) {
+        if (span.sourceContentHash !== commit.contentHash) {
+          errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的证据来源哈希不一致`)
+          continue
+        }
+        if (textAtSpan(versionText, span) !== span.quote) {
+          errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的证据区间无法回指原文`)
+        }
+      }
     }
   }
 
