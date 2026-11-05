@@ -56,8 +56,10 @@ export function normalizeContract(input: unknown): ChapterContract {
     nextLink: stringField(raw.nextLink),
   }
   if (typeof raw.obstacle === 'string' && raw.obstacle.trim()) contract.obstacle = raw.obstacle.trim()
-  if (raw.narrativeMode === 'omniscient') contract.narrativeMode = 'omniscient'
-  else contract.narrativeMode = 'limited'
+  if (raw.narrativeMode !== undefined && raw.narrativeMode !== 'limited' && raw.narrativeMode !== 'omniscient') {
+    throw validationError('narrativeMode 必须是 limited 或 omniscient')
+  }
+  contract.narrativeMode = raw.narrativeMode === 'omniscient' ? 'omniscient' : 'limited'
   if (Array.isArray(raw.visibleKnowledge)) {
     contract.visibleKnowledge = stringArray(raw.visibleKnowledge)
   }

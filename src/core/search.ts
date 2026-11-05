@@ -1,7 +1,6 @@
 import { DatabaseSync } from 'node:sqlite'
 import { projectPaths } from './project.ts'
 import { readCommit, readMainline, finalPath } from './ledger.ts'
-import { hashText } from './hash.ts'
 import { readTextIfExists } from './io.ts'
 import { conflictError } from './errors.ts'
 
@@ -43,6 +42,11 @@ function open(root: string): DatabaseSync {
       PRIMARY KEY(term, chunk_id)
     );
     CREATE INDEX IF NOT EXISTS search_terms_term ON search_terms(term);
+    CREATE TABLE IF NOT EXISTS search_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      mainline_revision INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `)
   return db
 }
@@ -53,6 +57,10 @@ export async function rebuildSearchIndex(root: string): Promise<{ chunks: number
   try {
     db.exec('BEGIN IMMEDIATE')
     db.exec('DELETE FROM search_terms; DELETE FROM search_chunks;')
+    db.prepare(
+      `INSERT INTO search_state (id, mainline_revision, updated_at) VALUES (1, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET mainline_revision = excluded.mainline_revision, updated_at = excluded.updated_at`,
+    ).run(head.mainlineRevision, new Date().toISOString())
     let chunkCount = 0
     let termCount = 0
     for (const [chapterText, commitId] of Object.entries(head.selectedCommitByChapter)) {
@@ -115,8 +123,16 @@ export async function searchBook(
   if (!query.trim()) throw conflictError('搜索词不能为空')
   const db = open(root)
   try {
+    const head = await readMainline(root)
+    const indexed = db.prepare('SELECT mainline_revision FROM search_state WHERE id = 1')
+      .get() as Record<string, unknown> | undefined
+    if (!indexed) throw conflictError('检索索引为空；请先执行 weave index rebuild')
+    if (Number(indexed.mainline_revision) !== head.mainlineRevision) {
+      throw conflictError('检索索引已落后于主线；请执行 weave index rebuild')
+    }
     const total = db.prepare('SELECT COUNT(*) AS count FROM search_chunks').get() as Record<string, unknown> | undefined
-    if (Number(total?.count ?? 0) === 0) throw conflictError('检索索引为空；请先执行 weave index rebuild')
+    const totalDocs = Number(total?.count ?? 0)
+    if (totalDocs === 0) throw conflictError('检索索引为空；请先执行 weave index rebuild')
     const filterChapter = options.chapter
     const filterEntity = options.entity
     const queryTerms = tokenize(query)
@@ -143,7 +159,7 @@ export async function searchBook(
             .get(term, String(row.chunk_id)) as Record<string, unknown> | undefined
           const tf = Number(tfRow?.tf ?? 0)
           if (tf === 0) continue
-          const idf = Math.log(1 + (filtered.length - (df.get(term) ?? 0) + 0.5) / ((df.get(term) ?? 0) + 0.5))
+          const idf = Math.log(1 + (totalDocs - (df.get(term) ?? 0) + 0.5) / ((df.get(term) ?? 0) + 0.5))
           score += idf * ((tf * 2.5) / (tf + 1.5 * (0.25 + 0.75 * Number(row.length) / (avgLength || 1))))
         }
         return { row, score }
@@ -225,8 +241,4 @@ function paragraphsWithOffsets(text: string): Array<{
     }
   }
   return result
-}
-
-export function indexedContentHash(text: string): string {
-  return hashText(text)
 }

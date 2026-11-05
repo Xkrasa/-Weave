@@ -77,8 +77,7 @@ export async function rebuildLedgerProjection(
     db.prepare('DELETE FROM ledger_projection WHERE chapter >= ?').run(from)
     db.prepare('DELETE FROM ledger_projection_snapshots WHERE chapter >= ?').run(from)
     const applied = await apply(db, root, head, Math.max(0, from - 1))
-    db.exec('COMMIT')
-    return writeStates(db, projectionNames(options.projection), {
+    const state = writeStates(db, projectionNames('all'), {
       mainlineRevision: head.mainlineRevision,
       appliedThrough: applied,
       invalidFrom: null,
@@ -86,6 +85,8 @@ export async function rebuildLedgerProjection(
       status: 'current',
       updatedAt: new Date().toISOString(),
     }, NAME)
+    db.exec('COMMIT')
+    return state
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
@@ -111,8 +112,7 @@ export async function replayLedgerProjectionFrom(
     db.prepare('DELETE FROM ledger_projection WHERE chapter > ?').run(base)
     db.prepare('DELETE FROM ledger_projection_snapshots WHERE chapter > ?').run(base)
     const applied = await apply(db, root, head, base)
-    db.exec('COMMIT')
-    return writeStates(db, projectionNames('all'), {
+    const state = writeStates(db, projectionNames('all'), {
       mainlineRevision: head.mainlineRevision,
       appliedThrough: applied,
       invalidFrom: invalidate ? fromChapter : null,
@@ -120,6 +120,8 @@ export async function replayLedgerProjectionFrom(
       status: 'current',
       updatedAt: new Date().toISOString(),
     }, NAME)
+    db.exec('COMMIT')
+    return state
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
@@ -242,8 +244,8 @@ export async function assertLedgerProjectionCurrent(root: string): Promise<void>
   }
 }
 
-function projectionNames(projection?: LedgerProjectionName | 'all'): LedgerProjectionName[] {
-  return !projection || projection === 'all' ? [...LEDGER_PROJECTIONS] : [projection]
+function projectionNames(_projection?: LedgerProjectionName | 'all'): LedgerProjectionName[] {
+  return [...LEDGER_PROJECTIONS]
 }
 
 function writeStates(
