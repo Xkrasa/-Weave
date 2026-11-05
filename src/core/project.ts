@@ -11,6 +11,7 @@ export interface ProjectPaths {
   modelConfig: string
   checks: string
   stages: string
+  revisions: string
   drafts: string
   runs: string
   indexDb: string
@@ -39,6 +40,7 @@ export function projectPaths(root: string): ProjectPaths {
     modelConfig: path.join(metadata, 'config.json'),
     checks: path.join(metadata, 'checks'),
     stages: path.join(metadata, 'stages'),
+    revisions: path.join(metadata, 'revisions'),
     drafts: path.join(metadata, 'drafts'),
     runs: path.join(metadata, 'runs'),
     indexDb: path.join(metadata, 'index.db'),
@@ -137,6 +139,7 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
     paths.metadata,
     paths.checks,
     paths.stages,
+    paths.revisions,
     paths.drafts,
     paths.runs,
     paths.canon,

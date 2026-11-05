@@ -29,6 +29,12 @@ import { runCoverageAudit, runTimelineReport } from './core/audit.ts'
 import { runReview } from './core/review.ts'
 import { applyWaivers, createWaivers, loadWaivers, revokeWaiver } from './core/waivers.ts'
 import {
+  ignoreFinding,
+  mergeRevision,
+  recheckChapter,
+  reviseChapter,
+} from './core/revisions.ts'
+import {
   checkKnowledge,
   collectLedgerSources,
   effectiveBeliefs,
@@ -100,6 +106,14 @@ async function main(): Promise<number> {
       return commandAudit(root, parsed, json)
     case 'review':
       return commandReview(root, parsed, json)
+    case 'revise':
+      return commandRevise(root, parsed, json)
+    case 'merge':
+      return commandMerge(root, parsed, json)
+    case 'recheck':
+      return commandRecheck(root, parsed, json)
+    case 'ignore':
+      return commandIgnore(root, parsed, json)
     case 'timeline':
       return commandTimeline(root, parsed, json)
     case 'write':
@@ -477,6 +491,72 @@ async function commandReview(root: string, parsed: Parsed, json: boolean): Promi
   return report.passed ? 0 : 7
 }
 
+async function commandRevise(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const rawFindings = optionalString(parsed, 'findings')
+  const findingIds = (rawFindings ?? '').split(',').map(item => item.trim()).filter(Boolean)
+  if (findingIds.length === 0) throw usageError('请提供 --findings <id,...>')
+  const config = await loadModelConfig(root)
+  const result = await reviseChapter(root, chapter, findingIds, config, new AbortController().signal)
+  if (json) outputJson({ ok: true, revisionId: result.candidate.revisionId, plan: result.plan, candidate: result.candidate })
+  else {
+    console.log(`已生成第 ${chapter} 章修订候选：${result.candidate.revisionId}`)
+    console.log(`处理 finding：${result.plan.findings.map(item => item.findingId).join('、')}`)
+    console.log(`原稿：${result.plan.baseDraftHash}`)
+  }
+  return 0
+}
+
+async function commandMerge(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const revisionId = requiredString(parsed, 'revision')
+  const choices: Record<string, 'base' | 'revision' | 'manual'> = {}
+  const rawChoices = optionalString(parsed, 'choices')
+  if (rawChoices) {
+    for (const item of rawChoices.split(',')) {
+      const [paragraphId, value] = item.split('=')
+      if (!paragraphId || (value !== 'base' && value !== 'revision' && value !== 'manual')) {
+        throw usageError('--choices 格式应为 p001=base|revision|manual,p002=...')
+      }
+      choices[paragraphId] = value
+    }
+  }
+  const report = await mergeRevision(root, chapter, revisionId, choices)
+  if (json) outputJson({ ok: report.status === 'merged', report })
+  else if (report.status === 'merged') console.log(`已合并修订 ${revisionId} 到草稿`)
+  else {
+    console.error(`修订 ${revisionId} 存在 ${report.hunks.filter(item => item.status === 'conflict').length} 个冲突`)
+    for (const hunk of report.hunks.filter(item => item.status === 'conflict')) {
+      console.error(`- ${hunk.paragraphId}`)
+    }
+  }
+  return report.status === 'merged' ? 0 : 3
+}
+
+async function commandRecheck(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const config = await loadModelConfig(root)
+  const report = await recheckChapter(root, chapter, config, new AbortController().signal)
+  if (json) outputJson(report)
+  else {
+    console.log(`第 ${chapter} 章复检：${report.passed ? '通过' : '仍有阻断'}`)
+    for (const finding of report.findings) {
+      console.log(`- ${finding.findingId} [${finding.severity}] ${finding.status}: ${finding.description}`)
+    }
+  }
+  return report.passed ? 0 : 7
+}
+
+async function commandIgnore(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const findingId = requiredString(parsed, 'finding')
+  const reason = requiredString(parsed, 'reason')
+  const finding = await ignoreFinding(root, chapter, findingId, reason)
+  if (json) outputJson(finding)
+  else console.log(`已忽略 ${finding.findingId}：${finding.ignoreReason}`)
+  return 0
+}
+
 async function commandTimeline(root: string, parsed: Parsed, json: boolean): Promise<number> {
   if (parsed.positionals[0] === 'series') {
     const registry = await loadCharacters(root)
@@ -780,6 +860,10 @@ function printHelp(): void {
   weave extract <chapter>
   weave audit <chapter>
   weave review <chapter> [--waive-warnings --waive-reason <text>]
+  weave revise <chapter> --findings <id,...>
+  weave merge <chapter> --revision <id> [--choices p001=base|revision|manual]
+  weave recheck <chapter>
+  weave ignore <chapter> --finding <id> --reason <text>
   weave waive <chapter> --finding <id>|--all-warnings --reason <text> [--scope ...] [--until <n>]
   weave waivers list|revoke <waiverId>
   weave timeline <chapter>

@@ -141,8 +141,12 @@ export interface ReviewFinding {
   description: string
   quote?: string
   evidence?: EvidenceSpan
-  status: 'open' | 'waived'
+  status: 'open' | 'planned' | 'applied' | 'verified' | 'ignored' | 'waived'
+  paragraphIds?: string[]
   waiveReason?: string
+  ignoreReason?: string
+  revisionId?: string
+  recheckedAt?: string
 }
 
 export interface ReviewReport {
@@ -158,4 +162,50 @@ export interface ReviewReport {
   model: string
   usage?: RunUsage
   passed: boolean
+}
+
+export interface DraftParagraph {
+  paragraphId: string
+  text: string
+}
+
+export interface RevisionInstruction {
+  findingId: string
+  paragraphIds: string[]
+  goal: string
+}
+
+export interface RevisionCandidate {
+  schemaVersion: 1
+  revisionId: string
+  chapter: number
+  baseDraftHash: string
+  createdAt: string
+  model: string
+  usage?: RunUsage
+  findings: string[]
+  instructions: RevisionInstruction[]
+  baseParagraphs: DraftParagraph[]
+  paragraphs: DraftParagraph[]
+  rejected: Array<{ paragraphId?: string; reason: string }>
+}
+
+export interface MergeHunk {
+  paragraphId: string
+  base: string
+  revision: string
+  manual: string
+  status: 'auto' | 'conflict' | 'manual-only' | 'revision-only'
+  findingIds: string[]
+}
+
+export interface MergeReport {
+  schemaVersion: 1
+  chapter: number
+  revisionId: string
+  createdAt: string
+  status: 'merged' | 'conflict'
+  baseDraftHash: string
+  mergedDraftHash: string | null
+  hunks: MergeHunk[]
 }

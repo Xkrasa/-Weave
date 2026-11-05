@@ -1557,6 +1557,164 @@ test('P1.5 project-scoped waiver suppresses a blocking finding', async () => {
   }
 })
 
+test('P1.6 revises only selected findings, merges, rechecks and finalizes', async () => {
+  const revision = JSON.stringify({
+    paragraphs: [{
+      paragraphId: 'p002',
+      text: '她发现缺页上留着港务局的印，决定追查下去。',
+      findingIds: ['f1'],
+    }],
+  })
+  const recheck = JSON.stringify({
+    summary: '复检通过',
+    findings: [{ findingId: 'f1', resolved: true, note: '已补充追查动机' }],
+    newFindings: [],
+  })
+  const model = new FakeModel([
+    P05_DRAFT,
+    extractionPayload(),
+    coveragePayload(),
+    reviewPayload(true),
+    revision,
+    extractionPayload('她发现缺页上留着港务局的印'),
+    coveragePayload(),
+    recheck,
+  ])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 7)
+    const before = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
+    const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
+    assert.equal(revised.code, 0, revised.stderr)
+    const revisionPayload = parseJson<{ revisionId: string; plan: { findings: Array<{ status: string }> } }>(revised.stdout)
+    assert.equal(revisionPayload.plan.findings[0]?.status, 'applied')
+    assert.equal(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), before)
+
+    const merged = await runCli(dir, ['merge', '1', '--revision', revisionPayload.revisionId, '--json'])
+    assert.equal(merged.code, 0, merged.stderr)
+    assert.match(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), /决定追查下去/)
+
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    const rechecked = await runCli(dir, ['recheck', '1', '--json'])
+    assert.equal(rechecked.code, 0, rechecked.stdout + rechecked.stderr)
+    const report = parseJson<{ passed: boolean; findings: Array<{ status: string }> }>(rechecked.stdout)
+    assert.equal(report.passed, true)
+    assert.equal(report.findings[0]?.status, 'verified')
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.6 reports manual/revision conflicts and resolves by choice', async () => {
+  const revision = JSON.stringify({
+    paragraphs: [{
+      paragraphId: 'p002',
+      text: '她发现缺页上留着港务局的印，决定追查下去。',
+      findingIds: ['f1'],
+    }],
+  })
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload(true), revision])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 7)
+    const noSelection = await runCli(dir, ['revise', '1', '--json'])
+    assert.equal(noSelection.code, 2)
+    assert.equal(model.requests.length, 4)
+    const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
+    const revisionId = parseJson<{ revisionId: string }>(revised.stdout).revisionId
+    await writeFile(
+      path.join(dir, 'chapters', 'drafts', '001.md'),
+      '林岚在码头翻开账本。\n\n她发现缺页上留着港务局的印，但她决定先不声张。\n',
+    )
+    const conflict = await runCli(dir, ['merge', '1', '--revision', revisionId, '--json'])
+    assert.equal(conflict.code, 3)
+    const conflictPayload = parseJson<{ report: { status: string; hunks: Array<{ status: string; paragraphId: string }> } }>(conflict.stdout)
+    assert.equal(conflictPayload.report.status, 'conflict')
+    assert.ok(conflictPayload.report.hunks.some(hunk => hunk.status === 'conflict' && hunk.paragraphId === 'p002'))
+    assert.match(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), /先不声张/)
+
+    const resolved = await runCli(dir, [
+      'merge', '1', '--revision', revisionId, '--choices', 'p002=manual', '--json',
+    ])
+    assert.equal(resolved.code, 0, resolved.stderr)
+    assert.match(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), /先不声张/)
+
+    const ignored = await runCli(dir, ['ignore', '1', '--finding', 'f1', '--reason', '保留原意'])
+    assert.equal(ignored.code, 3)
+    assert.equal(model.requests.length, 5)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.6 recheck keeps unresolved blocking findings and appends new ones', async () => {
+  const revision = JSON.stringify({
+    paragraphs: [{
+      paragraphId: 'p002',
+      text: '她发现缺页上留着港务局的印，决定追查下去。',
+      findingIds: ['f1'],
+    }],
+  })
+  const recheck = JSON.stringify({
+    summary: '仍未解决',
+    findings: [{ findingId: 'f1', resolved: false, note: '仍缺少来源' }],
+    newFindings: [{
+      dimension: '叙事衔接',
+      severity: 'warning',
+      description: '复检新增建议',
+      quote: '林岚在码头翻开账本。',
+      occurrence: 1,
+    }],
+  })
+  const model = new FakeModel([
+    P05_DRAFT,
+    extractionPayload(),
+    coveragePayload(),
+    reviewPayload(true),
+    revision,
+    extractionPayload('她发现缺页上留着港务局的印'),
+    coveragePayload(),
+    recheck,
+  ])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    const review = await runCli(dir, ['review', '1', '--json'])
+    assert.equal(review.code, 7)
+    const revisionPayload = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
+    assert.equal(revisionPayload.code, 0, revisionPayload.stderr)
+    const revisionId = parseJson<{ revisionId: string }>(revisionPayload.stdout).revisionId
+    assert.equal((await runCli(dir, ['merge', '1', '--revision', revisionId, '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    const rechecked = await runCli(dir, ['recheck', '1', '--json'])
+    assert.equal(rechecked.code, 7)
+    const report = parseJson<{ passed: boolean; blockingCount: number; findings: Array<{ findingId: string; status: string }> }>(rechecked.stdout)
+    assert.equal(report.passed, false)
+    assert.equal(report.blockingCount, 1)
+    assert.equal(report.findings[0]?.status, 'open')
+    assert.equal(report.findings[1]?.findingId, 'f2')
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 7)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('split export preserves Chinese filenames and deterministic content', async () => {
   const model = new FakeModel(['林岚把缺页夹进账本。'])
   await model.start()
