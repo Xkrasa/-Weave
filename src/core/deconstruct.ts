@@ -15,6 +15,9 @@ export interface DeconstructReport {
     openingExcerpt: string
     endingExcerpt: string
     structureTags: string[]
+    sceneFunctions: string[]
+    suspensePositions: number[]
+    repeatedPatterns: string[]
   }>
   totals: {
     chapters: number
@@ -33,21 +36,24 @@ export async function deconstructFile(file: string): Promise<DeconstructReport> 
   const chapters = splitChapters(text, ext === '.md')
   const reportChapters = chapters.map((chapter, index) => {
     const paragraphs = chapter.text.split(/\n{2,}/).filter(item => item.trim())
-    const dialogue = [...chapter.text].filter(char => char === '“' || char === '”').length
+    const dialogue = (chapter.text.match(/“[^”]*”|"[^"]*"/g) ?? []).join('')
     const characters = [...chapter.text.replace(/\s/g, '')].length
     return {
       index: index + 1,
       title: chapter.title,
       characters,
       paragraphs: paragraphs.length,
-      dialogueRatio: characters === 0 ? 0 : dialogue / characters,
+      dialogueRatio: characters === 0 ? 0 : [...dialogue].length / characters,
       openingExcerpt: excerpt(chapter.text, 'start'),
       endingExcerpt: excerpt(chapter.text, 'end'),
       structureTags: structureTags(chapter.text),
+      sceneFunctions: sceneFunctions(chapter.text),
+      suspensePositions: suspensePositions(chapter.text),
+      repeatedPatterns: repeatedPatterns(chapter.text),
     }
   })
   const totalCharacters = reportChapters.reduce((sum, item) => sum + item.characters, 0)
-  const dialogue = [...text].filter(char => char === '“' || char === '”').length
+  const dialogue = (text.match(/“[^”]*”|"[^"]*"/g) ?? []).join('')
   return {
     source: path.basename(file),
     format: ext === '.md' ? 'md' : 'txt',
@@ -57,7 +63,9 @@ export async function deconstructFile(file: string): Promise<DeconstructReport> 
       chapters: reportChapters.length,
       characters: totalCharacters,
       averageChapterCharacters: reportChapters.length === 0 ? 0 : Math.round(totalCharacters / reportChapters.length),
-      dialogueRatio: totalCharacters === 0 ? 0 : dialogue / totalCharacters,
+      dialogueRatio: totalCharacters === 0
+        ? 0
+        : [...dialogue].length / Math.max(1, [...text.replace(/\s/g, '')].length),
     },
     notice: '仅供参考结构；不是项目事实，不得直接进入正文或 Canon。',
   }
@@ -85,7 +93,7 @@ function splitChapters(text: string, markdown: boolean): Array<{ title: string; 
 function chapterTitle(line: string, markdown: boolean): string | null {
   const trimmed = line.trim()
   if (markdown && /^#{1,3}\s+/.test(trimmed)) return trimmed.replace(/^#{1,3}\s+/, '')
-  if (/^第[一二三四五六七八九十百千万\d]+章[\s:：、.-]/.test(trimmed)) return trimmed.slice(0, 80)
+  if (/^第[一二三四五六七八九十百千万\d]+章(?:[\s:：、.-]|$)/.test(trimmed)) return trimmed.slice(0, 80)
   if (/^Chapter\s+\d+/i.test(trimmed)) return trimmed.slice(0, 80)
   return null
 }
@@ -104,4 +112,40 @@ function structureTags(text: string): string[] {
   if (text.length > 1200) tags.push('long-scene')
   if (text.length < 300) tags.push('short-scene')
   return tags
+}
+
+function sceneFunctions(text: string): string[] {
+  const functions: string[] = []
+  if (/因为|所以|于是|结果/.test(text)) functions.push('causal-turn')
+  if (/但是|却|然而|反而/.test(text)) functions.push('reversal')
+  if (/决定|选择|必须|不能/.test(text)) functions.push('decision')
+  if (/发现|意识到|明白/.test(text)) functions.push('reveal')
+  return functions
+}
+
+function suspensePositions(text: string): number[] {
+  const positions: number[] = []
+  const characters = [...text]
+  for (let index = 0; index < characters.length; index += 1) {
+    if ('？！?!…'.includes(characters[index]!)) {
+      positions.push(Math.round((index / Math.max(1, characters.length)) * 100))
+    }
+  }
+  return [...new Set(positions)].slice(0, 8)
+}
+
+function repeatedPatterns(text: string): string[] {
+  const counts = new Map<string, number>()
+  const chars = [...text.replace(/\s/g, '')]
+  for (let index = 0; index + 4 <= chars.length; index += 1) {
+    const pattern = chars.slice(index, index + 4).join('')
+    if (/^[\u4e00-\u9fff]{4}$/.test(pattern)) {
+      counts.set(pattern, (counts.get(pattern) ?? 0) + 1)
+    }
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([pattern]) => pattern)
 }

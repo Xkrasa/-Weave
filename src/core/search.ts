@@ -72,11 +72,14 @@ export async function rebuildSearchIndex(root: string): Promise<{ chunks: number
       const paragraphs = paragraphsWithOffsets(text)
       for (const paragraph of paragraphs) {
         const chunkId = `ch-${chapter}-${String(paragraph.index).padStart(3, '0')}`
-        const entities = [
-          ...(commit.ledger?.events.flatMap(event => event.participants) ?? []),
-          ...(commit.ledger?.facts.map(fact => fact.subject) ?? []),
-          ...(commit.ledger?.loops?.flatMap(loop => loop.relatedEntities) ?? []),
+        const chapterEntities = [
+          ...new Set([
+            ...(commit.ledger?.events.flatMap(event => event.participants) ?? []),
+            ...(commit.ledger?.facts.map(fact => fact.subject) ?? []),
+            ...(commit.ledger?.loops?.flatMap(loop => loop.relatedEntities) ?? []),
+          ]),
         ]
+        const entities = chapterEntities.filter(name => paragraph.text.includes(name))
         const tokens = tokenize(paragraph.text)
         const tf = new Map<string, number>()
         for (const token of tokens) tf.set(token, (tf.get(token) ?? 0) + 1)
@@ -136,7 +139,7 @@ export async function searchBook(
     const filterChapter = options.chapter
     const filterEntity = options.entity
     const queryTerms = tokenize(query)
-    const fallback = query.length <= 2 || queryTerms.length === 0
+    const fallback = query.length <= 1 || queryTerms.length === 0
     if (!fallback) {
       const rows = db.prepare('SELECT * FROM search_chunks').all() as Array<Record<string, unknown>>
       const filtered = rows.filter(row =>
@@ -181,6 +184,24 @@ export async function searchBook(
       .slice(0, options.limit ?? 8)
       .map(toResult)
     return { query, fallback: true, results }
+  } finally {
+    db.close()
+  }
+}
+
+export async function readSearchChunk(
+  root: string,
+  chunkId: string,
+): Promise<(SearchResult & { parentText: string }) | null> {
+  const db = open(root)
+  try {
+    const row = db.prepare('SELECT * FROM search_chunks WHERE chunk_id = ?').get(chunkId) as
+      | Record<string, unknown>
+      | undefined
+    if (!row) return null
+    const chapter = Number(row.chapter)
+    const parentText = (await readTextIfExists(finalPath(root, chapter))) ?? ''
+    return { ...toResult(row), parentText }
   } finally {
     db.close()
   }

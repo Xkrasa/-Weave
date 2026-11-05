@@ -18,10 +18,12 @@ import { atomicWrite, atomicWriteJson, ensureDir, readJsonIfExists } from './io.
 import { objectHash, hashText } from './hash.ts'
 import { projectPaths } from './project.ts'
 import { draftPath } from './ledger.ts'
-import { chapterFileStem } from './contract.ts'
+import { chapterFileStem, loadContract } from './contract.ts'
 import { conflictError, validationError } from './errors.ts'
 import { applyWaivers } from './waivers.ts'
 import { loadMethods, methodText, selectMethods } from './methods.ts'
+import { loadStyleConstitution, loadAuthorSamples, styleText } from './style.ts'
+import { collectLedger, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
 
 const REVISION_SYSTEM = [
   '你是小说修稿器。只修改请求中列出的段落，不重写整章。',
@@ -191,18 +193,32 @@ export async function rewriteParagraph(
   const selection = await selectMethods(root, chapter)
   const library = await loadMethods(root)
   const methods = library.filter(module => selection.modules.some(item => item.id === module.id))
+  const contract = await loadContract(root, chapter)
+  const prior = await collectLedger(root, Math.max(0, chapter - 1))
+  const povFacts = effectiveFacts(prior.facts, Math.max(0, chapter - 1))
+    .filter(fact => fact.subject === contract.pov)
+  const povBeliefs = effectiveBeliefs(prior.beliefs, contract.pov, Math.max(0, chapter - 1))
+  const style = await loadStyleConstitution(root)
+  const samples = await loadAuthorSamples(root)
   const prompt = [
     `第 ${chapter} 章局部改写。目标：${goal}`,
     `只改写 ${paragraphId}，其他段落保持不变。`,
     '当前段落：',
     target.text,
     '',
+    '视角知识：',
+    JSON.stringify({ pov: contract.pov, facts: povFacts, beliefs: povBeliefs }, null, 2),
+    '',
+    '风格宪法：',
+    styleText(style),
+    samples.length > 0 ? `作者样本：\n${samples.map(sample => sample.text).join('\n---\n')}` : '',
+    '',
     '可用方法：',
     methods.map(methodText).join('\n\n'),
     '',
     '只输出：',
     JSON.stringify({ text: '改写后的完整段落' }, null, 2),
-  ].join('\n')
+  ].filter(Boolean).join('\n')
   const model = config.reviewModel ?? config.model
   const result = await completeText({
     config: { ...config, model },

@@ -6,6 +6,8 @@ import { loadCharacters, loadContract } from './contract.ts'
 import { projectPaths } from './project.ts'
 import { currentCommit, readMainline } from './ledger.ts'
 import { collectLedger, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
+import { loadMethods, methodText, selectMethods } from './methods.ts'
+import { loadStyleConstitution, loadAuthorSamples, styleText } from './style.ts'
 import { conflictError } from './errors.ts'
 
 interface ReferenceManifestEntry {
@@ -141,6 +143,50 @@ export async function collectMaterials(root: string, contract: ChapterContract):
         false,
         '已定稿章节索引（仅定位）',
         rows.join('\n'),
+      ),
+    )
+  }
+
+  const styleConfig = await readJsonIfExists<Record<string, unknown>>(path.join(paths.canon, 'style.json'))
+  if (styleConfig) {
+    const style = await loadStyleConstitution(root)
+    materials.push(
+      material(
+        'style:constitution',
+        'author',
+        'author',
+        true,
+        '结构化风格宪法',
+        styleText(style),
+      ),
+    )
+  }
+  const samples = await loadAuthorSamples(root)
+  if (samples.length > 0) {
+    materials.push(
+      material(
+        'style:author-samples',
+        'author',
+        'author',
+        true,
+        '作者样本段落（优先级高于通用方法）',
+        samples.map(sample => sample.text).join('\n\n---\n\n'),
+      ),
+    )
+  }
+
+  const methodSelection = await selectMethods(root, contract.chapter)
+  if (methodSelection.modules.length > 0) {
+    const library = await loadMethods(root)
+    const selected = library.filter(module => methodSelection.modules.some(item => item.id === module.id))
+    materials.push(
+      material(
+        'methods:selected',
+        'derived-locator',
+        'derived',
+        true,
+        '按本章诊断选中的写作方法',
+        selected.map(methodText).join('\n\n'),
       ),
     )
   }

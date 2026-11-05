@@ -43,7 +43,8 @@ import {
   rewriteParagraph,
 } from './core/revisions.ts'
 import { loadMethods, selectMethods, styleCheck } from './core/methods.ts'
-import { rebuildSearchIndex, searchBook } from './core/search.ts'
+import { loadAuthorSamples } from './core/style.ts'
+import { rebuildSearchIndex, readSearchChunk, searchBook } from './core/search.ts'
 import { deconstructFile } from './core/deconstruct.ts'
 import {
   checkKnowledge,
@@ -103,6 +104,8 @@ async function main(): Promise<number> {
       return commandWaivers(root, parsed, json)
     case 'search':
       return commandSearch(root, parsed, json)
+    case 'chunk':
+      return commandChunk(root, parsed, json)
     case 'index':
       return commandIndex(root, parsed, json)
     case 'deconstruct':
@@ -337,6 +340,16 @@ async function commandSearch(root: string, parsed: Parsed, json: boolean): Promi
   return 0
 }
 
+async function commandChunk(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chunkId = parsed.positionals[0]
+  if (!chunkId) throw usageError('用法：weave chunk <chunkId>')
+  const chunk = await readSearchChunk(root, chunkId)
+  if (!chunk) throw validationError(`未找到检索块：${chunkId}`)
+  if (json) outputJson(chunk)
+  else console.log(chunk.parentText)
+  return 0
+}
+
 async function commandIndex(root: string, parsed: Parsed, json: boolean): Promise<number> {
   if (parsed.positionals[0] !== 'rebuild') throw usageError('用法：weave index rebuild')
   const result = await rebuildSearchIndex(root)
@@ -403,7 +416,9 @@ async function commandMethod(root: string, parsed: Parsed, json: boolean): Promi
   }
   if (action === 'route') {
     const chapter = parseChapter(parsed.positionals[1])
-    const selection = await selectMethods(root, chapter)
+    const selection = await selectMethods(root, chapter, {
+      maxTokens: optionalNumber(parsed, 'max-tokens'),
+    })
     if (json) outputJson(selection)
     else {
       for (const item of selection.modules) console.log(`${item.id}\t${item.reason}`)
@@ -416,7 +431,13 @@ async function commandMethod(root: string, parsed: Parsed, json: boolean): Promi
 
 async function commandStyle(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const action = parsed.positionals[0]
-  if (action !== 'check') throw usageError('用法：weave style check <chapter>')
+  if (action === 'samples') {
+    const samples = await loadAuthorSamples(root)
+    if (json) outputJson({ samples })
+    else for (const sample of samples) console.log(`${sample.id}\t${sample.source}`)
+    return 0
+  }
+  if (action !== 'check') throw usageError('用法：weave style check <chapter>|samples')
   const chapter = parseChapter(parsed.positionals[1])
   const report = await styleCheck(root, chapter)
   if (json) outputJson(report)
@@ -1005,8 +1026,9 @@ function printHelp(): void {
   weave knowledge check <chapter>
   weave rewrite <chapter> --paragraph <id> --goal <text>
   weave method list|show <id>|route <chapter>
-  weave style check <chapter>
+  weave style check <chapter>|samples
   weave search <query> [--chapter <n>] [--entity <id>] [--limit <n>]
+  weave chunk <chunkId>
   weave index rebuild
   weave deconstruct <file>
   weave loops list|show <loopId>

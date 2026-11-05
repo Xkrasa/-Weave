@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -2211,6 +2211,7 @@ test('P2.1 routes methods, checks style and rewrites only the target paragraph',
     assert.ok(parseJson<{ modules: Array<{ id: string }> }>(listed.stdout).modules.some(item => item.id === 'structure-causality'))
 
     assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.ok(JSON.stringify(model.requests[0]).includes('structure-causality'))
     const routed = await runCli(dir, ['method', 'route', '1', '--json'])
     assert.equal(routed.code, 0, routed.stderr)
     const selection = parseJson<{ modules: Array<{ id: string }>; estimatedTokens: number }>(routed.stdout)
@@ -2218,12 +2219,24 @@ test('P2.1 routes methods, checks style and rewrites only the target paragraph',
     assert.ok(selection.modules.length > 0)
     assert.ok(selection.estimatedTokens > 0)
 
+    await mkdir(path.join(dir, 'canon', 'samples'), { recursive: true })
+    await writeFile(path.join(dir, 'canon', 'samples', 'voice.md'), '林岚把账本按在桌上。\n')
+    await writeFile(path.join(dir, 'canon', 'style.json'), `${JSON.stringify({
+      sentenceLength: { min: 5, max: 10 },
+      dialogueRatio: { min: 0, max: 1 },
+      forbiddenPatterns: ['五味杂陈'],
+    }, null, 2)}\n`)
+    const samples = await runCli(dir, ['style', 'samples', '--json'])
+    assert.equal(samples.code, 0, samples.stderr)
+    assert.equal(parseJson<{ samples: unknown[] }>(samples.stdout).samples.length, 1)
+
     const style = await runCli(dir, ['style', 'check', '1', '--json'])
     assert.equal(style.code, 0, style.stderr)
     assert.ok(
       parseJson<{ findings: Array<{ code: string }> }>(style.stdout).findings.some(item => item.code === 'LONG_SENTENCE'),
       style.stdout,
     )
+    assert.equal(parseJson<{ style: { sentenceLength: { max: number } } }>(style.stdout).style.sentenceLength.max, 10)
 
     const before = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
     const rewrite = await runCli(dir, [
@@ -2264,10 +2277,19 @@ test('P2.2 indexes Chinese chunks, searches short terms, deconstructs and export
 
     const search = await runCli(dir, ['search', '账本', '--json'])
     assert.equal(search.code, 0, search.stderr)
-    const results = parseJson<{ results: Array<{ chapter: number; paragraph: number; evidence: { quote: string } }> }>(search.stdout)
+    const results = parseJson<{
+      fallback: boolean
+      results: Array<{ chapter: number; paragraph: number; evidence: { quote: string } }>
+    }>(search.stdout)
+    assert.equal(results.fallback, false)
     assert.ok(results.results.length > 0)
     assert.ok(results.results.some(item => item.chapter === 1))
     assert.ok(results.results[0]?.evidence.quote.includes('账本'))
+    const chunkId = (results.results[0] as { chunkId?: string }).chunkId
+    assert.ok(chunkId)
+    const chunk = await runCli(dir, ['chunk', chunkId!, '--json'])
+    assert.equal(chunk.code, 0, chunk.stderr)
+    assert.match(parseJson<{ parentText: string }>(chunk.stdout).parentText, /账本/)
 
     const short = await runCli(dir, ['search', '账', '--json'])
     assert.equal(short.code, 0, short.stderr)

@@ -5,6 +5,7 @@ import { listFiles, readTextIfExists } from './io.ts'
 import { loadContract } from './contract.ts'
 import { loadStage, readDraft } from './stages.ts'
 import { projectPaths } from './project.ts'
+import { loadStyleConstitution } from './style.ts'
 
 export interface MethodModule {
   id: string
@@ -29,7 +30,7 @@ const BUILT_INS: MethodModule[] = [
   {
     id: 'structure-causality',
     version: 1,
-    tags: ['structure', 'causality', 'plot'],
+    tags: ['structure', 'causality', 'plot', '结构', '因果', '目标'],
     scope: 'long-form chapter',
     signal: '章节目标、阻力或结果之间缺少因果链；事件只是依次发生。',
     diagnosis: '先判断目标是否被具体阻力改变，再判断结果是否产生新的代价。',
@@ -42,7 +43,7 @@ const BUILT_INS: MethodModule[] = [
   {
     id: 'character-motivation',
     version: 1,
-    tags: ['character', 'motivation', 'pov'],
+    tags: ['character', 'motivation', 'pov', '人物', '动机', '视角'],
     scope: 'long-form chapter',
     signal: '人物行为像作者安排，而不是由目标、恐惧或误判推动。',
     diagnosis: '检查人物此刻知道什么、误以为什么、最怕失去什么。',
@@ -55,7 +56,7 @@ const BUILT_INS: MethodModule[] = [
   {
     id: 'scene-conflict',
     version: 1,
-    tags: ['scene', 'conflict', 'pacing'],
+    tags: ['scene', 'conflict', 'pacing', '场景', '冲突', '节奏'],
     scope: 'long-form chapter',
     signal: '场景空转；人物聊天但没有新信息、新阻力或新决定。',
     diagnosis: '区分信息交换、关系变化和局势变化；没有变化的场景应合并或删除。',
@@ -68,7 +69,7 @@ const BUILT_INS: MethodModule[] = [
   {
     id: 'anti-template',
     version: 1,
-    tags: ['style', 'voice', 'ai'],
+    tags: ['style', 'voice', 'ai', '文风', '模板', '抒情'],
     scope: 'revision only',
     signal: '段落尾总结、抽象抒情、所有人同腔调、连续同构句式。',
     diagnosis: '先修结构和人物，再清理模板化表达；不要把结构问题当文风问题。',
@@ -93,7 +94,11 @@ export async function loadMethods(root: string): Promise<MethodModule[]> {
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id))
 }
 
-export async function selectMethods(root: string, chapter: number): Promise<MethodSelection> {
+export async function selectMethods(
+  root: string,
+  chapter: number,
+  options: { maxTokens?: number } = {},
+): Promise<MethodSelection> {
   const contract = await loadContract(root, chapter)
   const review = await loadStage<ReviewReport>(root, 'review', chapter)
   const modules = await loadMethods(root)
@@ -106,16 +111,23 @@ export async function selectMethods(root: string, chapter: number): Promise<Meth
   const scores = modules.map(module => {
     let score = 0
     if (module.tags.some(tag => text.includes(tag))) score += 2
-    if (module.id === 'structure-causality' && /因果|目标|阻力|结构/.test(text)) score += 2
+    if (text.includes(module.id)) score += 2
+    if (module.id === 'structure-causality' && /因果|目标|阻力|结构|动机/.test(text)) score += 2
     if (module.id === 'character-motivation' && /人物|动机|视角|误判/.test(text)) score += 2
     if (module.id === 'scene-conflict' && /场景|冲突|节奏|空转/.test(text)) score += 2
-    if (module.id === 'anti-template' && /文风|模板|AI|抒情/.test(text)) score += 1
+    if (module.id === 'anti-template' && /文风|模板|AI|抒情|总结/.test(text)) score += 1
     if (review?.findings.some(finding => finding.severity === 'blocking')
       && module.id === 'structure-causality') score += 1
     return { module, score }
   }).filter(item => item.score > 0)
     .sort((a, b) => b.score - a.score || a.module.id.localeCompare(b.module.id))
     .slice(0, 3)
+  const maxTokens = options.maxTokens ?? 1200
+  while (scores.length > 1) {
+    const estimated = Math.ceil(scores.reduce((sum, item) => sum + methodText(item.module).length, 0) / 1.6)
+    if (estimated <= maxTokens) break
+    scores.pop()
+  }
   return {
     modules: scores.map(item => ({
       id: item.module.id,
@@ -130,23 +142,43 @@ export async function styleCheck(root: string, chapter: number): Promise<{
   passed: boolean
   findings: Array<{ severity: 'blocking' | 'warning'; code: string; message: string }>
   stats: { sentences: number; averageSentenceLength: number; dialogueRatio: number }
+  style: Awaited<ReturnType<typeof loadStyleConstitution>>
 }> {
   const draft = await readDraft(root, chapter)
+  const style = await loadStyleConstitution(root)
   const sentences = draft.split(/[。！？!?]/).map(item => item.trim()).filter(Boolean)
   const avg = sentences.length === 0 ? 0 : sentences.reduce((sum, item) => sum + [...item].length, 0) / sentences.length
-  const dialogueChars = [...draft].filter(char => char === '“' || char === '”' || char === '"').length
-  const dialogueRatio = [...draft].length === 0 ? 0 : dialogueChars / [...draft].length
+  const dialogueText = (draft.match(/“[^”]*”|"[^"]*"/g) ?? []).join('')
+  const dialogueRatio = [...draft].length === 0 ? 0 : [...dialogueText].length / [...draft].length
   const findings: Array<{ severity: 'blocking' | 'warning'; code: string; message: string }> = []
-  if (avg > 40) findings.push({ severity: 'warning', code: 'LONG_SENTENCE', message: `平均句长 ${avg.toFixed(1)} 字，超过 40` })
-  if (dialogueRatio < 0.02 && draft.length > 200) {
-    findings.push({ severity: 'warning', code: 'LOW_DIALOGUE', message: '对白占比过低，场景可能缺少人物压力' })
+  if (avg > style.sentenceLength.max) {
+    findings.push({
+      severity: 'warning',
+      code: 'LONG_SENTENCE',
+      message: `平均句长 ${avg.toFixed(1)} 字，超过 ${style.sentenceLength.max}`,
+    })
+  }
+  if (avg < style.sentenceLength.min && sentences.length > 3) {
+    findings.push({
+      severity: 'warning',
+      code: 'SHORT_SENTENCE',
+      message: `平均句长 ${avg.toFixed(1)} 字，低于 ${style.sentenceLength.min}`,
+    })
+  }
+  if (dialogueRatio < style.dialogueRatio.min && draft.length > 200) {
+    findings.push({ severity: 'warning', code: 'LOW_DIALOGUE', message: '对白占比低于风格宪法下限' })
+  }
+  if (dialogueRatio > style.dialogueRatio.max) {
+    findings.push({ severity: 'warning', code: 'HIGH_DIALOGUE', message: '对白占比高于风格宪法上限' })
   }
   const prohibitions = await readTextIfExists(path.join(projectPaths(root).canon, 'prohibitions.md'))
-  if (prohibitions) {
-    for (const line of prohibitions.split(/\r?\n/).map(item => item.trim()).filter(Boolean)) {
-      if (draft.includes(line)) {
-        findings.push({ severity: 'blocking', code: 'PROHIBITED_TEXT', message: `命中禁区：${line}` })
-      }
+  const forbidden = [
+    ...style.forbiddenPatterns,
+    ...(prohibitions?.split(/\r?\n/).map(item => item.trim()).filter(Boolean) ?? []),
+  ]
+  for (const pattern of forbidden) {
+    if (draft.includes(pattern)) {
+      findings.push({ severity: 'blocking', code: 'PROHIBITED_TEXT', message: `命中禁区：${pattern}` })
     }
   }
   return {
@@ -154,6 +186,7 @@ export async function styleCheck(root: string, chapter: number): Promise<{
     passed: findings.every(finding => finding.severity !== 'blocking'),
     findings,
     stats: { sentences: sentences.length, averageSentenceLength: avg, dialogueRatio },
+    style,
   }
 }
 
