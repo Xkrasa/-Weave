@@ -2,7 +2,7 @@ import path from 'node:path'
 import { readFile, rm } from 'node:fs/promises'
 import type { ProjectionState } from './types.ts'
 import { atomicWrite, ensureDir, listFiles, readTextIfExists } from './io.ts'
-import { hashFileBytes } from './hash.ts'
+import { hashFileBytes, objectHash } from './hash.ts'
 import { projectPaths, loadProject, loadModelConfig } from './project.ts'
 import { loadDraftMeta } from './runs.ts'
 import { textAtSpan } from './stages.ts'
@@ -140,7 +140,7 @@ export async function doctor(root: string): Promise<DoctorResult> {
     if (hashFileBytes(text) !== commit.contentHash) {
       errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的历史版本哈希不一致`)
     }
-    if (commit.schemaVersion === 2) {
+    if (commit.schemaVersion >= 2) {
       const versionText = text.toString('utf8')
       if (commit.evidenceCount !== commit.evidence.length) {
         errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的 evidenceCount 与证据数量不一致`)
@@ -153,6 +153,21 @@ export async function doctor(root: string): Promise<DoctorResult> {
         if (textAtSpan(versionText, span) !== span.quote) {
           errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的证据区间无法回指原文`)
         }
+      }
+    }
+    if (commit.schemaVersion === 3) {
+      const ledger = commit.ledger ?? { events: [], facts: [], beliefs: [] }
+      if (commit.ledgerHash !== objectHash(ledger)) {
+        errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的账本哈希不一致`)
+      }
+      if (commit.eventCount !== ledger.events.length) {
+        errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的 eventCount 不一致`)
+      }
+      if (commit.factCount !== ledger.facts.length) {
+        errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的 factCount 不一致`)
+      }
+      if (commit.beliefCount !== ledger.beliefs.length) {
+        errors.push(`第 ${commit.chapter} 章 rev-${commit.revision} 的 beliefCount 不一致`)
       }
     }
   }

@@ -1,8 +1,9 @@
 import type { EvidenceSpan } from './stage-types.ts'
 
 export interface ProjectConfig {
-  schemaVersion: 3
+  schemaVersion: 4
   workflowVersion: 1 | 2
+  ledgerVersion: 1
   title: string
   language: string
   targetWords: number
@@ -131,8 +132,54 @@ export interface GenerationEvent {
   error?: string
 }
 
+export interface LedgerEvent {
+  eventId: string
+  chapter: number
+  summary: string
+  storyTime?: string
+  participants: string[]
+  location?: string
+  causedBy: string[]
+  evidence: EvidenceSpan[]
+}
+
+export interface LedgerFact {
+  factId: string
+  subject: string
+  predicate: string
+  object: string
+  validFromChapter: number
+  validToChapter: number | null
+  sourceEvent?: string
+  origin: 'author' | 'derived' | 'candidate'
+  supersedes?: string | null
+  confidence: number
+  evidence: EvidenceSpan[]
+}
+
+export type BeliefAttitude = 'knows' | 'believes' | 'suspects' | 'misbelieves' | 'doubts'
+
+export interface LedgerBelief {
+  beliefId: string
+  characterId: string
+  proposition: string
+  attitude: BeliefAttitude
+  sourceEvent?: string
+  learnedAtChapter: number
+  confidence: number
+  validFromChapter: number
+  validToChapter: number | null
+  evidence: EvidenceSpan[]
+}
+
+export interface LedgerDelta {
+  events: LedgerEvent[]
+  facts: LedgerFact[]
+  beliefs: LedgerBelief[]
+}
+
 export interface CommitRecord {
-  schemaVersion: 1 | 2
+  schemaVersion: 1 | 2 | 3
   commitId: string
   chapter: number
   revision: number
@@ -145,6 +192,11 @@ export interface CommitRecord {
   extractionHash?: string
   reviewHash?: string
   evidenceCount?: number
+  ledgerHash?: string
+  eventCount?: number
+  factCount?: number
+  beliefCount?: number
+  ledger?: LedgerDelta
   evidence: EvidenceSpan[]
 }
 

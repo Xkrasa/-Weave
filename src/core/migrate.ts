@@ -5,7 +5,7 @@ import { atomicWriteJson, ensureDir, readJsonIfExists } from './io.ts'
 import { projectPaths } from './project.ts'
 import { conflictError } from './errors.ts'
 
-export const CURRENT_SCHEMA_VERSION = 3
+export const CURRENT_SCHEMA_VERSION = 4
 
 export interface MigrationResult {
   migrated: boolean
@@ -44,6 +44,11 @@ export async function ensureProjectMigrated(root: string): Promise<MigrationResu
   if (version < 3) {
     project.workflowVersion = 1
     project.schemaVersion = 3
+    await atomicWriteJson(paths.project, project)
+  }
+  if (version < 4) {
+    project.ledgerVersion = 1
+    project.schemaVersion = 4
     await atomicWriteJson(paths.project, project)
   }
 

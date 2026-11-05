@@ -18,7 +18,7 @@ import {
 } from './core/contract.ts'
 import { writeChapter, amendChapter, finalizeChapter } from './core/writing.ts'
 import { createImpactReport, loadImpactReport, resolveImpact } from './core/impact.ts'
-import { currentCommit } from './core/ledger.ts'
+import { currentCommit, readMainline } from './core/ledger.ts'
 import { doctor, exportBook, projectStatus, rebuildBook, type ExportFormat } from './core/services.ts'
 import { WeaveError, usageError, validationError } from './core/errors.ts'
 import { ensureProjectMigrated } from './core/migrate.ts'
@@ -27,6 +27,7 @@ import { runContentCheck } from './core/content-check.ts'
 import { runExtraction } from './core/extraction.ts'
 import { runCoverageAudit, runTimelineReport } from './core/audit.ts'
 import { runReview } from './core/review.ts'
+import { collectLedgerSources, effectiveBeliefs, effectiveFacts } from './core/story-ledger.ts'
 import { draftHash, loadStage, readDraft, requireStage, saveStage } from './core/stages.ts'
 import type {
   ContentCheckReport,
@@ -66,6 +67,8 @@ async function main(): Promise<number> {
       return commandStatus(root, json)
     case 'contract':
       return commandContract(root, parsed, json)
+    case 'ledger':
+      return commandLedger(root, parsed, json)
     case 'check':
       return commandCheck(root, parsed, json)
     case 'extract':
@@ -204,6 +207,50 @@ async function checkAllContracts(root: string, json: boolean): Promise<number> {
     for (const failure of failures) console.error(`- 第 ${failure.chapter} 章：${JSON.stringify(failure.errors)}`)
   }
   return ok ? 0 : 3
+}
+
+async function commandLedger(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0]
+  const id = parsed.positionals[1]
+  if (!action || !id) throw usageError('用法：weave ledger event|fact|entity|beliefs <id> [--chapter <n>]')
+  const sources = await collectLedgerSources(root)
+  if (action === 'event') {
+    const found = sources.events.find(item => item.record.eventId === id)
+    if (!found) throw validationError(`未找到事件：${id}`)
+    if (json) outputJson(found)
+    else console.log(JSON.stringify(found, null, 2))
+    return 0
+  }
+  if (action === 'fact') {
+    const found = sources.facts.find(item => item.record.factId === id)
+    if (!found) throw validationError(`未找到事实：${id}`)
+    if (found.record.origin === 'candidate') throw validationError(`事实 ${id} 仍是候选，不能用于查询`)
+    if (json) outputJson(found)
+    else console.log(JSON.stringify(found, null, 2))
+    return 0
+  }
+  const head = await readMainline(root)
+  const latestChapter = Math.max(0, ...Object.keys(head.selectedCommitByChapter).map(Number))
+  const chapter = optionalNumber(parsed, 'chapter') ?? latestChapter
+  if (chapter <= 0) throw validationError('项目还没有已定稿章节')
+  if (action === 'entity') {
+    const facts = effectiveFacts(sources.facts.map(item => item.record), chapter)
+      .filter(fact => fact.subject === id)
+    const commitByFact = new Map(sources.facts.map(item => [item.record.factId, item.commitId]))
+    const result = facts.map(fact => ({ ...fact, commitId: commitByFact.get(fact.factId) }))
+    if (json) outputJson({ entityId: id, chapter, facts: result })
+    else console.log(JSON.stringify({ entityId: id, chapter, facts: result }, null, 2))
+    return 0
+  }
+  if (action === 'beliefs') {
+    const beliefs = effectiveBeliefs(sources.beliefs.map(item => item.record), id, chapter)
+    const commitByBelief = new Map(sources.beliefs.map(item => [item.record.beliefId, item.commitId]))
+    const result = beliefs.map(belief => ({ ...belief, commitId: commitByBelief.get(belief.beliefId) }))
+    if (json) outputJson({ characterId: id, chapter, beliefs: result })
+    else console.log(JSON.stringify({ characterId: id, chapter, beliefs: result }, null, 2))
+    return 0
+  }
+  throw usageError('用法：weave ledger event|fact|entity|beliefs <id> [--chapter <n>]')
 }
 
 async function commandCheck(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -561,6 +608,7 @@ function printHelp(): void {
   weave status
   weave contract show|set <chapter> [--file <path>]
   weave contract check <chapter> | --all
+  weave ledger event|fact|entity|beliefs <id> [--chapter <n>]
   weave check <chapter>
   weave extract <chapter>
   weave audit <chapter>

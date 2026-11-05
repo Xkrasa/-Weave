@@ -95,10 +95,11 @@ export function buildCommit(input: {
   contractHash: string
   contextHash: string
   contentPath: string
-  schemaVersion?: 1 | 2
+  schemaVersion?: 1 | 2 | 3
   extractionHash?: string
   reviewHash?: string
   evidence?: CommitRecord['evidence']
+  ledger?: CommitRecord['ledger']
 }): CommitRecord {
   const schemaVersion = input.schemaVersion ?? 1
   const body: CommitRecord = {
@@ -117,6 +118,13 @@ export function buildCommit(input: {
   if (input.extractionHash) body.extractionHash = input.extractionHash
   if (input.reviewHash) body.reviewHash = input.reviewHash
   if (input.evidence) body.evidenceCount = input.evidence.length
+  if (input.ledger) {
+    body.ledger = input.ledger
+    body.ledgerHash = objectHash(input.ledger)
+    body.eventCount = input.ledger.events.length
+    body.factCount = input.ledger.facts.length
+    body.beliefCount = input.ledger.beliefs.length
+  }
   body.commitId = objectHash({
     schemaVersion,
     chapter: input.chapter,
@@ -126,6 +134,7 @@ export function buildCommit(input: {
     contextHash: input.contextHash,
     extractionHash: input.extractionHash ?? null,
     reviewHash: input.reviewHash ?? null,
+    ledgerHash: body.ledgerHash ?? null,
   })
   return body
 }

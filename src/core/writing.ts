@@ -9,7 +9,7 @@ import type {
   RunRecord,
 } from './types.ts'
 import { assertNoPendingImpacts, createImpactReport } from './impact.ts'
-import { loadContract, contractHash, requirePassingContractCheck } from './contract.ts'
+import { loadCharacters, loadContract, contractHash, requirePassingContractCheck } from './contract.ts'
 import { collectMaterials } from './materials.ts'
 import { assembleContext } from './context.ts'
 import { streamChapter } from './model.ts'
@@ -54,6 +54,7 @@ import type {
   ExtractionReport,
   ReviewReport,
 } from './stage-types.ts'
+import { assertValidLedger, buildLedgerDelta, collectLedger } from './story-ledger.ts'
 
 export interface WriteResult {
   chapter: number
@@ -230,9 +231,10 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
   const draftEdited = meta ? hashText(draft) !== meta.contentHash : false
   const currentDraftHash = hashText(draft)
 
-  const commitSchemaVersion: 1 | 2 = 2
+  const commitSchemaVersion: 1 | 2 | 3 = 3
   let extractionHash: string | undefined
   let reviewHash: string | undefined
+  let ledger: CommitRecord['ledger'] = { events: [], facts: [], beliefs: [] }
   let commitEvidence: CommitRecord['evidence'] = []
   if (project.workflowVersion === 2) {
     await requireStage<ContentCheckReport>(root, 'content-check', chapter, currentDraftHash)
@@ -258,7 +260,22 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
       })
     }
     reviewHash = objectHash(review)
-    commitEvidence = extraction.records.flatMap(record => record.evidence)
+    const delta = buildLedgerDelta(chapter, extraction)
+    const prior = await collectLedger(root, chapter - 1)
+    const registry = await loadCharacters(root)
+    assertValidLedger(
+      chapter,
+      delta,
+      registry,
+      new Set(prior.facts.map(fact => fact.factId)),
+      new Set(prior.events.map(event => event.eventId)),
+    )
+    ledger = delta
+    commitEvidence = [
+      ...delta.events.flatMap(event => event.evidence),
+      ...delta.facts.flatMap(fact => fact.evidence),
+      ...delta.beliefs.flatMap(belief => belief.evidence),
+    ]
   }
 
   const contentHash = currentDraftHash
@@ -283,6 +300,7 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     extractionHash,
     reviewHash,
     evidence: commitEvidence,
+    ledger,
   })
   await ensureUniqueCommit(root, commit)
 

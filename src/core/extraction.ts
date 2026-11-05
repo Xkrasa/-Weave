@@ -1,4 +1,4 @@
-import type { ChapterContract, ModelConfig } from './types.ts'
+import type { BeliefAttitude, ChapterContract, LedgerBelief, LedgerFact, ModelConfig } from './types.ts'
 import type {
   EvidenceSpan,
   ExtractedRecord,
@@ -9,6 +9,7 @@ import type {
 import { completeText } from './model.ts'
 import { draftHash, parseJsonObject, resolveEvidence, saveStage } from './stages.ts'
 import { validationError } from './errors.ts'
+import { eventIdFor, normalizeAttitude } from './story-ledger.ts'
 
 const SYSTEM_PROMPT = [
   '你是小说事实抽取器，不是写作模型。',
@@ -57,6 +58,31 @@ export async function runExtraction(
         participants: ['人物名'],
         causedBy: [],
         type: 'main',
+        evidence: [{ quote: '正文中的逐字引文', occurrence: 1 }],
+      }],
+      facts: [{
+        factId: 'fact-1',
+        subject: '人物名',
+        predicate: 'location',
+        object: '地点',
+        validFromChapter: chapter,
+        validToChapter: null,
+        sourceRecordId: 'r1',
+        origin: 'derived',
+        supersedes: null,
+        confidence: 0.9,
+        evidence: [{ quote: '正文中的逐字引文', occurrence: 1 }],
+      }],
+      beliefs: [{
+        beliefId: 'belief-1',
+        characterId: '人物名',
+        proposition: '账本缺页',
+        attitude: 'knows',
+        sourceRecordId: 'r1',
+        learnedAtChapter: chapter,
+        confidence: 0.9,
+        validFromChapter: chapter,
+        validToChapter: null,
         evidence: [{ quote: '正文中的逐字引文', occurrence: 1 }],
       }],
     }, null, 2),
@@ -165,6 +191,105 @@ export async function runExtraction(
     timeline.push(event)
   })
 
+  const facts: LedgerFact[] = []
+  const seenFactIds = new Set<string>()
+  const factsRaw = Array.isArray(raw.facts) ? raw.facts : []
+  factsRaw.forEach((item, index) => {
+    const factRaw = objectOrNull(item)
+    if (!factRaw) {
+      rejected.push({ reason: '事实记录不是对象', raw: item })
+      return
+    }
+    const factId = typeof factRaw.factId === 'string' && factRaw.factId.trim()
+      ? factRaw.factId.trim()
+      : `fact-${chapter}-${index + 1}`
+    if (seenFactIds.has(factId)) {
+      rejected.push({ recordId: factId, reason: '事实 ID 重复', raw: item })
+      return
+    }
+    const subject = typeof factRaw.subject === 'string' ? factRaw.subject.trim() : ''
+    const predicate = typeof factRaw.predicate === 'string' ? factRaw.predicate.trim() : ''
+    const object = typeof factRaw.object === 'string' ? factRaw.object.trim() : ''
+    if (!subject || !predicate || !object) {
+      rejected.push({ recordId: factId, reason: '事实缺少 subject/predicate/object', raw: item })
+      return
+    }
+    const before = rejected.length
+    const evidence = resolveEvidenceList(draft, chapter, factRaw.evidence, factId, rejected)
+    if (evidence.length === 0 || rejected.length > before) {
+      rejected.push({ recordId: factId, reason: '事实存在无效证据', raw: item })
+      return
+    }
+    const sourceRecordId = typeof factRaw.sourceRecordId === 'string' ? factRaw.sourceRecordId : undefined
+    const sourceEvent = typeof factRaw.sourceEvent === 'string'
+      ? factRaw.sourceEvent
+      : sourceRecordId ? eventIdFor(chapter, sourceRecordId) : undefined
+    const validFromChapter = typeof factRaw.validFromChapter === 'number' ? factRaw.validFromChapter : chapter
+    const validToChapter = typeof factRaw.validToChapter === 'number' ? factRaw.validToChapter : null
+    const origin = factRaw.origin === 'author' || factRaw.origin === 'candidate' ? factRaw.origin : 'derived'
+    const supersedes = typeof factRaw.supersedes === 'string' ? factRaw.supersedes : null
+    facts.push({
+      factId,
+      subject,
+      predicate,
+      object,
+      validFromChapter,
+      validToChapter,
+      sourceEvent,
+      origin,
+      supersedes,
+      confidence: typeof factRaw.confidence === 'number' ? factRaw.confidence : 1,
+      evidence,
+    })
+    seenFactIds.add(factId)
+  })
+
+  const beliefs: LedgerBelief[] = []
+  const seenBeliefIds = new Set<string>()
+  const beliefsRaw = Array.isArray(raw.beliefs) ? raw.beliefs : []
+  beliefsRaw.forEach((item, index) => {
+    const beliefRaw = objectOrNull(item)
+    if (!beliefRaw) {
+      rejected.push({ reason: '信念记录不是对象', raw: item })
+      return
+    }
+    const beliefId = typeof beliefRaw.beliefId === 'string' && beliefRaw.beliefId.trim()
+      ? beliefRaw.beliefId.trim()
+      : `belief-${chapter}-${index + 1}`
+    const characterId = typeof beliefRaw.characterId === 'string' ? beliefRaw.characterId.trim() : ''
+    const proposition = typeof beliefRaw.proposition === 'string' ? beliefRaw.proposition.trim() : ''
+    if (seenBeliefIds.has(beliefId) || !characterId || !proposition) {
+      rejected.push({ recordId: beliefId, reason: '信念 ID 重复或缺少 characterId/proposition', raw: item })
+      return
+    }
+    const before = rejected.length
+    const evidence = resolveEvidenceList(draft, chapter, beliefRaw.evidence, beliefId, rejected)
+    if (evidence.length === 0 || rejected.length > before) {
+      rejected.push({ recordId: beliefId, reason: '信念存在无效证据', raw: item })
+      return
+    }
+    const sourceRecordId = typeof beliefRaw.sourceRecordId === 'string' ? beliefRaw.sourceRecordId : undefined
+    const sourceEvent = typeof beliefRaw.sourceEvent === 'string'
+      ? beliefRaw.sourceEvent
+      : sourceRecordId ? eventIdFor(chapter, sourceRecordId) : undefined
+    const validFromChapter = typeof beliefRaw.validFromChapter === 'number'
+      ? beliefRaw.validFromChapter
+      : typeof beliefRaw.learnedAtChapter === 'number' ? beliefRaw.learnedAtChapter : chapter
+    beliefs.push({
+      beliefId,
+      characterId,
+      proposition,
+      attitude: normalizeAttitude(beliefRaw.attitude),
+      sourceEvent,
+      learnedAtChapter: typeof beliefRaw.learnedAtChapter === 'number' ? beliefRaw.learnedAtChapter : chapter,
+      confidence: typeof beliefRaw.confidence === 'number' ? beliefRaw.confidence : 1,
+      validFromChapter,
+      validToChapter: typeof beliefRaw.validToChapter === 'number' ? beliefRaw.validToChapter : null,
+      evidence,
+    })
+    seenBeliefIds.add(beliefId)
+  })
+
   if (records.length === 0 && !noEventsReason) {
     rejected.push({ reason: '没有抽取到记录，且未提供 noEventsReason', raw: null })
   }
@@ -178,6 +303,8 @@ export async function runExtraction(
     noEventsReason,
     records,
     timeline,
+    facts,
+    beliefs,
     rejected,
     model,
     usage: result.usage,

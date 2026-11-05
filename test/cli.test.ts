@@ -593,10 +593,10 @@ test('migrates a v1 project with a pre-migration backup', async () => {
     const status = await runCli(dir, ['status', '--json'])
     assert.equal(status.code, 0, status.stderr)
     const payload = parseJson<{ schemaVersion: number; workflowVersion: number }>(status.stdout)
-    assert.equal(payload.schemaVersion, 3)
+    assert.equal(payload.schemaVersion, 4)
     assert.equal(payload.workflowVersion, 1)
     const migrated = JSON.parse(await readFile(projectFile, 'utf8')) as Record<string, unknown>
-    assert.equal(migrated.schemaVersion, 3)
+    assert.equal(migrated.schemaVersion, 4)
     assert.equal(migrated.workflowVersion, 1)
     const migratedConfig = JSON.parse(await readFile(configFile, 'utf8')) as Record<string, unknown>
     assert.equal(migratedConfig.snapshotEvery, 10)
@@ -768,6 +768,39 @@ function coveragePayload(): string {
   })
 }
 
+function ledgerExtractionPayload(
+  facts: unknown[] = [{
+    factId: 'fact-lin-location',
+    subject: '林岚',
+    predicate: 'location',
+    object: '海港',
+    validFromChapter: 1,
+    validToChapter: null,
+    sourceRecordId: 'r1',
+    origin: 'derived',
+    supersedes: null,
+    confidence: 0.9,
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }],
+  beliefs: unknown[] = [{
+    beliefId: 'belief-lin-ledger',
+    characterId: '林岚',
+    proposition: '账本缺页与港务局有关',
+    attitude: 'suspects',
+    sourceRecordId: 'r1',
+    learnedAtChapter: 1,
+    confidence: 0.6,
+    validFromChapter: 1,
+    validToChapter: null,
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }],
+): string {
+  const extraction = JSON.parse(extractionPayload()) as Record<string, unknown>
+  extraction.facts = facts
+  extraction.beliefs = beliefs
+  return JSON.stringify(extraction)
+}
+
 function reviewPayload(blocking = false): string {
   return JSON.stringify({
     summary: blocking ? '存在阻断问题' : '整体成立',
@@ -791,7 +824,7 @@ async function prepareP05(model: FakeModel): Promise<string> {
   return dir
 }
 
-test('P0.5 workflow produces an evidence-backed commit v2', async () => {
+test('P0.5 workflow produces an evidence-backed commit v3', async () => {
   const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload()])
   await model.start()
   const dir = await prepareP05(model)
@@ -820,7 +853,7 @@ test('P0.5 workflow produces an evidence-backed commit v2', async () => {
     const payload = parseJson<{
       commit: { schemaVersion: number; evidenceCount: number; extractionHash: string; reviewHash: string }
     }>(finalized.stdout)
-    assert.equal(payload.commit.schemaVersion, 2)
+    assert.equal(payload.commit.schemaVersion, 3)
     assert.equal(payload.commit.evidenceCount, 1)
     assert.ok(payload.commit.extractionHash)
     assert.ok(payload.commit.reviewHash)
@@ -1024,6 +1057,275 @@ test('P0.5 duplicate evidence requires an occurrence and is rejected without one
     const payload = parseJson<{ passed: boolean; rejected: Array<{ reason: string }> }>(extracted.stdout)
     assert.equal(payload.passed, false)
     assert.ok(payload.rejected.some(item => item.reason.includes('无法唯一确定')))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.1 writes a v3 ledger and exposes event/fact/entity/belief queries', async () => {
+  const model = new FakeModel([P05_DRAFT, ledgerExtractionPayload(), coveragePayload(), reviewPayload()])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 0, finalized.stdout + finalized.stderr)
+    const payload = parseJson<{
+      commit: {
+        schemaVersion: number
+        ledgerHash: string
+        eventCount: number
+        factCount: number
+        beliefCount: number
+      }
+    }>(finalized.stdout)
+    assert.equal(payload.commit.schemaVersion, 3)
+    assert.ok(payload.commit.ledgerHash)
+    assert.equal(payload.commit.eventCount, 1)
+    assert.equal(payload.commit.factCount, 1)
+    assert.equal(payload.commit.beliefCount, 1)
+
+    const event = await runCli(dir, ['ledger', 'event', 'event-1-r1', '--json'])
+    assert.equal(event.code, 0, event.stderr)
+    const eventPayload = parseJson<{ record: { eventId: string } }>(event.stdout)
+    assert.equal(eventPayload.record.eventId, 'event-1-r1')
+
+    const fact = await runCli(dir, ['ledger', 'fact', 'fact-lin-location', '--json'])
+    assert.equal(fact.code, 0, fact.stderr)
+    const factPayload = parseJson<{ record: { factId: string } }>(fact.stdout)
+    assert.equal(factPayload.record.factId, 'fact-lin-location')
+
+    const entity = await runCli(dir, ['ledger', 'entity', '林岚', '--chapter', '1', '--json'])
+    assert.equal(entity.code, 0, entity.stderr)
+    const entityPayload = parseJson<{ facts: Array<{ factId: string }> }>(entity.stdout)
+    assert.deepEqual(entityPayload.facts.map(item => item.factId), ['fact-lin-location'])
+
+    const beliefs = await runCli(dir, ['ledger', 'beliefs', '林岚', '--chapter', '1', '--json'])
+    assert.equal(beliefs.code, 0, beliefs.stderr)
+    const beliefPayload = parseJson<{ beliefs: Array<{ beliefId: string; attitude: string }> }>(beliefs.stdout)
+    assert.equal(beliefPayload.beliefs[0]?.beliefId, 'belief-lin-ledger')
+    assert.equal(beliefPayload.beliefs[0]?.attitude, 'suspects')
+
+    const doctorResult = await runCli(dir, ['doctor', '--json'])
+    assert.equal(doctorResult.code, 0, doctorResult.stdout + doctorResult.stderr)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.1 supersedes old facts for current entity queries', async () => {
+  const oldFact = {
+    factId: 'fact-old-location',
+    subject: '林岚',
+    predicate: 'location',
+    object: '海港',
+    validFromChapter: 1,
+    validToChapter: null,
+    sourceRecordId: 'r1',
+    origin: 'derived',
+    supersedes: null,
+    confidence: 0.9,
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }
+  const newFact = {
+    ...oldFact,
+    factId: 'fact-new-location',
+    object: '码头',
+    supersedes: 'fact-old-location',
+  }
+  const model = new FakeModel([
+    P05_DRAFT,
+    ledgerExtractionPayload([oldFact, newFact], []),
+    coveragePayload(),
+    reviewPayload(),
+  ])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+    const entity = await runCli(dir, ['ledger', 'entity', '林岚', '--chapter', '1', '--json'])
+    const payload = parseJson<{ facts: Array<{ factId: string }> }>(entity.stdout)
+    assert.deepEqual(payload.facts.map(item => item.factId), ['fact-new-location'])
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.1 candidate facts are stored but cannot be queried', async () => {
+  const candidate = {
+    factId: 'fact-candidate',
+    subject: '林岚',
+    predicate: 'location',
+    object: '未知港口',
+    validFromChapter: 1,
+    validToChapter: null,
+    sourceRecordId: 'r1',
+    origin: 'candidate',
+    supersedes: null,
+    confidence: 0.3,
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }
+  const model = new FakeModel([P05_DRAFT, ledgerExtractionPayload([candidate], []), coveragePayload(), reviewPayload()])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+    const entity = await runCli(dir, ['ledger', 'entity', '林岚', '--chapter', '1', '--json'])
+    assert.equal(parseJson<{ facts: unknown[] }>(entity.stdout).facts.length, 0)
+    const fact = await runCli(dir, ['ledger', 'fact', 'fact-candidate', '--json'])
+    assert.equal(fact.code, 3)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.1 rejects invalid fact references and ranges at finalize', async () => {
+  const cases = [
+    {
+      label: 'unknown subject',
+      facts: [{
+        factId: 'fact-bad-subject',
+        subject: '不存在的人',
+        predicate: 'location',
+        object: '海港',
+        validFromChapter: 1,
+        validToChapter: null,
+        origin: 'derived',
+        confidence: 1,
+        evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+      }],
+    },
+    {
+      label: 'invalid range',
+      facts: [{
+        factId: 'fact-bad-range',
+        subject: '林岚',
+        predicate: 'location',
+        object: '海港',
+        validFromChapter: 2,
+        validToChapter: 1,
+        origin: 'derived',
+        confidence: 1,
+        evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+      }],
+    },
+  ]
+  for (const item of cases) {
+    const model = new FakeModel([
+      P05_DRAFT,
+      ledgerExtractionPayload(item.facts, []),
+      coveragePayload(),
+      reviewPayload(),
+    ])
+    await model.start()
+    const dir = await prepareP05(model)
+    try {
+      assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0, item.label)
+      assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0, item.label)
+      assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0, item.label)
+      const finalized = await runCli(dir, ['finalize', '1', '--json'])
+      assert.equal(finalized.code, 3, item.label)
+    } finally {
+      await model.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('P1.1 rejects duplicate fact IDs and supersede cycles', async () => {
+  const baseFact = {
+    subject: '林岚',
+    predicate: 'location',
+    object: '海港',
+    validFromChapter: 1,
+    validToChapter: null,
+    origin: 'derived',
+    confidence: 0.9,
+    evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+  }
+  const duplicateModel = new FakeModel([
+    P05_DRAFT,
+    ledgerExtractionPayload([
+      { ...baseFact, factId: 'fact-duplicate' },
+      { ...baseFact, factId: 'fact-duplicate' },
+    ], []),
+  ])
+  await duplicateModel.start()
+  const duplicateDir = await prepareP05(duplicateModel)
+  try {
+    const extracted = await runCli(duplicateDir, ['extract', '1', '--json'])
+    assert.equal(extracted.code, 3)
+    const payload = parseJson<{ rejected: Array<{ reason: string }> }>(extracted.stdout)
+    assert.ok(payload.rejected.some(item => item.reason.includes('事实 ID 重复')))
+  } finally {
+    await duplicateModel.close()
+    await rm(duplicateDir, { recursive: true, force: true })
+  }
+
+  const cycleModel = new FakeModel([
+    P05_DRAFT,
+    ledgerExtractionPayload([
+      { ...baseFact, factId: 'fact-a', supersedes: 'fact-b' },
+      { ...baseFact, factId: 'fact-b', supersedes: 'fact-a' },
+    ], []),
+    coveragePayload(),
+    reviewPayload(),
+  ])
+  await cycleModel.start()
+  const cycleDir = await prepareP05(cycleModel)
+  try {
+    assert.equal((await runCli(cycleDir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(cycleDir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(cycleDir, ['review', '1', '--json'])).code, 0)
+    const finalized = await runCli(cycleDir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 3)
+    const payload = parseJson<{ error: { details: string[] } }>(finalized.stdout)
+    assert.ok(payload.error.details.some(error => error.includes('循环')))
+  } finally {
+    await cycleModel.close()
+    await rm(cycleDir, { recursive: true, force: true })
+  }
+})
+
+test('P1.1 keeps v2 commits readable while ledger queries ignore them', async () => {
+  const model = new FakeModel([])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), '旧版正文。\n')
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 0, finalized.stdout + finalized.stderr)
+    const commitDir = path.join(dir, 'ledger', 'commits')
+    const name = (await readdir(commitDir)).find(item => item.endsWith('.json'))!
+    const commitFile = path.join(commitDir, name)
+    const commit = JSON.parse(await readFile(commitFile, 'utf8')) as Record<string, unknown>
+    commit.schemaVersion = 2
+    delete commit.ledger
+    delete commit.ledgerHash
+    delete commit.eventCount
+    delete commit.factCount
+    delete commit.beliefCount
+    await writeFile(commitFile, `${JSON.stringify(commit, null, 2)}\n`)
+
+    const status = await runCli(dir, ['status', '--json'])
+    assert.equal(status.code, 0, status.stdout + status.stderr)
+    const exported = await runCli(dir, ['export', '--format', 'merged', '--json'])
+    assert.equal(exported.code, 0, exported.stderr)
+    const ledger = await runCli(dir, ['ledger', 'event', 'event-1-r1', '--json'])
+    assert.equal(ledger.code, 3)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })

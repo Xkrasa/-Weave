@@ -1,4 +1,4 @@
-import type { RunUsage } from './types.ts'
+import type { LedgerBelief, LedgerFact, RunUsage } from './types.ts'
 
 export type StageKind = 'content-check' | 'extraction' | 'audit' | 'review' | 'timeline'
 
@@ -38,6 +38,8 @@ export interface ExtractionReport {
   noEventsReason: string | null
   records: ExtractedRecord[]
   timeline: TimelineEvent[]
+  facts: LedgerFact[]
+  beliefs: LedgerBelief[]
   rejected: RejectedRecord[]
   model: string
   usage?: RunUsage

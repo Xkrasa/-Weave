@@ -80,7 +80,7 @@ export async function exists(target: string): Promise<boolean> {
 
 export async function loadProject(root: string): Promise<ProjectConfig> {
   const project = await readJson<ProjectConfig>(projectPaths(root).project)
-  if (project.schemaVersion !== 3) {
+  if (project.schemaVersion !== 4) {
     throw conflictError(`不支持的项目版本：${String(project.schemaVersion)}`)
   }
   return project
@@ -112,8 +112,9 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
 
   const title = options.title?.trim() || path.basename(root)
   const project: ProjectConfig = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     workflowVersion: options.workflowVersion ?? 2,
+    ledgerVersion: 1,
     title,
     language: options.language?.trim() || 'zh-CN',
     targetWords: positiveInt(options.targetWords, 1_000_000, 'targetWords'),
