@@ -95,9 +95,10 @@ export async function runExtraction(
       rejected.push({ recordId, reason: '缺少 summary', raw: item })
       return
     }
+    const rejectedBefore = rejected.length
     const evidence = resolveEvidenceList(draft, chapter, recordRaw.evidence, recordId, rejected)
-    if (evidence.length === 0) {
-      rejected.push({ recordId, reason: '缺少可定位证据', raw: item })
+    if (evidence.length === 0 || rejected.length > rejectedBefore) {
+      rejected.push({ recordId, reason: '记录存在无效证据，整条记录被拒绝', raw: item })
       return
     }
     const record: ExtractedRecord = {
@@ -131,11 +132,12 @@ export async function runExtraction(
       return
     }
     const recordId = typeof eventRaw.recordId === 'string' ? eventRaw.recordId : undefined
+    const rejectedBefore = rejected.length
     let evidence = resolveEvidenceList(draft, chapter, eventRaw.evidence, eventId, rejected)
     if (evidence.length === 0 && recordId) evidence = evidenceByRecord.get(recordId) ?? []
     const eventSummary = typeof eventRaw.summary === 'string' ? eventRaw.summary.trim() : ''
-    if (!eventSummary || evidence.length === 0) {
-      rejected.push({ reason: `时间线事件 ${eventId} 缺少 summary 或证据`, raw: item })
+    if (!eventSummary || evidence.length === 0 || rejected.length > rejectedBefore) {
+      rejected.push({ reason: `时间线事件 ${eventId} 缺少 summary 或存在无效证据`, raw: item })
       return
     }
     const type = eventRaw.type === 'flashback' || eventRaw.type === 'parallel' ? eventRaw.type : 'main'
@@ -201,14 +203,22 @@ function resolveEvidenceList(
       continue
     }
     try {
-      spans.push(
-        resolveEvidence(
-          draft,
-          chapter,
-          evidenceRaw.quote,
-          typeof evidenceRaw.occurrence === 'number' ? evidenceRaw.occurrence : undefined,
-        ),
+      const span = resolveEvidence(
+        draft,
+        chapter,
+        evidenceRaw.quote,
+        typeof evidenceRaw.occurrence === 'number' ? evidenceRaw.occurrence : undefined,
       )
+      if (evidenceRaw.byteStart !== undefined && evidenceRaw.byteStart !== span.byteStart) {
+        throw validationError('模型提供的 byteStart 与正文不一致')
+      }
+      if (evidenceRaw.byteEnd !== undefined && evidenceRaw.byteEnd !== span.byteEnd) {
+        throw validationError('模型提供的 byteEnd 与正文不一致')
+      }
+      if (evidenceRaw.excerptHash !== undefined && evidenceRaw.excerptHash !== span.excerptHash) {
+        throw validationError('模型提供的 excerptHash 与正文不一致')
+      }
+      spans.push(span)
     } catch (error) {
       rejected.push({
         recordId: owner,

@@ -245,7 +245,10 @@ async function commandAudit(root: string, parsed: Parsed, json: boolean): Promis
   const draft = await readDraft(root, chapter)
   const hash = draftHash(draft)
   const extraction = await requireStage<ExtractionReport>(root, 'extraction', chapter, hash)
-  const report = await runCoverageAudit(root, chapter, contract, draft, extraction)
+  const config = await loadModelConfig(root)
+  const report = await runCoverageAudit(
+    root, chapter, contract, draft, extraction, config, new AbortController().signal,
+  )
   if (json) outputJson(report)
   else {
     console.log(`第 ${chapter} 章覆盖审计：${report.passed ? '通过' : '未通过'}`)
@@ -264,13 +267,21 @@ async function commandReview(root: string, parsed: Parsed, json: boolean): Promi
   await requireStage<ContentCheckReport>(root, 'content-check', chapter, hash)
   const extraction = await requireStage<ExtractionReport>(root, 'extraction', chapter, hash)
   const audit = await requireStage<CoverageAudit>(root, 'audit', chapter, hash)
+  const waiveWarnings = parsed.flags['waive-warnings'] === true
+  const waiveReason = optionalString(parsed, 'waive-reason')?.trim()
+  if (waiveWarnings && !waiveReason) {
+    throw usageError('--waive-warnings 需要同时提供 --waive-reason')
+  }
   const config = await loadModelConfig(root)
   const report = await runReview(
     root, chapter, contract, draft, extraction, audit, config, new AbortController().signal,
   )
-  if (parsed.flags['waive-warnings'] === true) {
+  if (waiveWarnings) {
     for (const finding of report.findings) {
-      if (finding.severity === 'warning') finding.status = 'waived'
+      if (finding.severity === 'warning') {
+        finding.status = 'waived'
+        finding.waiveReason = waiveReason
+      }
     }
     await saveStage(root, 'review', chapter, report)
   }
@@ -553,7 +564,7 @@ function printHelp(): void {
   weave check <chapter>
   weave extract <chapter>
   weave audit <chapter>
-  weave review <chapter> [--waive-warnings]
+  weave review <chapter> [--waive-warnings --waive-reason <text>]
   weave timeline <chapter>
   weave write <chapter> [--json|--events] [--cancel-after-ms <n>]
   weave amend <chapter> [--force]

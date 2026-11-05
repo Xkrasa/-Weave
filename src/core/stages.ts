@@ -14,6 +14,13 @@ export function stagePath(root: string, kind: StageKind, chapter: number): strin
 export async function saveStage<T>(root: string, kind: StageKind, chapter: number, report: T): Promise<string> {
   const target = stagePath(root, kind, chapter)
   await ensureDir(path.dirname(target))
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const history = path.join(
+    path.dirname(target),
+    'history',
+    `${chapterFileStem(chapter)}-${stamp}-${Math.random().toString(36).slice(2, 7)}.json`,
+  )
+  await atomicWriteJson(history, report)
   await atomicWriteJson(target, report)
   return target
 }
@@ -71,6 +78,9 @@ export function resolveEvidence(
 ): EvidenceSpan {
   const text = normalizeText(quote)
   if (!text.trim()) throw validationError('证据引文为空')
+  if (occurrence !== undefined && (!Number.isSafeInteger(occurrence) || occurrence < 1)) {
+    throw validationError(`occurrence 必须是正整数，收到 ${String(occurrence)}`)
+  }
   const positions = occurrencesOf(draft, text)
   if (positions.length === 0) throw validationError(`证据引文不在草稿中：${text.slice(0, 40)}`)
   const occurrenceNumber = occurrence ?? (positions.length === 1 ? 1 : 0)
@@ -78,8 +88,12 @@ export function resolveEvidence(
     throw validationError(`证据引文出现 ${positions.length} 次，occurrence=${occurrence ?? '未提供'} 无法唯一确定`)
   }
   const start = positions[occurrenceNumber - 1]!
+  if (start === undefined) throw validationError('无法解析证据位置')
   const byteStart = Buffer.byteLength(draft.slice(0, start), 'utf8')
   const byteEnd = byteStart + Buffer.byteLength(text, 'utf8')
+  if (byteStart < 0 || byteEnd <= byteStart || byteEnd > Buffer.byteLength(draft, 'utf8')) {
+    throw validationError('证据区间越界')
+  }
   return {
     sourceId: `draft:${chapter}`,
     sourceContentHash: draftHash(draft),

@@ -761,6 +761,13 @@ function extractionPayload(quote = '她发现缺页上留着港务局的印。',
   })
 }
 
+function coveragePayload(): string {
+  return JSON.stringify({
+    summary: '第二遍未发现遗漏',
+    missed: [],
+  })
+}
+
 function reviewPayload(blocking = false): string {
   return JSON.stringify({
     summary: blocking ? '存在阻断问题' : '整体成立',
@@ -785,7 +792,7 @@ async function prepareP05(model: FakeModel): Promise<string> {
 }
 
 test('P0.5 workflow produces an evidence-backed commit v2', async () => {
-  const model = new FakeModel([P05_DRAFT, extractionPayload(), reviewPayload()])
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload()])
   await model.start()
   const dir = await prepareP05(model)
   try {
@@ -870,7 +877,7 @@ test('P0.5 timeline errors block the coverage audit', async () => {
       evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
     },
   ]
-  const model = new FakeModel([P05_DRAFT, JSON.stringify(extraction)])
+  const model = new FakeModel([P05_DRAFT, JSON.stringify(extraction), coveragePayload()])
   await model.start()
   const dir = await prepareP05(model)
   try {
@@ -887,7 +894,7 @@ test('P0.5 timeline errors block the coverage audit', async () => {
 })
 
 test('P0.5 blocking review returns exit code 7 and prevents finalization', async () => {
-  const model = new FakeModel([P05_DRAFT, extractionPayload(), reviewPayload(true)])
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload(true)])
   await model.start()
   const dir = await prepareP05(model)
   try {
@@ -906,7 +913,7 @@ test('P0.5 blocking review returns exit code 7 and prevents finalization', async
 })
 
 test('P0.5 stage reports are invalidated when the draft changes', async () => {
-  const model = new FakeModel([P05_DRAFT, extractionPayload(), reviewPayload()])
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload()])
   await model.start()
   const dir = await prepareP05(model)
   try {
@@ -945,11 +952,36 @@ test('P0.5 content check blocks extraction before any model call', async () => {
   }
 })
 
+test('P0.5 second-pass coverage audit blocks when it finds a missed event', async () => {
+  const missed = JSON.stringify({
+    summary: '第二遍发现遗漏',
+    missed: [{
+      summary: '林岚其实已经把信交给了港务局',
+      quote: '她发现缺页上留着港务局的印。',
+      occurrence: 1,
+    }],
+  })
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), missed])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    const audited = await runCli(dir, ['audit', '1', '--json'])
+    assert.equal(audited.code, 3)
+    const payload = parseJson<{ passed: boolean; secondPass: { missed: string[] } }>(audited.stdout)
+    assert.equal(payload.passed, false)
+    assert.deepEqual(payload.secondPass.missed, ['林岚其实已经把信交给了港务局'])
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('P0.5 audit fails when a contract node is not covered', async () => {
   const extraction = JSON.parse(extractionPayload()) as Record<string, unknown>
   const records = extraction.records as Array<Record<string, unknown>>
   records[0]!.summary = '无关事件'
-  const model = new FakeModel([P05_DRAFT, JSON.stringify(extraction)])
+  const model = new FakeModel([P05_DRAFT, JSON.stringify(extraction), coveragePayload()])
   await model.start()
   const dir = await prepareP05(model)
   try {

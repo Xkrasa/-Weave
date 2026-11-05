@@ -1,4 +1,4 @@
-import type { ChapterContract } from './types.ts'
+import type { ChapterContract, ModelConfig } from './types.ts'
 import type {
   CoverageAudit,
   CoverageSegment,
@@ -8,9 +8,16 @@ import type {
 } from './stage-types.ts'
 import { loadCharacters } from './contract.ts'
 import { validateTimeline } from './timeline.ts'
-import { draftHash, saveStage } from './stages.ts'
+import { draftHash, parseJsonObject, resolveEvidence, saveStage } from './stages.ts'
 import { objectHash } from './hash.ts'
-import { conflictError } from './errors.ts'
+import { completeText } from './model.ts'
+import { conflictError, validationError } from './errors.ts'
+
+const AUDIT_SYSTEM_PROMPT = [
+  '你是覆盖审计器，只寻找第一遍抽取漏掉的重要事件、状态变化、时间表达和合同节点。',
+  '不要重复第一遍已经列出的事件，不要编造正文中没有的内容。',
+  '只输出一个 JSON 对象，不要输出解释或 Markdown 围栏。',
+].join('\n')
 
 export async function runCoverageAudit(
   root: string,
@@ -18,6 +25,8 @@ export async function runCoverageAudit(
   contract: ChapterContract,
   draft: string,
   extraction: ExtractionReport,
+  config: ModelConfig,
+  signal: AbortSignal,
 ): Promise<CoverageAudit> {
   const segments = paragraphSegments(draft)
   for (const segment of segments) {
@@ -29,7 +38,7 @@ export async function runCoverageAudit(
   }
   const uncoveredSegments = segments.filter(segment => segment.coveredBy.length === 0)
   const planned = contract.mustHappen.filter(Boolean)
-  const covered = planned.filter(node => coveredByText(draft, extraction.records, node))
+  const covered = planned.filter(node => coveredByRecords(extraction.records, node))
   const missed = planned.filter(node => !covered.includes(node))
   const unplanned = extraction.records
     .filter(record => record.kind === 'event')
@@ -39,9 +48,8 @@ export async function runCoverageAudit(
     ))
     .map(record => record.recordId)
   const registry = await loadCharacters(root)
-  const timeline = validateTimeline(extraction.records.length > 0
-    ? timelineFromExtraction(extraction, chapter)
-    : [], registry)
+  const timeline = validateTimeline(extraction.timeline ?? [], registry)
+  const secondPass = await runSecondPass(chapter, contract, draft, extraction, config, signal)
   const warnings: string[] = []
   if (uncoveredSegments.length > 0) warnings.push(`有 ${uncoveredSegments.length} 个段落没有证据覆盖`)
   if (unplanned.length > 5) warnings.push(`有 ${unplanned.length} 条未列入合同的事件，需人工确认`)
@@ -58,15 +66,81 @@ export async function runCoverageAudit(
     uncoveredSegments,
     noEventsReason: extraction.noEventsReason,
     timeline,
+    secondPass,
     warnings,
     passed:
       extraction.passed
       && missed.length === 0
       && timeline.passed
+      && secondPass.missed.length === 0
+      && secondPass.rejected.length === 0
       && (extraction.records.length > 0 || Boolean(extraction.noEventsReason)),
   }
   await saveStage(root, 'audit', chapter, audit)
   return audit
+}
+
+async function runSecondPass(
+  chapter: number,
+  contract: ChapterContract,
+  draft: string,
+  extraction: ExtractionReport,
+  config: ModelConfig,
+  signal: AbortSignal,
+): Promise<{ summary: string; missed: string[]; rejected: string[] }> {
+  const model = config.extractionModel ?? config.model
+  const prompt = [
+    `第 ${chapter} 章合同：`,
+    JSON.stringify(contract, null, 2),
+    '',
+    '第一遍记录摘要：',
+    JSON.stringify(extraction.records.map(record => ({
+      recordId: record.recordId,
+      summary: record.summary,
+      quote: record.evidence.map(span => span.quote),
+    })), null, 2),
+    '',
+    '正文：',
+    draft,
+    '',
+    '只输出结构：',
+    JSON.stringify({
+      summary: '第二遍审计结论',
+      missed: [{ summary: '第一遍漏掉的事件', quote: '正文逐字引文', occurrence: 1 }],
+    }, null, 2),
+  ].join('\n')
+  const result = await completeText({
+    config: { ...config, model },
+    system: AUDIT_SYSTEM_PROMPT,
+    user: prompt,
+    signal,
+  })
+  const raw = parseJsonObject(result.text)
+  const summary = typeof raw.summary === 'string' ? raw.summary.trim() : ''
+  if (!summary) throw validationError('覆盖审计结果缺少 summary')
+  const rawMissed = Array.isArray(raw.missed) ? raw.missed : []
+  const missed: string[] = []
+  const rejected: string[] = []
+  for (const item of rawMissed) {
+    const entry = item && typeof item === 'object' ? item as Record<string, unknown> : null
+    if (!entry || typeof entry.summary !== 'string' || typeof entry.quote !== 'string') {
+      rejected.push('第二遍返回了缺少 summary 或 quote 的遗漏项')
+      continue
+    }
+    try {
+      resolveEvidence(
+        draft,
+        chapter,
+        entry.quote,
+        typeof entry.occurrence === 'number' ? entry.occurrence : undefined,
+      )
+    } catch (error) {
+      rejected.push(error instanceof Error ? error.message : String(error))
+      continue
+    }
+    missed.push(entry.summary.trim())
+  }
+  return { summary, missed, rejected }
 }
 
 export async function runTimelineReport(
@@ -79,7 +153,7 @@ export async function runTimelineReport(
     throw conflictError('抽取报告绑定的草稿已变化；请重新运行 weave extract')
   }
   const registry = await loadCharacters(root)
-  const check = validateTimeline(timelineFromExtraction(extraction, chapter), registry)
+  const check = validateTimeline(extraction.timeline ?? [], registry)
   const report: TimelineReport = {
     schemaVersion: 1,
     chapter,
@@ -92,10 +166,6 @@ export async function runTimelineReport(
   }
   await saveStage(root, 'timeline', chapter, report)
   return report
-}
-
-function timelineFromExtraction(extraction: ExtractionReport, chapter: number) {
-  return (extraction.timeline ?? []).map(event => ({ ...event, chapter }))
 }
 
 function paragraphSegments(draft: string): CoverageSegment[] {
@@ -117,8 +187,7 @@ function paragraphSegments(draft: string): CoverageSegment[] {
   return segments
 }
 
-function coveredByText(draft: string, records: ExtractedRecord[], node: string): boolean {
-  if (draft.includes(node)) return true
+function coveredByRecords(records: ExtractedRecord[], node: string): boolean {
   return records.some(record =>
     record.summary.includes(node)
     || record.evidence.some(span => span.quote.includes(node))

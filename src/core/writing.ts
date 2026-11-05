@@ -230,12 +230,11 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
   const draftEdited = meta ? hashText(draft) !== meta.contentHash : false
   const currentDraftHash = hashText(draft)
 
-  let commitSchemaVersion: 1 | 2 = 1
+  const commitSchemaVersion: 1 | 2 = 2
   let extractionHash: string | undefined
   let reviewHash: string | undefined
   let commitEvidence: CommitRecord['evidence'] = []
   if (project.workflowVersion === 2) {
-    commitSchemaVersion = 2
     await requireStage<ContentCheckReport>(root, 'content-check', chapter, currentDraftHash)
     const extraction = await requireStage<ExtractionReport>(root, 'extraction', chapter, currentDraftHash)
     const audit = await requireStage<CoverageAudit>(root, 'audit', chapter, currentDraftHash)

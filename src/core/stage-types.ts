@@ -89,6 +89,11 @@ export interface CoverageAudit {
   uncoveredSegments: CoverageSegment[]
   noEventsReason: string | null
   timeline: TimelineCheck
+  secondPass: {
+    summary: string
+    missed: string[]
+    rejected: string[]
+  }
   warnings: string[]
   passed: boolean
 }
@@ -134,6 +139,7 @@ export interface ReviewFinding {
   quote?: string
   evidence?: EvidenceSpan
   status: 'open' | 'waived'
+  waiveReason?: string
 }
 
 export interface ReviewReport {
