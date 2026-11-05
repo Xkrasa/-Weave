@@ -103,7 +103,7 @@ export async function replayProjectionFrom(
       mainlineRevision: head.mainlineRevision,
       appliedThrough: applied.appliedThrough,
       lastCommit: applied.lastCommit,
-      invalidFrom: prior?.invalidFrom ?? fromChapter,
+      invalidFrom: prior?.status === 'stale' ? prior.invalidFrom ?? fromChapter : prior?.invalidFrom ?? null,
       replayBaseChapter: base,
       status: 'current',
       updatedAt: new Date().toISOString(),

@@ -11,6 +11,7 @@
     "weave": "node src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
+    "accept:scale": "node scripts/acceptance-scale.ts",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {

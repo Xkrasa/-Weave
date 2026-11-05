@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import path from 'node:path'
-import { readFile } from 'node:fs/promises'
-import { findProjectRoot, initProject } from './core/project.ts'
+import { readFile, readdir } from 'node:fs/promises'
+import { findProjectRoot, initProject, projectPaths } from './core/project.ts'
 import { normalizeContract, saveContract, loadContract, writeContractCheck, contractHash } from './core/contract.ts'
 import { writeChapter, amendChapter, finalizeChapter } from './core/writing.ts'
 import { createImpactReport, loadImpactReport, resolveImpact } from './core/impact.ts'
@@ -104,6 +104,9 @@ async function commandStatus(root: string, json: boolean): Promise<number> {
 
 async function commandContract(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const action = parsed.positionals[0]
+  if (action === 'check' && parsed.flags.all === true) {
+    return checkAllContracts(root, json)
+  }
   const chapter = parseChapter(parsed.positionals[1])
   switch (action) {
     case 'set': {
@@ -140,6 +143,31 @@ async function commandContract(root: string, parsed: Parsed, json: boolean): Pro
     default:
       throw usageError('用法：weave contract show|set|check <chapter> [--file <path>]')
   }
+}
+
+async function checkAllContracts(root: string, json: boolean): Promise<number> {
+  const dir = path.join(projectPaths(root).outlines, 'chapters')
+  const names = (await readdir(dir)).filter(name => name.endsWith('.json')).sort()
+  if (names.length === 0) throw validationError('没有可检查的章节合同')
+  const failures: Array<{ chapter: number; errors: unknown }> = []
+  for (const name of names) {
+    const chapter = Number(name.replace(/\.json$/, ''))
+    try {
+      const contract = await loadContract(root, chapter)
+      const record = await writeContractCheck(root, contract)
+      if (!record.ok) failures.push({ chapter, errors: record.errors })
+    } catch (error) {
+      failures.push({ chapter, errors: error instanceof Error ? error.message : String(error) })
+    }
+  }
+  const ok = failures.length === 0
+  if (json) outputJson({ ok, checked: names.length, failures })
+  else if (ok) console.log(`已检查 ${names.length} 份合同，全部通过`)
+  else {
+    console.error(`已检查 ${names.length} 份合同，${failures.length} 份未通过`)
+    for (const failure of failures) console.error(`- 第 ${failure.chapter} 章：${JSON.stringify(failure.errors)}`)
+  }
+  return ok ? 0 : 3
 }
 
 async function commandWrite(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -383,7 +411,8 @@ function printHelp(): void {
 用法：
   weave init [dir] --title <name> --model <model> --base-url <url> [--snapshot-every <n>]
   weave status
-  weave contract show|set|check <chapter> [--file <path>]
+  weave contract show|set <chapter> [--file <path>]
+  weave contract check <chapter> | --all
   weave write <chapter> [--json|--events] [--cancel-after-ms <n>]
   weave amend <chapter> [--force]
   weave finalize <chapter>
