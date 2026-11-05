@@ -6,6 +6,31 @@ import { loadContract } from './contract.ts'
 import { projectPaths } from './project.ts'
 import { conflictError, usageError } from './errors.ts'
 
+interface ImpactWaiver {
+  sourceChapter: number
+  targetChapter: number
+  reason: string
+  createdAt: string
+}
+
+function waiverPath(root: string): string {
+  return path.join(projectPaths(root).impacts, 'waivers.json')
+}
+
+async function loadImpactWaivers(root: string): Promise<ImpactWaiver[]> {
+  const data = await readJsonIfExists<{ waivers?: ImpactWaiver[] }>(waiverPath(root))
+  return data?.waivers ?? []
+}
+
+async function saveImpactWaiver(root: string, waiver: ImpactWaiver): Promise<void> {
+  const waivers = await loadImpactWaivers(root)
+  if (waivers.some(item => item.sourceChapter === waiver.sourceChapter && item.targetChapter === waiver.targetChapter)) {
+    return
+  }
+  waivers.push(waiver)
+  await atomicWriteJson(waiverPath(root), { schemaVersion: 1, waivers })
+}
+
 export async function createImpactReport(
   root: string,
   sourceChapter: number,
@@ -17,18 +42,22 @@ export async function createImpactReport(
     .map(Number)
     .filter(chapter => chapter > sourceChapter)
     .sort((a, b) => a - b)
+  const waivers = await loadImpactWaivers(root)
 
   const items: ImpactItem[] = []
   for (const targetChapter of targets) {
     const targetContract = await safeContract(root, targetChapter)
     const text = (await readTextIfExists(finalPath(root, targetChapter))) ?? ''
     const item = classifyImpact(contract, targetContract, text, targetChapter)
+    const waived = waivers.some(waiver =>
+      waiver.sourceChapter === sourceChapter && waiver.targetChapter === targetChapter,
+    )
     items.push({
       targetChapter,
       level: item.level,
       reason: item.reason,
       dependencies: item.dependencies,
-      status: 'pending',
+      status: waived ? 'accepted' : item.level === 'unknown' ? 'deferred' : 'pending',
     })
   }
 
@@ -37,6 +66,7 @@ export async function createImpactReport(
     sourceChapter,
     sourceRevision: sourceCommit.revision,
     sourceCommit: sourceCommit.commitId,
+    mainlineRevision: head.mainlineRevision,
     createdAt: new Date().toISOString(),
     items,
   }
@@ -93,16 +123,23 @@ export function classifyImpact(
 }
 
 export async function loadImpactReport(root: string, chapter: number): Promise<ImpactReport | null> {
-  return readJsonIfExists<ImpactReport>(impactPath(root, chapter))
+  const report = await readJsonIfExists<ImpactReport>(impactPath(root, chapter))
+  if (!report) return null
+  const head = await readMainline(root)
+  if (report.mainlineRevision !== undefined && report.mainlineRevision !== head.mainlineRevision) return null
+  return report
 }
 
 export async function loadImpactReports(root: string): Promise<ImpactReport[]> {
   const dir = projectPaths(root).impacts
+  const head = await readMainline(root)
   const reports: ImpactReport[] = []
   for (const name of await listFiles(dir)) {
-    if (!name.endsWith('.json')) continue
+    if (!/^\d{3}\.json$/.test(name)) continue
     const report = await readJsonIfExists<ImpactReport>(path.join(dir, name))
-    if (report) reports.push(report)
+    if (!report) continue
+    if (report.mainlineRevision !== undefined && report.mainlineRevision !== head.mainlineRevision) continue
+    reports.push(report)
   }
   return reports.sort((a, b) => a.sourceChapter - b.sourceChapter)
 }
@@ -112,7 +149,7 @@ export async function pendingImpactItems(root: string): Promise<Array<ImpactRepo
   return reports
     .map(report => ({
       ...report,
-      items: report.items.filter(item => item.status === 'pending' || item.status === 'deferred'),
+      items: report.items.filter(item => item.status === 'pending'),
     }))
     .filter(report => report.items.length > 0)
 }
@@ -148,6 +185,14 @@ export async function resolveImpact(
     if (!selected.includes(item)) continue
     item.status = status
     item.decidedAt = new Date().toISOString()
+    if (options.decision === 'accept') {
+      await saveImpactWaiver(root, {
+        sourceChapter,
+        targetChapter: item.targetChapter,
+        reason: '作者接受漂移',
+        createdAt: new Date().toISOString(),
+      })
+    }
   }
   await atomicWriteJson(target, report)
   return report

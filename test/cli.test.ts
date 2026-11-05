@@ -787,7 +787,7 @@ function ledgerExtractionPayload(
     beliefId: 'belief-lin-ledger',
     characterId: '林岚',
     proposition: '账本缺页与港务局有关',
-    attitude: 'suspects',
+    attitude: 'knows',
     sourceRecordId: 'r1',
     learnedAtChapter: 1,
     confidence: 0.6,
@@ -1117,7 +1117,7 @@ test('P1.1 writes a v3 ledger and exposes event/fact/entity/belief queries', asy
     assert.equal(beliefs.code, 0, beliefs.stderr)
     const beliefPayload = parseJson<{ beliefs: Array<{ beliefId: string; attitude: string }> }>(beliefs.stdout)
     assert.equal(beliefPayload.beliefs[0]?.beliefId, 'belief-lin-ledger')
-    assert.equal(beliefPayload.beliefs[0]?.attitude, 'suspects')
+    assert.equal(beliefPayload.beliefs[0]?.attitude, 'knows')
 
     const doctorResult = await runCli(dir, ['doctor', '--json'])
     assert.equal(doctorResult.code, 0, doctorResult.stdout + doctorResult.stderr)
@@ -1130,6 +1130,8 @@ test('P1.1 writes a v3 ledger and exposes event/fact/entity/belief queries', asy
     const rebuilt = await runCli(dir, ['rebuild', '--projection', 'ledger', '--from', '1', '--json'])
     assert.equal(rebuilt.code, 0, rebuilt.stderr)
     assert.equal(parseJson<{ ledgerProjection: { status: string } }>(rebuilt.stdout).ledgerProjection.status, 'current')
+    const aliasRebuild = await runCli(dir, ['rebuild', '--projection', 'entity-state', '--from', '1', '--json'])
+    assert.equal(aliasRebuild.code, 0, aliasRebuild.stderr)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
@@ -1356,7 +1358,7 @@ test('P1.2 exposes state/knowledge and keeps non-POV beliefs out of the prompt',
     beliefId: 'belief-lin-ledger',
     characterId: '林岚',
     proposition: '账本缺页与港务局有关',
-    attitude: 'suspects',
+    attitude: 'knows',
     sourceRecordId: 'r1',
     learnedAtChapter: 1,
     confidence: 0.6,
@@ -1413,7 +1415,9 @@ test('P1.2 exposes state/knowledge and keeps non-POV beliefs out of the prompt',
 
     const state = await runCli(dir, ['state', '林岚', '--chapter', '1', '--json'])
     assert.equal(state.code, 0, state.stderr)
-    assert.equal(parseJson<{ facts: Array<{ factId: string }> }>(state.stdout).facts[0]?.factId, 'fact-lin-location')
+    const statePayload = parseJson<{ facts: Array<{ factId: string }>; attributes: Record<string, string> }>(state.stdout)
+    assert.equal(statePayload.facts[0]?.factId, 'fact-lin-location')
+    assert.equal(statePayload.attributes.location, '海港')
     const knowledge = await runCli(dir, ['knowledge', '周', '--chapter', '1', '--json'])
     assert.equal(knowledge.code, 0, knowledge.stderr)
     assert.ok(parseJson<{ beliefs: Array<{ beliefId: string }> }>(knowledge.stdout).beliefs.some(item => item.beliefId === 'belief-zhou-secret'))

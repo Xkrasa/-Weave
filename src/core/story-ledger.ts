@@ -323,6 +323,10 @@ export function applyLoopChanges(
       errors.push(`伏笔 ${change.loopId} 已结束，不能 ${change.kind}`)
       continue
     }
+    if (change.kind === 'payoff' && current.status === 'planted') {
+      errors.push(`伏笔 ${change.loopId} 在兑现前没有推进`)
+      continue
+    }
     if (change.kind === 'abandon' && !change.reason) {
       errors.push(`伏笔 ${change.loopId} 废弃缺少原因`)
       continue
@@ -433,7 +437,10 @@ export async function checkKnowledge(
   const people = new Map(registry.characters.map(character => [character.name, character]))
   for (const use of contract.knowledge ?? []) {
     const learned = effectiveBeliefs(beliefs, use.character, chapter)
-      .some(belief => belief.proposition.includes(use.fact) || use.fact.includes(belief.proposition))
+      .some(belief =>
+        (belief.attitude === 'knows' || belief.attitude === 'believes')
+        && normalizeProposition(belief.proposition) === normalizeProposition(use.fact),
+      )
     const staticKnown = (people.get(use.character)?.knows ?? [])
       .some(item =>
         (item.fact.includes(use.fact) || use.fact.includes(item.fact))
@@ -450,16 +457,23 @@ export async function checkKnowledge(
   return { ok: errors.length === 0, errors }
 }
 
+function normalizeProposition(value: string): string {
+  return value.replace(/\s+/g, '').trim()
+}
+
 export async function entityState(root: string, entityId: string, chapter: number): Promise<{
   entityId: string
   chapter: number
   facts: LedgerFact[]
+  attributes: Record<string, string>
 }> {
   const ledger = await collectLedger(root, chapter)
+  const facts = effectiveFacts(ledger.facts, chapter).filter(fact => fact.subject === entityId)
   return {
     entityId,
     chapter,
-    facts: effectiveFacts(ledger.facts, chapter).filter(fact => fact.subject === entityId),
+    facts,
+    attributes: Object.fromEntries(facts.map(fact => [fact.predicate, fact.object])),
   }
 }
 

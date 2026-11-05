@@ -40,6 +40,7 @@ import {
 } from './core/story-ledger.ts'
 import { loadCharacters } from './core/contract.ts'
 import { assertLedgerProjectionCurrent } from './core/ledger-projection.ts'
+import { assertProjectionCurrent } from './core/projections.ts'
 import { draftHash, loadStage, readDraft, requireStage, saveStage } from './core/stages.ts'
 import type {
   ContentCheckReport,
@@ -240,6 +241,9 @@ async function commandWaive(root: string, parsed: Parsed, json: boolean): Promis
     throw usageError('--scope 必须是 chapter、entity、storyline 或 project')
   }
   const scope = scopeRaw as 'chapter' | 'entity' | 'storyline' | 'project'
+  if ((scope === 'entity' || scope === 'storyline') && !optionalString(parsed, 'scope-ref')) {
+    throw usageError('entity/storyline 范围需要 --scope-ref')
+  }
   const findingId = optionalString(parsed, 'finding')
   const allWarnings = parsed.flags['all-warnings'] === true
   if (!findingId && !allWarnings) throw usageError('请提供 --finding <id> 或 --all-warnings')
@@ -442,6 +446,7 @@ async function commandReview(root: string, parsed: Parsed, json: boolean): Promi
   await requireStage<ContentCheckReport>(root, 'content-check', chapter, hash)
   const extraction = await requireStage<ExtractionReport>(root, 'extraction', chapter, hash)
   const audit = await requireStage<CoverageAudit>(root, 'audit', chapter, hash)
+  await assertProjectionCurrent(root)
   await assertLedgerProjectionCurrent(root)
   const waiveWarnings = parsed.flags['waive-warnings'] === true
   const waiveReason = optionalString(parsed, 'waive-reason')?.trim()
@@ -642,9 +647,11 @@ async function commandResolveImpact(root: string, parsed: Parsed, json: boolean)
 }
 
 async function commandRebuild(root: string, parsed: Parsed, json: boolean): Promise<number> {
-  const projection = String(parsed.flags.projection ?? 'all')
+  const requested = String(parsed.flags.projection ?? 'all')
+  const aliases = new Set(['entity-state', 'belief', 'open-loop', 'series-timeline'])
+  const projection = aliases.has(requested) ? 'ledger' : requested
   if (projection !== 'all' && projection !== 'content' && projection !== 'ledger') {
-    throw usageError('--projection 必须是 all、content 或 ledger')
+    throw usageError('--projection 必须是 all、content、ledger、entity-state、belief、open-loop 或 series-timeline')
   }
   const result = await rebuildBook(root, {
     force: parsed.flags.force === true,

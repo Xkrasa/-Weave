@@ -107,8 +107,8 @@ export async function applyWaivers(root: string, chapter: number, report: Review
       if (item.status !== 'active' || item.fingerprint !== fingerprint) return false
       if (item.expiresAtChapter !== undefined && chapter > item.expiresAtChapter) return false
       if (item.scope === 'project') return true
-      return (item.scope === 'chapter' || item.scope === 'entity' || item.scope === 'storyline')
-        && item.scopeRef === String(chapter)
+      if (item.scope === 'chapter') return item.scopeRef === String(chapter)
+      return Boolean(item.scopeRef && finding.description.includes(item.scopeRef))
     })
     if (waiver) {
       finding.status = 'waived'

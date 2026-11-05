@@ -59,7 +59,12 @@ export async function rebuildLedgerProjection(
   const head = await readMainline(root)
   const db = open(root)
   try {
-    const from = options.fromChapter ?? 1
+    let from = options.fromChapter ?? 1
+    if (from > 1) {
+      const baseline = db.prepare('SELECT COUNT(*) AS count FROM ledger_projection WHERE chapter = ?')
+        .get(from - 1) as Record<string, unknown> | undefined
+      if (Number(baseline?.count ?? 0) === 0) from = 1
+    }
     db.exec('BEGIN IMMEDIATE')
     db.prepare('DELETE FROM ledger_projection WHERE chapter >= ?').run(from)
     db.prepare('DELETE FROM ledger_projection_snapshots WHERE chapter >= ?').run(from)

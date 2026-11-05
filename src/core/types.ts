@@ -262,6 +262,7 @@ export interface ImpactReport {
   sourceChapter: number
   sourceRevision: number
   sourceCommit: string
+  mainlineRevision?: number
   createdAt: string
   items: ImpactItem[]
 }

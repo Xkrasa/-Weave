@@ -152,7 +152,8 @@ export function validateContract(
     const known = (character.knows ?? []).find(item => item.fact === use.fact)
     const learned = beliefs.some(belief =>
       belief.characterId === use.character
-      && (belief.proposition.includes(use.fact) || use.fact.includes(belief.proposition))
+      && (belief.attitude === 'knows' || belief.attitude === 'believes')
+      && belief.proposition.replace(/\s+/g, '') === use.fact.replace(/\s+/g, '')
       && belief.validFromChapter <= contract.chapter
       && (belief.validToChapter === null || belief.validToChapter > contract.chapter),
     )
