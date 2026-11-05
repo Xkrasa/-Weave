@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { strToU8, zipSync } from 'fflate'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -2315,6 +2316,10 @@ test('P2.2 indexes Chinese chunks, searches short terms, deconstructs and export
     assert.equal(storyline.code, 0, storyline.stderr)
     assert.ok(parseJson<{ results: unknown[] }>(storyline.stdout).results.length > 0)
 
+    const time = await runCli(dir, ['search', '账本', '--time', '第 1 天', '--json'])
+    assert.equal(time.code, 0, time.stderr)
+    assert.ok(parseJson<{ results: Array<{ chapter: number }> }>(time.stdout).results.every(item => item.chapter === 1))
+
     const sample = path.join(dir, 'sample.txt')
     await writeFile(sample, '第一章 起点\n林岚来到码头。\n\n第二章 账本\n她翻开账本。\n')
     const deconstructed = await runCli(dir, ['deconstruct', 'sample.txt', '--save', '--json'])
@@ -2332,11 +2337,39 @@ test('P2.2 indexes Chinese chunks, searches short terms, deconstructs and export
     assert.ok(report.chapters.every(item => Array.isArray(item.sceneFunctions)))
     assert.ok(report.chapters.every(item => Array.isArray(item.repeatedPatterns)))
 
+    const epub = path.join(dir, 'sample.epub')
+    const zip = zipSync({
+      mimetype: strToU8('application/epub+zip'),
+      'META-INF/container.xml': strToU8(
+        '<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>',
+      ),
+      'OEBPS/content.opf': strToU8(
+        '<?xml version="1.0"?><package><manifest><item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine></package>',
+      ),
+      'OEBPS/chapter1.xhtml': strToU8(
+        '<html><head><title>第一章</title></head><body><p>林岚在码头翻开账本。</p></body></html>',
+      ),
+    })
+    await writeFile(epub, zip)
+    const deconstructedEpub = await runCli(dir, ['deconstruct', 'sample.epub', '--json'])
+    assert.equal(deconstructedEpub.code, 0, deconstructedEpub.stderr)
+    const epubReport = parseJson<{ format: string; totals: { chapters: number } }>(deconstructedEpub.stdout)
+    assert.equal(epubReport.format, 'epub')
+    assert.equal(epubReport.totals.chapters, 1)
+
     const exported = await runCli(dir, ['export', '--format', 'merged', '--platform', 'qidian', '--json'])
     assert.equal(exported.code, 0, exported.stderr)
     const exportPayload = parseJson<{ platform: string; characters: number }>(exported.stdout)
     assert.equal(exportPayload.platform, 'qidian')
     assert.ok(exportPayload.characters > 0)
+
+    const custom = await runCli(dir, [
+      'export', '--format', 'merged', '--platform', 'custom', '--count-mode', 'cjk', '--json',
+    ])
+    assert.equal(custom.code, 0, custom.stderr)
+    const customPayload = parseJson<{ platform: string; characters: number }>(custom.stdout)
+    assert.equal(customPayload.platform, 'custom')
+    assert.ok(customPayload.characters > 0)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })

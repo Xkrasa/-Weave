@@ -296,7 +296,8 @@ export async function rebuildBook(
 }
 
 export type ExportFormat = 'merged' | 'split' | 'txt'
-export type ExportPlatform = 'generic' | 'qidian' | 'fanqie'
+export type ExportPlatform = 'generic' | 'qidian' | 'fanqie' | 'custom'
+export type ExportCountMode = 'cjk' | 'all'
 
 export interface ExportResult {
   format: ExportFormat
@@ -309,6 +310,7 @@ export async function exportBook(
   root: string,
   format: ExportFormat,
   platform: ExportPlatform = 'generic',
+  countMode: ExportCountMode = 'all',
 ): Promise<ExportResult> {
   const project = await loadProject(root)
   await assertFinalIntegrity(root)
@@ -322,7 +324,7 @@ export async function exportBook(
   const allText = (await Promise.all(chapters.map(chapter => readTextIfExists(finalPath(root, chapter)))))
     .filter((text): text is string => Boolean(text))
     .join('\n')
-  const characters = countPlatformCharacters(allText, platform)
+  const characters = countPlatformCharacters(allText, platform, countMode)
 
   if (format === 'split') {
     const dir = path.join(exportsDir, 'split')
@@ -355,10 +357,19 @@ export async function exportBook(
   return { format, platform, characters, files: [target] }
 }
 
-function countPlatformCharacters(text: string, platform: ExportPlatform): number {
+function countPlatformCharacters(
+  text: string,
+  platform: ExportPlatform,
+  countMode: ExportCountMode,
+): number {
   const normalized = text.replace(/\r\n?/g, '\n')
   if (platform === 'qidian') return (normalized.match(/[\u4e00-\u9fff]/g) ?? []).length
   if (platform === 'fanqie') return (normalized.match(/[\u4e00-\u9fff0-9]/g) ?? []).length
+  if (platform === 'custom') {
+    return countMode === 'cjk'
+      ? (normalized.match(/[\u4e00-\u9fff]/g) ?? []).length
+      : [...normalized.replace(/\s/g, '')].length
+  }
   return [...normalized.replace(/\s/g, '')].length
 }
 

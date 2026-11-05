@@ -32,6 +32,7 @@ function open(root: string): DatabaseSync {
       end_byte INTEGER NOT NULL,
       entities TEXT NOT NULL,
       storyline TEXT NOT NULL,
+      time_label TEXT NOT NULL,
       source_commit TEXT NOT NULL,
       content_hash TEXT NOT NULL,
       length INTEGER NOT NULL
@@ -49,6 +50,11 @@ function open(root: string): DatabaseSync {
       updated_at TEXT NOT NULL
     );
   `)
+  try {
+    db.exec("ALTER TABLE search_chunks ADD COLUMN time_label TEXT NOT NULL DEFAULT ''")
+  } catch {
+    // Existing index already has the column.
+  }
   return db
 }
 
@@ -89,8 +95,8 @@ export async function rebuildSearchIndex(root: string): Promise<{ chunks: number
         db.prepare(
           `INSERT INTO search_chunks
             (chunk_id, chapter, paragraph, text, start_byte, end_byte, entities, storyline,
-             source_commit, content_hash, length)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             time_label, source_commit, content_hash, length)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           chunkId,
           chapter,
@@ -100,6 +106,7 @@ export async function rebuildSearchIndex(root: string): Promise<{ chunks: number
           paragraph.endByte,
           [...new Set(entities)].join(','),
           storyline,
+          contract?.time ?? '',
           commitId,
           commit.contentHash,
           tokens.length,
@@ -124,7 +131,13 @@ export async function rebuildSearchIndex(root: string): Promise<{ chunks: number
 export async function searchBook(
   root: string,
   query: string,
-  options: { chapter?: number; entity?: string; storyline?: string; limit?: number } = {},
+  options: {
+    chapter?: number
+    entity?: string
+    storyline?: string
+    time?: string
+    limit?: number
+  } = {},
 ): Promise<{ query: string; results: SearchResult[]; fallback: boolean }> {
   if (!query.trim()) throw conflictError('搜索词不能为空')
   const db = open(root)
@@ -146,6 +159,7 @@ export async function searchBook(
       (filterChapter === undefined || Number(row.chapter) === filterChapter)
       && (!filterEntity || String(row.entities).split(',').includes(filterEntity))
       && (!filterStoryline || String(row.storyline).split(',').includes(filterStoryline))
+      && (!options.time || String(row.time_label).includes(options.time))
     const queryTerms = tokenize(query)
     const fallback = query.length <= 1 || queryTerms.length === 0
     if (!fallback) {

@@ -24,6 +24,7 @@ import {
   exportBook,
   projectStatus,
   rebuildBook,
+  type ExportCountMode,
   type ExportFormat,
   type ExportPlatform,
 } from './core/services.ts'
@@ -331,6 +332,7 @@ async function commandSearch(root: string, parsed: Parsed, json: boolean): Promi
     chapter: optionalNumber(parsed, 'chapter'),
     entity: optionalString(parsed, 'entity'),
     storyline: optionalString(parsed, 'storyline'),
+    time: optionalString(parsed, 'time'),
     limit: optionalNumber(parsed, 'limit'),
   })
   if (json) outputJson(result)
@@ -933,10 +935,19 @@ async function commandExport(root: string, parsed: Parsed, json: boolean): Promi
     throw usageError('--format 必须是 merged、split 或 txt')
   }
   const platformRaw = String(parsed.flags.platform ?? 'generic')
-  if (platformRaw !== 'generic' && platformRaw !== 'qidian' && platformRaw !== 'fanqie') {
-    throw usageError('--platform 必须是 generic、qidian 或 fanqie')
+  if (platformRaw !== 'generic' && platformRaw !== 'qidian' && platformRaw !== 'fanqie' && platformRaw !== 'custom') {
+    throw usageError('--platform 必须是 generic、qidian、fanqie 或 custom')
   }
-  const result = await exportBook(root, raw as ExportFormat, platformRaw as ExportPlatform)
+  const countModeRaw = String(parsed.flags['count-mode'] ?? 'all')
+  if (countModeRaw !== 'cjk' && countModeRaw !== 'all') {
+    throw usageError('--count-mode 必须是 cjk 或 all')
+  }
+  const result = await exportBook(
+    root,
+    raw as ExportFormat,
+    platformRaw as ExportPlatform,
+    countModeRaw as ExportCountMode,
+  )
   if (json) outputJson({ ok: true, ...result })
   else {
     console.log(`已导出 ${result.format}（${result.platform}，${result.characters} 字）：`)
@@ -1041,7 +1052,7 @@ function printHelp(): void {
   weave rewrite <chapter> --paragraph <id> --goal <text>
   weave method list|show <id>|route <chapter>
   weave style check <chapter>|samples
-  weave search <query> [--chapter <n>] [--entity <id>] [--storyline <id>] [--limit <n>]
+  weave search <query> [--chapter <n>] [--entity <id>] [--storyline <id>] [--time <label>] [--limit <n>]
   weave chunk <chunkId>
   weave index rebuild
   weave deconstruct <file> [--split-pattern <regex>] [--save]
@@ -1065,7 +1076,7 @@ function printHelp(): void {
   weave resolve-impact <chapter> --target <n> --decision accept|revise|defer
   weave resolve-impact <chapter> --all --decision accept
   weave rebuild [--projection all|content|ledger] [--from <chapter>] [--force]
-  weave export --format merged|split|txt [--platform generic|qidian|fanqie]
+  weave export --format merged|split|txt [--platform generic|qidian|fanqie|custom] [--count-mode cjk|all]
   weave doctor
 
 全局：
