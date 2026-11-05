@@ -62,6 +62,14 @@ function open(root: string): DatabaseSync {
       payload TEXT NOT NULL,
       PRIMARY KEY(projection, chapter)
     );
+    CREATE TABLE IF NOT EXISTS ledger_view_snapshots (
+      projection TEXT NOT NULL,
+      chapter INTEGER NOT NULL,
+      mainline_revision INTEGER NOT NULL,
+      last_commit TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(projection, chapter)
+    );
   `)
   return db
 }
@@ -74,13 +82,19 @@ export async function rebuildLedgerProjection(
   const head = await readMainline(root)
   const db = open(root)
   try {
+    const names = projectionNames(options.projection)
     let from = options.fromChapter ?? 1
-    if (from > 1) {
+    if (options.fromChapter === undefined && names.length === 1 && names[0] !== NAME) {
+      const snapshot = db.prepare(
+        'SELECT MAX(chapter) AS chapter FROM ledger_view_snapshots WHERE projection = ?',
+      ).get(names[0]) as Record<string, unknown> | undefined
+      if (snapshot?.chapter != null) from = Number(snapshot.chapter) + 1
+    }
+    if (names.includes(NAME) && from > 1) {
       const baseline = db.prepare('SELECT COUNT(*) AS count FROM ledger_projection WHERE chapter = ?')
         .get(from - 1) as Record<string, unknown> | undefined
       if (Number(baseline?.count ?? 0) === 0) from = 1
     }
-    const names = projectionNames(options.projection)
     db.exec('BEGIN IMMEDIATE')
     if (names.includes(NAME)) {
       db.prepare('DELETE FROM ledger_projection WHERE chapter >= ?').run(from)
@@ -204,10 +218,18 @@ async function apply(
   if (applied > 0) {
     const commitId = head.selectedCommitByChapter[String(applied)]
     if (commitId) {
+      const createdAt = new Date().toISOString()
       db.prepare(
         `INSERT OR REPLACE INTO ledger_projection_snapshots (chapter, mainline_revision, last_commit, created_at)
          VALUES (?, ?, ?, ?)`,
-      ).run(applied, head.mainlineRevision, commitId, new Date().toISOString())
+      ).run(applied, head.mainlineRevision, commitId, createdAt)
+      for (const name of names) {
+        db.prepare(
+          `INSERT OR REPLACE INTO ledger_view_snapshots
+            (projection, chapter, mainline_revision, last_commit, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(name, applied, head.mainlineRevision, commitId, createdAt)
+      }
     }
   }
   return applied
@@ -235,6 +257,38 @@ export async function readLedgerProjectionState(
       status: String(row.status) as LedgerProjectionState['status'],
       updatedAt: String(row.updated_at),
     }
+  } finally {
+    db.close()
+  }
+}
+
+export interface LedgerViewRow<T = unknown> {
+  projection: LedgerProjectionName
+  chapter: number
+  commitId: string
+  payload: T
+}
+
+export async function readLedgerView<T = unknown>(
+  root: string,
+  projection: LedgerProjectionName,
+  throughChapter?: number,
+): Promise<Array<LedgerViewRow<T>>> {
+  await ensureDir(projectPaths(root).metadata)
+  const db = open(root)
+  try {
+    const rows = (throughChapter === undefined
+      ? db.prepare('SELECT projection, chapter, commit_id, payload FROM ledger_view WHERE projection = ? ORDER BY chapter')
+        .all(projection)
+      : db.prepare(
+        'SELECT projection, chapter, commit_id, payload FROM ledger_view WHERE projection = ? AND chapter <= ? ORDER BY chapter',
+      ).all(projection, throughChapter)) as Array<Record<string, unknown>>
+    return rows.map(row => ({
+      projection: String(row.projection) as LedgerProjectionName,
+      chapter: Number(row.chapter),
+      commitId: String(row.commit_id),
+      payload: JSON.parse(String(row.payload)) as T,
+    }))
   } finally {
     db.close()
   }

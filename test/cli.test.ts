@@ -2113,6 +2113,54 @@ test('P1.7 impact with no dependency stays deferred', async () => {
   }
 })
 
+test('P1.7 waiver expires by chapter and is audited', async () => {
+  const secondDraft = '第二章：林岚继续查账。'
+  const model = new FakeModel([
+    P05_DRAFT,
+    extractionPayload(),
+    coveragePayload(),
+    reviewPayload(true),
+    reviewPayload(true),
+    secondDraft,
+    chapter3Extraction(secondDraft),
+    coveragePayload(),
+    reviewFor(secondDraft),
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await contract1(dir)
+    assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 7)
+    assert.equal((await runCli(dir, [
+      'waive', '1', '--finding', 'f1', '--reason', '只在本章生效', '--scope', 'chapter', '--until', '1', '--json',
+    ])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+
+    await setContract(dir, 2)
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    assert.equal((await runCli(dir, ['write', '2', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['check', '2', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '2', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '2', '--json'])).code, 0)
+    const review2 = await runCli(dir, ['review', '2', '--json'])
+    assert.equal(review2.code, 7)
+    const listed = await runCli(dir, ['waivers', 'list', '--json'])
+    const waivers = parseJson<{ waivers: Array<{ status: string; expiresAtChapter: number }> }>(listed.stdout).waivers
+    assert.equal(waivers[0]?.status, 'expired')
+    assert.equal(waivers[0]?.expiresAtChapter, 1)
+    const audit = await readFile(path.join(dir, '.weave', 'waivers.log.jsonl'), 'utf8')
+    assert.match(audit, /"event":"expire"/)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('P1.7 limited POV does not inject previous raw prose secrets', async () => {
   const first = '林岚在码头翻开账本。\n\n周把账本藏进了钟楼。'
   const model = new FakeModel([

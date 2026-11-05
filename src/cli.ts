@@ -492,6 +492,7 @@ async function commandLedger(root: string, parsed: Parsed, json: boolean): Promi
   const action = parsed.positionals[0]
   const id = parsed.positionals[1]
   if (!action || !id) throw usageError('用法：weave ledger event|fact|entity|beliefs <id> [--chapter <n>]')
+  await assertLedgerProjectionCurrent(root, ['entity-state', 'belief', 'series-timeline'])
   const sources = await collectLedgerSources(root)
   if (action === 'event') {
     const found = sources.events.find(item => item.record.eventId === id)

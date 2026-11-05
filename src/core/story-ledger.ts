@@ -11,6 +11,7 @@ import type {
 } from './types.ts'
 import type { ExtractionReport } from './stage-types.ts'
 import { readCommit, readMainline } from './ledger.ts'
+import { readLedgerView } from './ledger-projection.ts'
 import { validationError } from './errors.ts'
 import { objectHash } from './hash.ts'
 import { validateTimeline } from './timeline.ts'
@@ -241,6 +242,26 @@ export interface SourcedLedger {
 
 export async function collectLedgerSources(root: string, throughChapter?: number): Promise<SourcedLedger> {
   const head = await readMainline(root)
+  let hasV3 = false
+  for (const commitId of Object.values(head.selectedCommitByChapter)) {
+    const commit = await readCommit(root, commitId)
+    if (commit?.schemaVersion === 3) {
+      hasV3 = true
+      break
+    }
+  }
+  if (hasV3) {
+    const factsRows = await readLedgerView<LedgerFact[]>(root, 'entity-state', throughChapter)
+    const beliefRows = await readLedgerView<LedgerBelief[]>(root, 'belief', throughChapter)
+    const eventRows = await readLedgerView<LedgerEvent[]>(root, 'series-timeline', throughChapter)
+    if (factsRows.length > 0 || beliefRows.length > 0 || eventRows.length > 0) {
+      return {
+        events: eventRows.flatMap(row => row.payload.map(record => ({ record, commitId: row.commitId }))),
+        facts: factsRows.flatMap(row => row.payload.map(record => ({ record, commitId: row.commitId }))),
+        beliefs: beliefRows.flatMap(row => row.payload.map(record => ({ record, commitId: row.commitId }))),
+      }
+    }
+  }
   const events: SourcedLedger['events'] = []
   const facts: SourcedLedger['facts'] = []
   const beliefs: SourcedLedger['beliefs'] = []
@@ -365,10 +386,20 @@ export async function collectLoopState(root: string, throughChapter?: number): P
   errors: string[]
   warnings: string[]
 }> {
-  const head = await readMainline(root)
   let loops: OpenLoop[] = []
   let errors: string[] = []
   let warnings: string[] = []
+  const loopRows = await readLedgerView<LoopChange[]>(root, 'open-loop', throughChapter)
+  if (loopRows.length > 0) {
+    for (const row of loopRows) {
+      const applied = applyLoopChanges(loops, row.payload, row.chapter)
+      loops = applied.loops
+      errors = [...errors, ...applied.errors]
+      warnings = [...warnings, ...applied.warnings]
+    }
+    return { loops, errors, warnings }
+  }
+  const head = await readMainline(root)
   const chapters = Object.keys(head.selectedCommitByChapter)
     .map(Number)
     .filter(chapter => throughChapter === undefined || chapter <= throughChapter)
