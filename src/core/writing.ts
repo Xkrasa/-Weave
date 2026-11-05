@@ -45,6 +45,7 @@ import {
   invalidateProjection,
   markProjectionFailed,
   rebuildProjection,
+  replayProjectionFrom,
 } from './projections.ts'
 import { conflictError, modelError, validationError, WeaveError } from './errors.ts'
 
@@ -254,8 +255,12 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
   let projection: ProjectionState | null = null
   let projectionFailed = false
   try {
-    if (revision > 1) await invalidateProjection(root, chapter)
-    projection = await rebuildProjection(root)
+    if (revision > 1) {
+      await invalidateProjection(root, chapter)
+      projection = await replayProjectionFrom(root, chapter)
+    } else {
+      projection = await rebuildProjection(root)
+    }
   } catch (error) {
     projectionFailed = true
     projection = await markProjectionFailed(root, error instanceof Error ? error.message : String(error))

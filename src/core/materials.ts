@@ -2,9 +2,9 @@ import path from 'node:path'
 import type { ChapterContract, Material, MaterialCategory, MaterialProvenance } from './types.ts'
 import { hashText } from './hash.ts'
 import { listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
-import { loadCharacters } from './contract.ts'
+import { loadCharacters, loadContract } from './contract.ts'
 import { projectPaths } from './project.ts'
-import { currentCommit, finalPath } from './ledger.ts'
+import { currentCommit, finalPath, readMainline } from './ledger.ts'
 import { conflictError } from './errors.ts'
 
 interface ReferenceManifestEntry {
@@ -65,6 +65,45 @@ export async function collectMaterials(root: string, contract: ChapterContract):
         true,
         '上一章结尾',
         previousTail(previous, 2400),
+      ),
+    )
+  }
+
+  for (const offset of [1, 2]) {
+    const upcoming = await loadContract(root, contract.chapter + offset).catch(() => null)
+    if (!upcoming) continue
+    materials.push(
+      material(
+        `future-plan:${upcoming.chapter}`,
+        'future-plan',
+        'author',
+        false,
+        '后续计划（不是既成事实）',
+        JSON.stringify(upcoming, null, 2),
+      ),
+    )
+  }
+
+  const head = await readMainline(root)
+  const chapterNumbers = Object.keys(head.selectedCommitByChapter)
+    .map(Number)
+    .sort((a, b) => a - b)
+  if (chapterNumbers.length > 0) {
+    const rows: string[] = []
+    for (const number of chapterNumbers) {
+      const title = await loadContract(root, number)
+        .then(item => item.title)
+        .catch(() => '')
+      rows.push(`${String(number).padStart(3, '0')} ${title}`)
+    }
+    materials.push(
+      material(
+        'index:chapters',
+        'derived-locator',
+        'derived',
+        false,
+        '已定稿章节索引（仅定位）',
+        rows.join('\n'),
       ),
     )
   }

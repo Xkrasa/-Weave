@@ -8,6 +8,7 @@ import { createImpactReport, loadImpactReport, resolveImpact } from './core/impa
 import { currentCommit } from './core/ledger.ts'
 import { doctor, exportBook, projectStatus, rebuildBook, type ExportFormat } from './core/services.ts'
 import { WeaveError, usageError, validationError } from './core/errors.ts'
+import { ensureProjectMigrated } from './core/migrate.ts'
 import type { GenerationEvent } from './core/types.ts'
 
 interface Parsed {
@@ -31,6 +32,10 @@ async function main(): Promise<number> {
   if (command === 'init') return commandInit(parsed, json)
 
   const root = parsed.flags.root ? path.resolve(String(parsed.flags.root)) : await findProjectRoot()
+  const migration = await ensureProjectMigrated(root)
+  if (migration.migrated && !json) {
+    console.error(`项目已从 v${migration.from} 迁移到 v${migration.to}；备份：${migration.backupDir}`)
+  }
 
   switch (command) {
     case 'status':
@@ -69,6 +74,7 @@ async function commandInit(parsed: Parsed, json: boolean): Promise<number> {
     baseUrl: optionalString(parsed, 'base-url'),
     contextWindow: optionalNumber(parsed, 'context-window'),
     maxOutputTokens: optionalNumber(parsed, 'max-output'),
+    snapshotEvery: optionalNumber(parsed, 'snapshot-every'),
   })
   if (json) {
     outputJson({ ok: true, root: result.root, project: result.project, config: result.config })
@@ -102,7 +108,12 @@ async function commandContract(root: string, parsed: Parsed, json: boolean): Pro
   switch (action) {
     case 'set': {
       const file = requiredString(parsed, 'file')
-      const raw = JSON.parse(await readFile(path.resolve(file), 'utf8')) as unknown
+      let raw: unknown
+      try {
+        raw = JSON.parse(await readFile(path.resolve(file), 'utf8')) as unknown
+      } catch (error) {
+        throw validationError(`无法读取或解析合同 JSON：${error instanceof Error ? error.message : String(error)}`)
+      }
       const contract = normalizeContract(raw)
       if (chapter !== contract.chapter) {
         throw validationError(`命令行章号 ${chapter} 与合同章号 ${contract.chapter} 不一致`)
@@ -248,8 +259,27 @@ async function commandResolveImpact(root: string, parsed: Parsed, json: boolean)
     all: parsed.flags.all === true,
     decision,
   })
-  if (json) outputJson({ ok: true, report })
-  else console.log(`已更新第 ${chapter} 章影响面处理结果`)
+  const revised: number[] = []
+  const skipped: Array<{ chapter: number; reason: string }> = []
+  if (decision === 'revise') {
+    for (const item of report.items.filter(entry => entry.status === 'revision-planned')) {
+      try {
+        await amendChapter(root, item.targetChapter)
+        revised.push(item.targetChapter)
+      } catch (error) {
+        skipped.push({
+          chapter: item.targetChapter,
+          reason: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+  }
+  if (json) outputJson({ ok: true, report, revised, skipped })
+  else {
+    console.log(`已更新第 ${chapter} 章影响面处理结果`)
+    if (revised.length > 0) console.log(`已创建修订草稿：第 ${revised.join('、')} 章`)
+    for (const item of skipped) console.log(`第 ${item.chapter} 章未创建草稿：${item.reason}`)
+  }
   return 0
 }
 
@@ -351,7 +381,7 @@ function printHelp(): void {
   console.log(`Weave 0.1.0
 
 用法：
-  weave init [dir] --title <name> --model <model> --base-url <url>
+  weave init [dir] --title <name> --model <model> --base-url <url> [--snapshot-every <n>]
   weave status
   weave contract show|set|check <chapter> [--file <path>]
   weave write <chapter> [--json|--events] [--cancel-after-ms <n>]

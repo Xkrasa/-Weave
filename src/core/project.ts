@@ -78,7 +78,7 @@ export async function exists(target: string): Promise<boolean> {
 
 export async function loadProject(root: string): Promise<ProjectConfig> {
   const project = await readJson<ProjectConfig>(projectPaths(root).project)
-  if (project.schemaVersion !== 1) {
+  if (project.schemaVersion !== 2) {
     throw conflictError(`不支持的项目版本：${String(project.schemaVersion)}`)
   }
   return project
@@ -97,6 +97,7 @@ export interface InitOptions {
   baseUrl?: string
   contextWindow?: number
   maxOutputTokens?: number
+  snapshotEvery?: number
 }
 
 export async function initProject(dir: string, options: InitOptions = {}): Promise<{ root: string; project: ProjectConfig; config: ModelConfig }> {
@@ -108,7 +109,7 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
 
   const title = options.title?.trim() || path.basename(root)
   const project: ProjectConfig = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     title,
     language: options.language?.trim() || 'zh-CN',
     targetWords: positiveInt(options.targetWords, 1_000_000, 'targetWords'),
@@ -124,6 +125,7 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
     charsPerToken: 1.6,
     temperature: 0.8,
     timeoutMs: 120_000,
+    snapshotEvery: positiveInt(options.snapshotEvery, 10, 'snapshotEvery'),
   }
 
   for (const dirPath of [

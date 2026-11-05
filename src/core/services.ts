@@ -8,7 +8,12 @@ import { loadDraftMeta } from './runs.ts'
 import { assertFinalIntegrity, currentCommit, finalPath, listCommits, readCommit, readMainline } from './ledger.ts'
 import { loadContract } from './contract.ts'
 import { impactSummary, pendingImpactItems } from './impact.ts'
-import { assertProjectionCurrent, readProjectionState, rebuildProjection } from './projections.ts'
+import {
+  assertProjectionCurrent,
+  readProjectionState,
+  rebuildProjection,
+  replayProjectionFrom,
+} from './projections.ts'
 import { conflictError } from './errors.ts'
 
 export interface ChapterStatus {
@@ -172,12 +177,20 @@ export async function doctor(root: string): Promise<DoctorResult> {
 export interface RebuildResult {
   projection: ProjectionState
   chapters: number
+  replayBaseChapter: number | null
 }
 
 export async function rebuildBook(root: string, force = false): Promise<RebuildResult> {
   if (!force) await assertFinalIntegrity(root)
-  const projection = await rebuildProjection(root, { materialize: true })
-  return { projection, chapters: projection.appliedThrough }
+  const state = await readProjectionState(root)
+  const projection = !force && state?.invalidFrom && state.status !== 'current'
+    ? await replayProjectionFrom(root, state.invalidFrom, { materialize: true })
+    : await rebuildProjection(root, { materialize: true })
+  return {
+    projection,
+    chapters: projection.appliedThrough,
+    replayBaseChapter: projection.replayBaseChapter,
+  }
 }
 
 export type ExportFormat = 'merged' | 'split' | 'txt'

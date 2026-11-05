@@ -1,5 +1,5 @@
 export interface ProjectConfig {
-  schemaVersion: 1
+  schemaVersion: 2
   title: string
   language: string
   targetWords: number
@@ -16,6 +16,7 @@ export interface ModelConfig {
   charsPerToken: number
   temperature: number
   timeoutMs: number
+  snapshotEvery: number
 }
 
 export interface KnowledgeFact {
@@ -191,6 +192,7 @@ export interface ProjectionState {
   appliedThrough: number
   lastCommit: string | null
   invalidFrom: number | null
+  replayBaseChapter: number | null
   status: 'current' | 'stale' | 'failed'
   updatedAt: string
 }

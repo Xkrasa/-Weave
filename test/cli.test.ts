@@ -575,6 +575,157 @@ async function waitFor(predicate: () => boolean, timeoutMs = 8000): Promise<void
   throw new Error('timed out waiting for condition')
 }
 
+test('migrates a v1 project with a pre-migration backup', async () => {
+  const model = new FakeModel([])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    const projectFile = path.join(dir, '.weave', 'project.json')
+    const configFile = path.join(dir, '.weave', 'config.json')
+    const project = JSON.parse(await readFile(projectFile, 'utf8')) as Record<string, unknown>
+    const config = JSON.parse(await readFile(configFile, 'utf8')) as Record<string, unknown>
+    project.schemaVersion = 1
+    delete config.snapshotEvery
+    await writeFile(projectFile, `${JSON.stringify(project, null, 2)}\n`)
+    await writeFile(configFile, `${JSON.stringify(config, null, 2)}\n`)
+
+    const status = await runCli(dir, ['status', '--json'])
+    assert.equal(status.code, 0, status.stderr)
+    const payload = parseJson<{ schemaVersion: number }>(status.stdout)
+    assert.equal(payload.schemaVersion, 2)
+    const migrated = JSON.parse(await readFile(projectFile, 'utf8')) as Record<string, unknown>
+    assert.equal(migrated.schemaVersion, 2)
+    const migratedConfig = JSON.parse(await readFile(configFile, 'utf8')) as Record<string, unknown>
+    assert.equal(migratedConfig.snapshotEvery, 10)
+    const backups = await readdir(path.join(dir, '.weave', 'backups'))
+    assert.equal(backups.length, 1)
+    const backupProject = JSON.parse(
+      await readFile(path.join(dir, '.weave', 'backups', backups[0]!, 'project.json'), 'utf8'),
+    ) as Record<string, unknown>
+    assert.equal(backupProject.schemaVersion, 1)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('migration failure keeps the original project and leaves a backup', async () => {
+  const model = new FakeModel([])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    const projectFile = path.join(dir, '.weave', 'project.json')
+    const configFile = path.join(dir, '.weave', 'config.json')
+    const project = JSON.parse(await readFile(projectFile, 'utf8')) as Record<string, unknown>
+    project.schemaVersion = 1
+    await writeFile(projectFile, `${JSON.stringify(project, null, 2)}\n`)
+    await rm(configFile, { force: true })
+
+    const status = await runCli(dir, ['status', '--json'])
+    assert.equal(status.code, 4)
+    const untouched = JSON.parse(await readFile(projectFile, 'utf8')) as Record<string, unknown>
+    assert.equal(untouched.schemaVersion, 1)
+    const backups = await readdir(path.join(dir, '.weave', 'backups'))
+    assert.equal(backups.length, 1)
+    assert.match(await readFile(path.join(dir, '.weave', 'backups', backups[0]!, 'project.json'), 'utf8'), /"schemaVersion": 1/)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('refuses a future schema without modifying the project', async () => {
+  const model = new FakeModel([])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    const projectFile = path.join(dir, '.weave', 'project.json')
+    const project = JSON.parse(await readFile(projectFile, 'utf8')) as Record<string, unknown>
+    project.schemaVersion = 99
+    await writeFile(projectFile, `${JSON.stringify(project, null, 2)}\n`)
+    const status = await runCli(dir, ['status', '--json'])
+    assert.equal(status.code, 4)
+    const payload = parseJson<{ error: { message: string } }>(status.stdout)
+    assert.match(payload.error.message, /高于当前支持/)
+    const untouched = JSON.parse(await readFile(projectFile, 'utf8')) as Record<string, unknown>
+    assert.equal(untouched.schemaVersion, 99)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('golden 8-chapter project supports amend, snapshot replay, impact revision and acceptance', async () => {
+  const texts = Array.from({ length: 8 }, (_, index) => `第${index + 1}章正文：林岚推进账本线索，第${index + 1}次确认缺页。`)
+  const model = new FakeModel(texts)
+  await model.start()
+  const dir = await initBook(model.baseUrl, [
+    '--context-window', '8192',
+    '--max-output', '1024',
+    '--snapshot-every', '2',
+  ])
+  try {
+    await contract1(dir)
+    for (let chapter = 2; chapter <= 8; chapter += 1) {
+      await setContract(dir, chapter)
+      const checked = await checkContract(dir, chapter)
+      assert.equal(checked.code, 0, checked.stderr)
+    }
+    for (let chapter = 1; chapter <= 8; chapter += 1) {
+      const result = await writeAndFinalize(dir, chapter)
+      assert.ok(result.commitId)
+    }
+    const requestBodies = model.requests.map(request => JSON.stringify(request))
+    assert.ok(requestBodies[0]?.includes('后续计划（不是既成事实）'))
+    assert.ok(requestBodies.some(body => body.includes('已定稿章节索引（仅定位）')))
+    const status = parseJson<{ chapters: unknown[]; mainlineRevision: number }>(
+      (await runCli(dir, ['status', '--json'])).stdout,
+    )
+    assert.equal(status.chapters.length, 8)
+    assert.equal(status.mainlineRevision, 8)
+
+    const amended = await runCli(dir, ['amend', '3', '--json'])
+    assert.equal(amended.code, 0, amended.stderr)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '003.md'), '第三章修订：林岚发现缺页来自港务局。\n')
+    const finalized = await runCli(dir, ['finalize', '3', '--json'])
+    assert.equal(finalized.code, 0, finalized.stderr)
+    const finalPayload = parseJson<{
+      projection: { replayBaseChapter: number | null; invalidFrom: number | null; status: string }
+      impact: { items: Array<{ targetChapter: number }> }
+      draftEdited: boolean
+    }>(finalized.stdout)
+    assert.equal(finalPayload.draftEdited, true)
+    assert.equal(finalPayload.projection.status, 'current')
+    assert.equal(finalPayload.projection.invalidFrom, 3)
+    assert.equal(finalPayload.projection.replayBaseChapter, 2)
+    assert.deepEqual(
+      finalPayload.impact.items.map(item => item.targetChapter),
+      [4, 5, 6, 7, 8],
+    )
+
+    const revise = await runCli(dir, ['resolve-impact', '3', '--target', '4', '--decision', 'revise', '--json'])
+    assert.equal(revise.code, 0, revise.stderr)
+    const revisePayload = parseJson<{ revised: number[] }>(revise.stdout)
+    assert.deepEqual(revisePayload.revised, [4])
+    assert.match(await readFile(path.join(dir, 'chapters', 'drafts', '004.md'), 'utf8'), /第4章正文/)
+
+    const accepted = await runCli(dir, ['resolve-impact', '3', '--all', '--decision', 'accept', '--json'])
+    assert.equal(accepted.code, 0, accepted.stderr)
+    const doctorResult = await runCli(dir, ['doctor', '--json'])
+    assert.equal(doctorResult.code, 0, doctorResult.stdout + doctorResult.stderr)
+
+    const exported = await runCli(dir, ['export', '--format', 'merged', '--json'])
+    assert.equal(exported.code, 0, exported.stderr)
+    const merged = await readFile(path.join(dir, 'exports', 'book-merged.md'), 'utf8')
+    for (let chapter = 1; chapter <= 8; chapter += 1) {
+      assert.match(merged, new RegExp(`第${chapter}章`))
+    }
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('split export preserves Chinese filenames and deterministic content', async () => {
   const model = new FakeModel(['林岚把缺页夹进账本。'])
   await model.start()
