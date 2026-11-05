@@ -808,6 +808,64 @@ function loopExtractionPayload(loops: unknown[]): string {
   return JSON.stringify(extraction)
 }
 
+function chapter3Extraction(quote: string): string {
+  return JSON.stringify({
+    summary: '林岚发现账本缺页。',
+    noEventsReason: null,
+    records: [{
+      recordId: 'r1',
+      kind: 'event',
+      summary: '林岚发现账本缺页',
+      participants: ['林岚'],
+      location: '海港',
+      storyTime: '第三天',
+      payload: {},
+      evidence: [{ quote, occurrence: 1 }],
+    }],
+    timeline: [{
+      eventId: 'e1',
+      recordId: 'r1',
+      summary: '林岚发现账本缺页',
+      dayOffset: 0,
+      durationDays: 0,
+      participants: ['林岚'],
+      causedBy: [],
+      type: 'main',
+      evidence: [{ quote, occurrence: 1 }],
+    }],
+    facts: [],
+    beliefs: [],
+    loops: [],
+  })
+}
+
+function reviewFor(quote: string): string {
+  return JSON.stringify({
+    summary: '存在阻断问题',
+    findings: [{
+      dimension: '叙事衔接',
+      severity: 'blocking',
+      description: '缺页来源没有交代',
+      quote,
+      occurrence: 1,
+    }],
+  })
+}
+
+function revisionFor(text: string): string {
+  return JSON.stringify({
+    paragraphs: [{ paragraphId: 'p001', text, findingIds: ['f1'] }],
+  })
+}
+
+function recheckFor(quote: string): string {
+  return JSON.stringify({
+    summary: '复检通过',
+    findings: [{ findingId: 'f1', resolved: true, quote, note: '已修复' }],
+    newFindings: [],
+  })
+}
+
 function reviewPayload(blocking = false): string {
   return JSON.stringify({
     summary: blocking ? '存在阻断问题' : '整体成立',
@@ -1639,7 +1697,15 @@ test('P1.6 reports manual/revision conflicts and resolves by choice', async () =
       findingIds: ['f1'],
     }],
   })
-  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload(true), revision])
+  const model = new FakeModel([
+    P05_DRAFT,
+    extractionPayload(),
+    coveragePayload(),
+    reviewPayload(true),
+    revision,
+    extractionPayload('她发现缺页上留着港务局的印，但她决定先不声张'),
+    coveragePayload(),
+  ])
   await model.start()
   const dir = await prepareP05(model)
   try {
@@ -1651,6 +1717,7 @@ test('P1.6 reports manual/revision conflicts and resolves by choice', async () =
     assert.equal(model.requests.length, 4)
     const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
     const revisionId = parseJson<{ revisionId: string }>(revised.stdout).revisionId
+    assert.equal(model.requests.length, 5, `unexpected model calls: ${model.requests.length}`)
     const noMerge = await runCli(dir, ['recheck', '1', '--json'])
     assert.equal(noMerge.code, 4)
     assert.equal(model.requests.length, 5)
@@ -1669,6 +1736,14 @@ test('P1.6 reports manual/revision conflicts and resolves by choice', async () =
     assert.ok(conflictPayload.report.hunks.some(hunk => hunk.status === 'conflict' && hunk.paragraphId === 'p002'))
     assert.match(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), /先不声张/)
 
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    const conflictExtract = await runCli(dir, ['extract', '1', '--json'])
+    assert.equal(conflictExtract.code, 0, conflictExtract.stdout + conflictExtract.stderr)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    const conflictRecheck = await runCli(dir, ['recheck', '1', '--json'])
+    assert.equal(conflictRecheck.code, 4)
+    assert.equal(model.requests.length, 7)
+
     const resolved = await runCli(dir, [
       'merge', '1', '--revision', revisionId, '--choices', 'p002=manual', '--json',
     ])
@@ -1679,7 +1754,7 @@ test('P1.6 reports manual/revision conflicts and resolves by choice', async () =
 
     const ignored = await runCli(dir, ['ignore', '1', '--finding', 'f1', '--reason', '保留原意'])
     assert.equal(ignored.code, 3)
-    assert.equal(model.requests.length, 5)
+    assert.equal(model.requests.length, 7)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
@@ -1757,7 +1832,15 @@ test('P1.6 keeps manual-only and revision-only paragraphs independently', async 
       findingIds: ['f1'],
     }],
   })
-  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload(true), revision])
+  const model = new FakeModel([
+    P05_DRAFT,
+    extractionPayload(),
+    coveragePayload(),
+    reviewPayload(true),
+    revision,
+    extractionPayload('她发现缺页上留着港务局的印，但她决定先不声张'),
+    coveragePayload(),
+  ])
   await model.start()
   const dir = await prepareP05(model)
   try {
@@ -1778,6 +1861,85 @@ test('P1.6 keeps manual-only and revision-only paragraphs independently', async 
     const text = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
     assert.match(text, /清晨的码头/)
     assert.match(text, /决定追查下去/)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.6 runs two revision rounds on an 8-chapter project without losing history', async () => {
+  const texts = Array.from(
+    { length: 8 },
+    (_, index) => `第${index + 1}章正文：林岚推进账本线索，第${index + 1}次确认缺页。`,
+  )
+  const original = texts[2]!
+  const revised1 = '第3章修订：林岚查清账本缺页来自港务局。'
+  const revised2 = '第3章再修：林岚拿到港务局缺页记录。'
+  const model = new FakeModel([
+    ...texts,
+    chapter3Extraction(original),
+    coveragePayload(),
+    reviewFor(original),
+    revisionFor(revised1),
+    chapter3Extraction(revised1),
+    coveragePayload(),
+    recheckFor(revised1),
+    chapter3Extraction(revised1),
+    coveragePayload(),
+    reviewFor(revised1),
+    revisionFor(revised2),
+    chapter3Extraction(revised2),
+    coveragePayload(),
+    recheckFor(revised2),
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [
+    '--context-window', '8192',
+    '--max-output', '1024',
+    '--snapshot-every', '2',
+  ])
+  try {
+    await contract1(dir)
+    for (let chapter = 2; chapter <= 8; chapter += 1) {
+      await setContract(dir, chapter)
+      assert.equal((await checkContract(dir, chapter)).code, 0)
+    }
+    for (let chapter = 1; chapter <= 8; chapter += 1) {
+      await writeAndFinalize(dir, chapter)
+    }
+    const statusBefore = parseJson<{ chapters: unknown[]; mainlineRevision: number }>(
+      (await runCli(dir, ['status', '--json'])).stdout,
+    )
+    assert.equal(statusBefore.chapters.length, 8)
+    assert.equal(statusBefore.mainlineRevision, 8)
+
+    assert.equal((await runCli(dir, ['amend', '3', '--json'])).code, 0)
+    for (const round of [1, 2]) {
+      assert.equal((await runCli(dir, ['check', '3', '--json'])).code, 0)
+      const extracted3 = await runCli(dir, ['extract', '3', '--json'])
+      assert.equal(extracted3.code, 0, extracted3.stdout + extracted3.stderr)
+      assert.equal((await runCli(dir, ['audit', '3', '--json'])).code, 0)
+      const review = await runCli(dir, ['review', '3', '--json'])
+      assert.equal(review.code, 7, `round ${round}`)
+      const revised = await runCli(dir, ['revise', '3', '--findings', 'f1', '--json'])
+      assert.equal(revised.code, 0, revised.stderr)
+      const revisionId = parseJson<{ revisionId: string }>(revised.stdout).revisionId
+      assert.equal((await runCli(dir, ['merge', '3', '--revision', revisionId, '--json'])).code, 0)
+      assert.equal((await runCli(dir, ['check', '3', '--json'])).code, 0)
+      assert.equal((await runCli(dir, ['extract', '3', '--json'])).code, 0)
+      assert.equal((await runCli(dir, ['audit', '3', '--json'])).code, 0)
+      const rechecked = await runCli(dir, ['recheck', '3', '--json'])
+      assert.equal(rechecked.code, 0, `round ${round}: ${rechecked.stdout}${rechecked.stderr}`)
+    }
+    const finalized = await runCli(dir, ['finalize', '3', '--json'])
+    assert.equal(finalized.code, 0, finalized.stdout + finalized.stderr)
+    const statusAfter = parseJson<{ chapters: unknown[]; mainlineRevision: number }>(
+      (await runCli(dir, ['status', '--json'])).stdout,
+    )
+    assert.equal(statusAfter.chapters.length, 8)
+    assert.equal(statusAfter.mainlineRevision, 9)
+    const commitFiles = (await readdir(path.join(dir, 'ledger', 'commits'))).filter(name => name.endsWith('.json'))
+    assert.equal(commitFiles.length, 9)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
