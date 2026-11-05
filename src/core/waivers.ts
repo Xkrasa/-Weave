@@ -1,9 +1,11 @@
 import path from 'node:path'
+import { appendFile, mkdir } from 'node:fs/promises'
 import type { ReviewFinding, ReviewReport } from './stage-types.ts'
 import { atomicWriteJson, readJsonIfExists } from './io.ts'
 import { projectPaths } from './project.ts'
 import { objectHash } from './hash.ts'
 import { loadStage, saveStage } from './stages.ts'
+import { currentCommit } from './ledger.ts'
 import { validationError } from './errors.ts'
 
 export type WaiverScope = 'chapter' | 'entity' | 'storyline' | 'project'
@@ -15,7 +17,9 @@ export interface ReviewWaiver {
   scopeRef?: string
   reason: string
   createdAt: string
+  chapterRevision?: number
   expiresAtChapter?: number
+  lastAppliedAt?: string
   status: 'active' | 'revoked' | 'expired'
 }
 
@@ -28,6 +32,10 @@ function storePath(root: string): string {
   return path.join(projectPaths(root).metadata, 'waivers.json')
 }
 
+function auditPath(root: string): string {
+  return path.join(projectPaths(root).metadata, 'waivers.log.jsonl')
+}
+
 export async function loadWaivers(root: string): Promise<ReviewWaiver[]> {
   const store = await readJsonIfExists<WaiverStore>(storePath(root))
   return store?.waivers ?? []
@@ -35,6 +43,19 @@ export async function loadWaivers(root: string): Promise<ReviewWaiver[]> {
 
 async function saveWaivers(root: string, waivers: ReviewWaiver[]): Promise<void> {
   await atomicWriteJson(storePath(root), { schemaVersion: 1, waivers })
+}
+
+async function audit(root: string, event: string, waiver: ReviewWaiver): Promise<void> {
+  await mkdir(projectPaths(root).metadata, { recursive: true })
+  await appendFile(auditPath(root), `${JSON.stringify({
+    event,
+    waiverId: waiver.waiverId,
+    scope: waiver.scope,
+    scopeRef: waiver.scopeRef,
+    fingerprint: waiver.fingerprint,
+    reason: waiver.reason,
+    at: new Date().toISOString(),
+  })}\n`, 'utf8')
 }
 
 export function findingFingerprint(finding: ReviewFinding): string {
@@ -57,6 +78,11 @@ export async function createWaivers(
   if (selected.some(finding => finding.severity === 'blocking') && options.allWarnings) {
     throw validationError('blocking 意见不能批量豁免')
   }
+  if (options.untilChapter !== undefined && options.untilChapter < chapter) {
+    throw validationError('豁免失效章节不能早于创建章节')
+  }
+  const current = await currentCommit(root, chapter)
+  const chapterRevision = current?.revision ?? 0
   const existing = await loadWaivers(root)
   const created: ReviewWaiver[] = []
   for (const finding of selected) {
@@ -78,11 +104,13 @@ export async function createWaivers(
       ...(options.scope === 'project' ? {} : { scopeRef: options.scopeRef ?? String(chapter) }),
       reason: options.reason.trim(),
       createdAt: new Date().toISOString(),
+      chapterRevision,
       ...(options.untilChapter !== undefined ? { expiresAtChapter: options.untilChapter } : {}),
       status: 'active',
     }
     existing.push(waiver)
     created.push(waiver)
+    await audit(root, 'create', waiver)
   }
   await saveWaivers(root, existing)
   return created
@@ -94,11 +122,33 @@ export async function revokeWaiver(root: string, waiverId: string): Promise<Revi
   if (!waiver) throw validationError(`未找到豁免：${waiverId}`)
   waiver.status = 'revoked'
   await saveWaivers(root, waivers)
+  await audit(root, 'revoke', waiver)
   return waiver
 }
 
-export async function applyWaivers(root: string, chapter: number, report: ReviewReport): Promise<ReviewReport> {
+export async function refreshWaivers(root: string, chapter: number): Promise<ReviewWaiver[]> {
   const waivers = await loadWaivers(root)
+  const current = await currentCommit(root, chapter)
+  const revision = current?.revision ?? 0
+  let changed = false
+  for (const waiver of waivers) {
+    if (waiver.status !== 'active') continue
+    const expiredByChapter = waiver.expiresAtChapter !== undefined && chapter > waiver.expiresAtChapter
+    const expiredByRevision = waiver.scope === 'chapter'
+      && waiver.chapterRevision !== undefined
+      && revision > waiver.chapterRevision
+    if (expiredByChapter || expiredByRevision) {
+      waiver.status = 'expired'
+      changed = true
+      await audit(root, 'expire', waiver)
+    }
+  }
+  if (changed) await saveWaivers(root, waivers)
+  return waivers
+}
+
+export async function applyWaivers(root: string, chapter: number, report: ReviewReport): Promise<ReviewReport> {
+  const waivers = await refreshWaivers(root, chapter)
   let changed = false
   for (const finding of report.findings) {
     if (finding.status === 'waived') continue
@@ -108,15 +158,19 @@ export async function applyWaivers(root: string, chapter: number, report: Review
       if (item.expiresAtChapter !== undefined && chapter > item.expiresAtChapter) return false
       if (item.scope === 'project') return true
       if (item.scope === 'chapter') return item.scopeRef === String(chapter)
-      return Boolean(item.scopeRef && finding.description.includes(item.scopeRef))
+      if (item.scope === 'entity') return Boolean(item.scopeRef && finding.entityRefs?.includes(item.scopeRef))
+      return Boolean(item.scopeRef && finding.storylineRefs?.includes(item.scopeRef))
     })
     if (waiver) {
       finding.status = 'waived'
       finding.waiveReason = waiver.reason
+      waiver.lastAppliedAt = new Date().toISOString()
       changed = true
+      await audit(root, 'apply', waiver)
     }
   }
   if (changed) {
+    await saveWaivers(root, waivers)
     report.blockingCount = report.findings.filter(
       finding => finding.severity === 'blocking' && finding.status !== 'waived',
     ).length

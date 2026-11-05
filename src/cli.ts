@@ -19,7 +19,14 @@ import {
 import { writeChapter, amendChapter, finalizeChapter } from './core/writing.ts'
 import { createImpactReport, loadImpactReport, resolveImpact } from './core/impact.ts'
 import { currentCommit, readMainline } from './core/ledger.ts'
-import { doctor, exportBook, projectStatus, rebuildBook, type ExportFormat } from './core/services.ts'
+import {
+  doctor,
+  exportBook,
+  projectStatus,
+  rebuildBook,
+  type ExportFormat,
+  type ExportPlatform,
+} from './core/services.ts'
 import { WeaveError, usageError, validationError } from './core/errors.ts'
 import { ensureProjectMigrated } from './core/migrate.ts'
 import type { GenerationEvent } from './core/types.ts'
@@ -33,7 +40,11 @@ import {
   mergeRevision,
   recheckChapter,
   reviseChapter,
+  rewriteParagraph,
 } from './core/revisions.ts'
+import { loadMethods, selectMethods, styleCheck } from './core/methods.ts'
+import { rebuildSearchIndex, searchBook } from './core/search.ts'
+import { deconstructFile } from './core/deconstruct.ts'
 import {
   checkKnowledge,
   collectLedgerSources,
@@ -45,7 +56,7 @@ import {
   seriesTimeline,
 } from './core/story-ledger.ts'
 import { loadCharacters } from './core/contract.ts'
-import { assertLedgerProjectionCurrent } from './core/ledger-projection.ts'
+import { assertLedgerProjectionCurrent, type LedgerProjectionName } from './core/ledger-projection.ts'
 import { assertProjectionCurrent } from './core/projections.ts'
 import { draftHash, loadStage, readDraft, requireStage, saveStage } from './core/stages.ts'
 import type {
@@ -90,6 +101,18 @@ async function main(): Promise<number> {
       return commandWaive(root, parsed, json)
     case 'waivers':
       return commandWaivers(root, parsed, json)
+    case 'search':
+      return commandSearch(root, parsed, json)
+    case 'index':
+      return commandIndex(root, parsed, json)
+    case 'deconstruct':
+      return commandDeconstruct(parsed, json)
+    case 'rewrite':
+      return commandRewrite(root, parsed, json)
+    case 'method':
+      return commandMethod(root, parsed, json)
+    case 'style':
+      return commandStyle(root, parsed, json)
     case 'loops':
       return commandLoops(root, parsed, json)
     case 'state':
@@ -295,6 +318,113 @@ async function commandWaivers(root: string, parsed: Parsed, json: boolean): Prom
     return 0
   }
   throw usageError('用法：weave waivers list|revoke <waiverId>')
+}
+
+async function commandSearch(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const query = parsed.positionals[0]
+  if (!query) throw usageError('用法：weave search <query> [--chapter <n>] [--entity <id>] [--limit <n>]')
+  const result = await searchBook(root, query, {
+    chapter: optionalNumber(parsed, 'chapter'),
+    entity: optionalString(parsed, 'entity'),
+    limit: optionalNumber(parsed, 'limit'),
+  })
+  if (json) outputJson(result)
+  else {
+    for (const item of result.results) {
+      console.log(`[${item.chapter}:${item.paragraph}] ${item.text.slice(0, 120)}`)
+    }
+  }
+  return 0
+}
+
+async function commandIndex(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  if (parsed.positionals[0] !== 'rebuild') throw usageError('用法：weave index rebuild')
+  const result = await rebuildSearchIndex(root)
+  if (json) outputJson({ ok: true, ...result })
+  else console.log(`索引已重建：${result.chunks} 个段落，${result.terms} 个词项`)
+  return 0
+}
+
+async function commandDeconstruct(parsed: Parsed, json: boolean): Promise<number> {
+  const file = parsed.positionals[0]
+  if (!file) throw usageError('用法：weave deconstruct <file>')
+  const report = await deconstructFile(path.resolve(file))
+  if (json) outputJson(report)
+  else {
+    console.log(`拆书报告：${report.source}，${report.totals.chapters} 章`)
+    for (const chapter of report.chapters) {
+      console.log(`- ${chapter.index}. ${chapter.title}（${chapter.characters} 字，${chapter.structureTags.join('、')}）`)
+    }
+  }
+  return 0
+}
+
+async function commandRewrite(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const paragraphId = requiredString(parsed, 'paragraph')
+  const goal = requiredString(parsed, 'goal')
+  const config = await loadModelConfig(root)
+  const candidate = await rewriteParagraph(
+    root,
+    chapter,
+    paragraphId,
+    goal,
+    config,
+    new AbortController().signal,
+  )
+  if (json) outputJson({ ok: true, exitCode: 0, revisionId: candidate.revisionId, candidate })
+  else console.log(`已生成局部改写候选：${candidate.revisionId}`)
+  return 0
+}
+
+async function commandMethod(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0] ?? 'list'
+  if (action === 'list') {
+    const modules = await loadMethods(root)
+    if (json) outputJson({ modules })
+    else for (const module of modules) console.log(`${module.id}\tv${module.version}\t${module.tags.join(',')}`)
+    return 0
+  }
+  if (action === 'show') {
+    const id = parsed.positionals[1]
+    if (!id) throw usageError('用法：weave method show <id>')
+    const module = (await loadMethods(root)).find(item => item.id === id)
+    if (!module) throw validationError(`未找到方法模块：${id}`)
+    if (json) outputJson(module)
+    else {
+      console.log(`# ${module.id}\n`)
+      console.log(`Signal:\n${module.signal}\n`)
+      console.log(`Diagnosis:\n${module.diagnosis}\n`)
+      console.log(`Process:\n${module.process}\n`)
+      console.log(`Output:\n${module.output}\n`)
+      console.log(`Self Check:\n${module.selfCheck}`)
+    }
+    return 0
+  }
+  if (action === 'route') {
+    const chapter = parseChapter(parsed.positionals[1])
+    const selection = await selectMethods(root, chapter)
+    if (json) outputJson(selection)
+    else {
+      for (const item of selection.modules) console.log(`${item.id}\t${item.reason}`)
+      console.log(`estimatedTokens=${selection.estimatedTokens}`)
+    }
+    return 0
+  }
+  throw usageError('用法：weave method list|show <id>|route <chapter>')
+}
+
+async function commandStyle(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0]
+  if (action !== 'check') throw usageError('用法：weave style check <chapter>')
+  const chapter = parseChapter(parsed.positionals[1])
+  const report = await styleCheck(root, chapter)
+  if (json) outputJson(report)
+  else {
+    console.log(`第 ${chapter} 章风格检查：${report.passed ? '通过' : '未通过'}`)
+    for (const finding of report.findings) console.log(`- [${finding.severity}] ${finding.code}: ${finding.message}`)
+  }
+  return report.passed ? 0 : 3
 }
 
 async function commandLoops(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -736,11 +866,13 @@ async function commandResolveImpact(root: string, parsed: Parsed, json: boolean)
 
 async function commandRebuild(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const requested = String(parsed.flags.projection ?? 'all')
-  const aliases = new Set(['entity-state', 'belief', 'open-loop', 'series-timeline'])
-  const projection = aliases.has(requested) ? 'ledger' : requested
-  if (projection !== 'all' && projection !== 'content' && projection !== 'ledger') {
-    throw usageError('--projection 必须是 all、content、ledger、entity-state、belief、open-loop 或 series-timeline')
+  const allowed = new Set([
+    'all', 'content', 'ledger', 'ledger-index', 'entity-state', 'belief', 'open-loop', 'series-timeline',
+  ])
+  if (!allowed.has(requested)) {
+    throw usageError('--projection 必须是 all、content、ledger、ledger-index、entity-state、belief、open-loop 或 series-timeline')
   }
+  const projection = requested as 'all' | 'content' | 'ledger' | LedgerProjectionName
   const result = await rebuildBook(root, {
     force: parsed.flags.force === true,
     projection,
@@ -760,10 +892,14 @@ async function commandExport(root: string, parsed: Parsed, json: boolean): Promi
   if (raw !== 'merged' && raw !== 'split' && raw !== 'txt') {
     throw usageError('--format 必须是 merged、split 或 txt')
   }
-  const result = await exportBook(root, raw as ExportFormat)
+  const platformRaw = String(parsed.flags.platform ?? 'generic')
+  if (platformRaw !== 'generic' && platformRaw !== 'qidian' && platformRaw !== 'fanqie') {
+    throw usageError('--platform 必须是 generic、qidian 或 fanqie')
+  }
+  const result = await exportBook(root, raw as ExportFormat, platformRaw as ExportPlatform)
   if (json) outputJson({ ok: true, ...result })
   else {
-    console.log(`已导出 ${result.format}：`)
+    console.log(`已导出 ${result.format}（${result.platform}，${result.characters} 字）：`)
     for (const file of result.files) console.log(`  ${file}`)
   }
   return 0
@@ -862,6 +998,12 @@ function printHelp(): void {
   weave state <entityId> [--chapter <n>]
   weave knowledge <characterId> [--chapter <n>]
   weave knowledge check <chapter>
+  weave rewrite <chapter> --paragraph <id> --goal <text>
+  weave method list|show <id>|route <chapter>
+  weave style check <chapter>
+  weave search <query> [--chapter <n>] [--entity <id>] [--limit <n>]
+  weave index rebuild
+  weave deconstruct <file>
   weave loops list|show <loopId>
   weave timeline series
   weave check <chapter>
@@ -882,7 +1024,7 @@ function printHelp(): void {
   weave resolve-impact <chapter> --target <n> --decision accept|revise|defer
   weave resolve-impact <chapter> --all --decision accept
   weave rebuild [--projection all|content|ledger] [--from <chapter>] [--force]
-  weave export --format merged|split|txt
+  weave export --format merged|split|txt [--platform generic|qidian|fanqie]
   weave doctor
 
 全局：

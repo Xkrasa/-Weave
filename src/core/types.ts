@@ -64,6 +64,8 @@ export interface ChapterContract {
   characters: string[]
   threads: string[]
   knowledge?: ContractKnowledgeUse[]
+  narrativeMode?: 'limited' | 'omniscient'
+  visibleKnowledge?: string[]
   targetWords: number
   previousLink: string
   nextLink: string
@@ -253,6 +255,7 @@ export interface ImpactItem {
   level: 'confirmed' | 'likely' | 'unknown'
   reason: string
   dependencies?: string[]
+  evidence?: string[]
   status: 'pending' | 'accepted' | 'revision-planned' | 'deferred'
   decidedAt?: string
 }

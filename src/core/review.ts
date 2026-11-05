@@ -73,6 +73,12 @@ export async function runReview(
       severity,
       description,
       status: 'open',
+      ...(Array.isArray(entry.entityRefs)
+        ? { entityRefs: entry.entityRefs.filter((value): value is string => typeof value === 'string') }
+        : {}),
+      ...(Array.isArray(entry.storylineRefs)
+        ? { storylineRefs: entry.storylineRefs.filter((value): value is string => typeof value === 'string') }
+        : {}),
     }
     if (typeof entry.quote === 'string' && entry.quote.trim()) {
       finding.evidence = resolveEvidence(

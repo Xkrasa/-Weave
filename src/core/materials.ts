@@ -4,7 +4,7 @@ import { hashText } from './hash.ts'
 import { listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
 import { loadCharacters, loadContract } from './contract.ts'
 import { projectPaths } from './project.ts'
-import { currentCommit, finalPath, readMainline } from './ledger.ts'
+import { currentCommit, readMainline } from './ledger.ts'
 import { collectLedger, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
 import { conflictError } from './errors.ts'
 
@@ -79,18 +79,25 @@ export async function collectMaterials(root: string, contract: ChapterContract):
     if (!previousCommit) {
       throw conflictError(`第 ${contract.chapter - 1} 章尚未定稿，不能开始第 ${contract.chapter} 章`)
     }
-    const previous = await readTextIfExists(finalPath(root, contract.chapter - 1))
-    if (!previous?.trim()) {
-      throw conflictError(`第 ${contract.chapter - 1} 章正式正文为空`)
+    const previousContract = await loadContract(root, contract.chapter - 1)
+    const safeSummary = {
+      chapter: contract.chapter - 1,
+      title: previousContract.title,
+      endingState: previousContract.endingState,
+      nextLink: previousContract.nextLink,
+      pov: contract.pov,
+      visibleKnowledge: contract.narrativeMode === 'omniscient' ? contract.visibleKnowledge : undefined,
+      facts: povFacts,
+      beliefs: povBeliefs,
     }
     materials.push(
       material(
-        `final:${contract.chapter - 1}`,
-        'finalized-history',
-        'finalized',
+        `pov:previous-summary:${contract.chapter - 1}`,
+        'derived-locator',
+        'derived',
         true,
-        '上一章结尾',
-        previousTail(previous, 2400),
+        '上一章视角安全摘要（不是原文）',
+        JSON.stringify(safeSummary, null, 2),
       ),
     )
   }
@@ -181,12 +188,4 @@ function material(
     visibility: category === 'reference' ? 'author-only' : 'project',
     purpose: label,
   }
-}
-
-function previousTail(text: string, limit: number): string {
-  const characters = [...text]
-  if (characters.length <= limit) return text
-  const sliced = characters.slice(-limit).join('')
-  const firstBreak = sliced.indexOf('\n')
-  return firstBreak >= 0 && firstBreak < 200 ? sliced.slice(firstBreak + 1) : sliced
 }

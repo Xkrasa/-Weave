@@ -1,7 +1,7 @@
 import path from 'node:path'
 import type { ChapterContract, CommitRecord, ImpactItem, ImpactReport } from './types.ts'
 import { atomicWriteJson, listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
-import { impactPath, readMainline, currentCommit, finalPath } from './ledger.ts'
+import { impactPath, readCommit, readMainline, currentCommit, finalPath } from './ledger.ts'
 import { loadContract } from './contract.ts'
 import { projectPaths } from './project.ts'
 import { conflictError, usageError } from './errors.ts'
@@ -47,17 +47,23 @@ export async function createImpactReport(
   const items: ImpactItem[] = []
   for (const targetChapter of targets) {
     const targetContract = await safeContract(root, targetChapter)
+    const targetCommitId = head.selectedCommitByChapter[String(targetChapter)]
+    const targetCommit = targetCommitId ? await readCommit(root, targetCommitId) : null
     const text = (await readTextIfExists(finalPath(root, targetChapter))) ?? ''
     const item = classifyImpact(contract, targetContract, text, targetChapter)
+    const ledger = ledgerDependencies(sourceCommit, targetCommit, targetContract)
+    const dependencies = [...new Set([...item.dependencies, ...ledger.dependencies])]
+    const level = ledger.dependencies.length > 0 && item.level === 'unknown' ? 'confirmed' : item.level
     const waived = waivers.some(waiver =>
       waiver.sourceChapter === sourceChapter && waiver.targetChapter === targetChapter,
     )
     items.push({
       targetChapter,
-      level: item.level,
-      reason: item.reason,
-      dependencies: item.dependencies,
-      status: waived ? 'accepted' : item.level === 'unknown' ? 'deferred' : 'pending',
+      level,
+      reason: ledger.dependencies.length > 0 ? `${item.reason}；账本依赖：${ledger.dependencies.join('、')}` : item.reason,
+      dependencies,
+      evidence: ledger.evidence,
+      status: waived ? 'accepted' : level === 'unknown' ? 'deferred' : 'pending',
     })
   }
 
@@ -72,6 +78,43 @@ export async function createImpactReport(
   }
   await atomicWriteJson(impactPath(root, sourceChapter), report)
   return report
+}
+
+function ledgerDependencies(
+  source: CommitRecord,
+  target: CommitRecord | null,
+  targetContract: ChapterContract | null,
+): { dependencies: string[]; evidence: string[] } {
+  const dependencies: string[] = []
+  const evidence: string[] = []
+  if (!source.ledger) return { dependencies, evidence }
+  const targetEntities = new Set<string>(targetContract?.characters ?? [])
+  for (const event of target?.ledger?.events ?? []) {
+    for (const participant of event.participants) targetEntities.add(participant)
+  }
+  for (const fact of target?.ledger?.facts ?? []) targetEntities.add(fact.subject)
+  for (const loop of target?.ledger?.loops ?? []) {
+    for (const entity of loop.relatedEntities) targetEntities.add(entity)
+  }
+  for (const event of source.ledger.events) {
+    if (event.participants.some(participant => targetEntities.has(participant))) {
+      dependencies.push(`event:${event.eventId}`)
+      evidence.push(`event:${event.eventId}:${event.evidence.map(span => span.quote).join('|')}`)
+    }
+  }
+  for (const fact of source.ledger.facts) {
+    if (targetEntities.has(fact.subject)) {
+      dependencies.push(`fact:${fact.factId}`)
+      evidence.push(`fact:${fact.factId}:${fact.evidence.map(span => span.quote).join('|')}`)
+    }
+  }
+  for (const loop of source.ledger.loops ?? []) {
+    if (loop.relatedEntities.some(entity => targetEntities.has(entity))) {
+      dependencies.push(`loop:${loop.loopId}`)
+      evidence.push(`loop:${loop.loopId}:${loop.evidence.map(span => span.quote).join('|')}`)
+    }
+  }
+  return { dependencies: [...new Set(dependencies)], evidence: [...new Set(evidence)] }
 }
 
 export function classifyImpact(

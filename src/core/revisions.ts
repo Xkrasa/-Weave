@@ -21,6 +21,7 @@ import { draftPath } from './ledger.ts'
 import { chapterFileStem } from './contract.ts'
 import { conflictError, validationError } from './errors.ts'
 import { applyWaivers } from './waivers.ts'
+import { loadMethods, methodText, selectMethods } from './methods.ts'
 
 const REVISION_SYSTEM = [
   '你是小说修稿器。只修改请求中列出的段落，不重写整章。',
@@ -172,6 +173,68 @@ export async function reviseChapter(
       instructions,
     },
   }
+}
+
+export async function rewriteParagraph(
+  root: string,
+  chapter: number,
+  paragraphId: string,
+  goal: string,
+  config: ModelConfig,
+  signal: AbortSignal,
+): Promise<RevisionCandidate> {
+  if (!goal.trim()) throw validationError('局部改写必须提供目标')
+  const draft = await readDraft(root, chapter)
+  const paragraphs = paragraphsOf(draft)
+  const target = paragraphs.find(paragraph => paragraph.paragraphId === paragraphId)
+  if (!target) throw validationError(`未找到段落：${paragraphId}`)
+  const selection = await selectMethods(root, chapter)
+  const library = await loadMethods(root)
+  const methods = library.filter(module => selection.modules.some(item => item.id === module.id))
+  const prompt = [
+    `第 ${chapter} 章局部改写。目标：${goal}`,
+    `只改写 ${paragraphId}，其他段落保持不变。`,
+    '当前段落：',
+    target.text,
+    '',
+    '可用方法：',
+    methods.map(methodText).join('\n\n'),
+    '',
+    '只输出：',
+    JSON.stringify({ text: '改写后的完整段落' }, null, 2),
+  ].join('\n')
+  const model = config.reviewModel ?? config.model
+  const result = await completeText({
+    config: { ...config, model },
+    system: REVISION_SYSTEM,
+    user: prompt,
+    signal,
+  })
+  const raw = parseJsonObject(result.text)
+  const text = typeof raw.text === 'string'
+    ? raw.text.trim()
+    : Array.isArray(raw.paragraphs)
+      ? String((raw.paragraphs[0] as Record<string, unknown> | undefined)?.text ?? '').trim()
+      : ''
+  if (!text) throw validationError('局部改写模型没有返回可用段落')
+  const candidate: RevisionCandidate = {
+    schemaVersion: 1,
+    revisionId: `rev-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    chapter,
+    baseDraftHash: draftHash(draft),
+    createdAt: new Date().toISOString(),
+    model,
+    usage: result.usage,
+    raw: result.text,
+    findings: [],
+    instructions: [{ findingId: 'rewrite', paragraphIds: [paragraphId], goal }],
+    baseParagraphs: paragraphs,
+    paragraphs: [{ paragraphId, text }],
+    rejected: [],
+  }
+  await ensureDir(revisionDir(root, chapter))
+  await atomicWriteJson(candidatePath(root, chapter, candidate.revisionId), candidate)
+  return candidate
 }
 
 export async function loadRevision(

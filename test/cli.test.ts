@@ -271,6 +271,30 @@ test('contract validation rejects dead characters and reports structured JSON er
   }
 })
 
+test('P1.7 requires explicit visibleKnowledge for omniscient contracts', async () => {
+  const model = new FakeModel([])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    await setContract(dir, 1, { narrativeMode: 'omniscient' })
+    const rejected = await checkContract(dir, 1)
+    assert.equal(rejected.code, 3)
+    assert.ok(parseJson<{ errors: Array<{ code: string }> }>(rejected.stdout)
+      .errors.some(error => error.code === 'OMNISCIENT_WITHOUT_VISIBLE_KNOWLEDGE'))
+    await setContract(dir, 1, {
+      narrativeMode: 'omniscient',
+      visibleKnowledge: ['账本缺页'],
+    })
+    const accepted = await checkContract(dir, 1)
+    assert.equal(accepted.code, 0, accepted.stderr)
+    assert.equal(model.requests.length, 0)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('required material that cannot fit returns capacity-conflict before any model request', async () => {
   const model = new FakeModel([])
   await model.start()
@@ -839,6 +863,19 @@ function chapter3Extraction(quote: string): string {
   })
 }
 
+function warningReviewFor(quote: string): string {
+  return JSON.stringify({
+    summary: '仅建议',
+    findings: [{
+      dimension: '叙事衔接',
+      severity: 'warning',
+      description: '段落可以更紧',
+      quote,
+      occurrence: 1,
+    }],
+  })
+}
+
 function reviewFor(quote: string): string {
   return JSON.stringify({
     summary: '存在阻断问题',
@@ -1182,9 +1219,17 @@ test('P1.1 writes a v3 ledger and exposes event/fact/entity/belief queries', asy
 
     const status = await runCli(dir, ['status', '--json'])
     assert.equal(status.code, 0, status.stderr)
-    const statusPayload = parseJson<{ ledgerProjection: { status: string; appliedThrough: number } }>(status.stdout)
+    const statusPayload = parseJson<{
+      ledgerProjection: { status: string; appliedThrough: number }
+      ledgerProjections: Array<{ name: string; status: string }>
+    }>(status.stdout)
     assert.equal(statusPayload.ledgerProjection.status, 'current')
     assert.equal(statusPayload.ledgerProjection.appliedThrough, 1)
+    assert.deepEqual(
+      statusPayload.ledgerProjections.map(item => item.name).sort(),
+      ['belief', 'entity-state', 'ledger-index', 'open-loop', 'series-timeline'],
+    )
+    assert.ok(statusPayload.ledgerProjections.every(item => item.status === 'current'))
     const rebuilt = await runCli(dir, ['rebuild', '--projection', 'ledger', '--from', '1', '--json'])
     assert.equal(rebuilt.code, 0, rebuilt.stderr)
     assert.equal(parseJson<{ ledgerProjection: { status: string } }>(rebuilt.stdout).ledgerProjection.status, 'current')
@@ -1602,6 +1647,8 @@ test('P1.5 project-scoped waiver suppresses a blocking finding', async () => {
     const listed = await runCli(dir, ['waivers', 'list', '--json'])
     assert.equal(listed.code, 0, listed.stderr)
     assert.equal(parseJson<{ waivers: unknown[] }>(listed.stdout).waivers.length, 1)
+    const waiverAudit = await readFile(path.join(dir, '.weave', 'waivers.log.jsonl'), 'utf8')
+    assert.match(waiverAudit, /"event":"create"/)
 
     const secondReview = await runCli(dir, ['review', '1', '--json'])
     assert.equal(secondReview.code, 0, secondReview.stdout + secondReview.stderr)
@@ -1960,6 +2007,142 @@ test('P1.6 excludes waived findings from the revision plan', async () => {
     const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
     assert.equal(revised.code, 3)
     assert.equal(model.requests.length, 4)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P1.7 limited POV does not inject previous raw prose secrets', async () => {
+  const first = '林岚在码头翻开账本。\n\n周把账本藏进了钟楼。'
+  const model = new FakeModel([
+    first,
+    chapter3Extraction('林岚在码头翻开账本。'),
+    coveragePayload(),
+    warningReviewFor('林岚在码头翻开账本。'),
+    '第二章：林岚回到码头，继续查账。\n',
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await contract1(dir)
+    assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+
+    await setContract(dir, 2, { characters: ['林岚'], pov: '林岚' })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    const written = await runCli(dir, ['write', '2', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(written.code, 0, written.stderr)
+    const body = JSON.stringify(model.requests[4])
+    assert.equal(body.includes('钟楼'), false)
+    assert.equal(body.includes('周把账本'), false)
+    assert.ok(body.includes('上一章视角安全摘要'))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P2.1 routes methods, checks style and rewrites only the target paragraph', async () => {
+  const model = new FakeModel([
+    '林岚在码头翻开账本，发现缺页，决定沿着港务局的印继续追查，同时留意潮水变化和来往船只的动向，她必须在天黑前确认每一页的去向，否则港务局的人会先一步销毁证据。\n\n她把账本重新包好。',
+    JSON.stringify({ text: '林岚在码头翻开账本。她把缺页按回去，记住了港务局的印。' }),
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    await setContract(dir, 1, { goal: '找出账本缺页的因果链', obstacle: '人物动机不明' })
+    assert.equal((await checkContract(dir, 1)).code, 0)
+    const listed = await runCli(dir, ['method', 'list', '--json'])
+    assert.equal(listed.code, 0, listed.stderr)
+    assert.ok(parseJson<{ modules: Array<{ id: string }> }>(listed.stdout).modules.some(item => item.id === 'structure-causality'))
+
+    assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    const routed = await runCli(dir, ['method', 'route', '1', '--json'])
+    assert.equal(routed.code, 0, routed.stderr)
+    const selection = parseJson<{ modules: Array<{ id: string }>; estimatedTokens: number }>(routed.stdout)
+    assert.ok(selection.modules.length <= 3)
+    assert.ok(selection.modules.length > 0)
+    assert.ok(selection.estimatedTokens > 0)
+
+    const style = await runCli(dir, ['style', 'check', '1', '--json'])
+    assert.equal(style.code, 0, style.stderr)
+    assert.ok(
+      parseJson<{ findings: Array<{ code: string }> }>(style.stdout).findings.some(item => item.code === 'LONG_SENTENCE'),
+      style.stdout,
+    )
+
+    const before = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
+    const rewrite = await runCli(dir, [
+      'rewrite', '1', '--paragraph', 'p001', '--goal', '压缩长句，保留线索', '--json',
+    ])
+    assert.equal(rewrite.code, 0, rewrite.stderr)
+    const candidate = parseJson<{ revisionId: string; candidate: { paragraphs: Array<{ paragraphId: string }> } }>(rewrite.stdout)
+    assert.equal(candidate.candidate.paragraphs[0]?.paragraphId, 'p001')
+    assert.equal(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), before)
+    const merged = await runCli(dir, ['merge', '1', '--revision', candidate.revisionId, '--json'])
+    assert.equal(merged.code, 0, merged.stderr)
+    const text = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
+    assert.match(text, /记住了港务局的印/)
+    assert.match(text, /她把账本重新包好/)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('P2.2 indexes Chinese chunks, searches short terms, deconstructs and exports platform counts', async () => {
+  const model = new FakeModel([
+    '林岚在码头翻开账本。\n\n缺页上留着港务局的印。',
+    '林岚回到海港，把账本锁进柜子。\n\n她决定第二天再去码头。',
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    await setContract(dir, 2)
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    await writeAndFinalize(dir, 1)
+    await writeAndFinalize(dir, 2)
+
+    const indexed = await runCli(dir, ['index', 'rebuild', '--json'])
+    assert.equal(indexed.code, 0, indexed.stderr)
+    assert.ok(parseJson<{ chunks: number }>(indexed.stdout).chunks >= 4)
+
+    const search = await runCli(dir, ['search', '账本', '--json'])
+    assert.equal(search.code, 0, search.stderr)
+    const results = parseJson<{ results: Array<{ chapter: number; paragraph: number; evidence: { quote: string } }> }>(search.stdout)
+    assert.ok(results.results.length > 0)
+    assert.ok(results.results.some(item => item.chapter === 1))
+    assert.ok(results.results[0]?.evidence.quote.includes('账本'))
+
+    const short = await runCli(dir, ['search', '账', '--json'])
+    assert.equal(short.code, 0, short.stderr)
+    assert.equal(parseJson<{ fallback: boolean }>(short.stdout).fallback, true)
+    assert.ok(parseJson<{ results: unknown[] }>(short.stdout).results.length > 0)
+
+    const filtered = await runCli(dir, ['search', '海港', '--chapter', '2', '--json'])
+    assert.equal(filtered.code, 0, filtered.stderr)
+    assert.ok(parseJson<{ results: Array<{ chapter: number }> }>(filtered.stdout).results.every(item => item.chapter === 2))
+
+    const sample = path.join(dir, 'sample.txt')
+    await writeFile(sample, '第一章 起点\n林岚来到码头。\n\n第二章 账本\n她翻开账本。\n')
+    const deconstructed = await runCli(dir, ['deconstruct', 'sample.txt', '--json'])
+    assert.equal(deconstructed.code, 0, deconstructed.stderr)
+    const report = parseJson<{ totals: { chapters: number }; chapters: Array<{ openingExcerpt: string }> }>(deconstructed.stdout)
+    assert.equal(report.totals.chapters, 2)
+    assert.ok(report.chapters.every(item => [...item.openingExcerpt].length <= 80))
+
+    const exported = await runCli(dir, ['export', '--format', 'merged', '--platform', 'qidian', '--json'])
+    assert.equal(exported.code, 0, exported.stderr)
+    const exportPayload = parseJson<{ platform: string; characters: number }>(exported.stdout)
+    assert.equal(exportPayload.platform, 'qidian')
+    assert.ok(exportPayload.characters > 0)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })

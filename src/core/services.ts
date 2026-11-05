@@ -20,6 +20,9 @@ import {
   rebuildLedgerProjection,
   replayLedgerProjectionFrom,
   readLedgerProjectionState,
+  readLedgerProjectionStates,
+  LEDGER_PROJECTIONS,
+  type LedgerProjectionName,
   type LedgerProjectionState,
 } from './ledger-projection.ts'
 import { conflictError } from './errors.ts'
@@ -44,6 +47,7 @@ export interface ProjectStatus {
   drafts: number[]
   projection: ProjectionState | null
   ledgerProjection: LedgerProjectionState | null
+  ledgerProjections: LedgerProjectionState[]
   impacts: Array<{ chapter: number; pending: number; targets: number[] }>
   pendingImpacts: number
 }
@@ -89,6 +93,7 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
     drafts: drafts.sort((a, b) => a - b),
     projection: await readProjectionState(root),
     ledgerProjection: await readLedgerProjectionState(root),
+    ledgerProjections: await readLedgerProjectionStates(root),
     impacts,
     pendingImpacts: impacts.reduce((sum, item) => sum + item.pending, 0),
   }
@@ -138,18 +143,21 @@ export async function doctor(root: string): Promise<DoctorResult> {
   }
 
   const commits = await listCommits(root)
-  const ledgerState = await readLedgerProjectionState(root)
+  const ledgerStates = await readLedgerProjectionStates(root)
   if (commits.some(commit => commit.schemaVersion === 3)) {
-    if (!ledgerState) {
-      errors.push('存在 v3 账本提交但账本投影缺失；请执行 weave rebuild --projection ledger')
-    } else {
-      if (ledgerState.mainlineRevision !== head.mainlineRevision) {
-        errors.push('账本投影主线版本与当前主线不一致')
+    for (const name of LEDGER_PROJECTIONS) {
+      const state = ledgerStates.find(item => item.name === name)
+      if (!state) {
+        errors.push(`账本投影 ${name} 缺失；请执行 weave rebuild --projection ${name}`)
+        continue
       }
-      if (ledgerState.status !== 'current') errors.push(`账本投影状态为 ${ledgerState.status}`)
+      if (state.mainlineRevision !== head.mainlineRevision) {
+        errors.push(`账本投影 ${name} 主线版本与当前主线不一致`)
+      }
+      if (state.status !== 'current') errors.push(`账本投影 ${name} 状态为 ${state.status}`)
       const maxChapter = Math.max(0, ...selectedChapters)
-      if (ledgerState.appliedThrough < maxChapter) {
-        errors.push('账本投影未应用到最新章节')
+      if (state.appliedThrough < maxChapter) {
+        errors.push(`账本投影 ${name} 未应用到最新章节`)
       }
     }
   }
@@ -246,7 +254,7 @@ export async function rebuildBook(
   root: string,
   options: {
     force?: boolean
-    projection?: 'all' | 'content' | 'ledger'
+    projection?: 'all' | 'content' | 'ledger' | LedgerProjectionName
     fromChapter?: number
   } = {},
 ): Promise<RebuildResult> {
@@ -262,13 +270,15 @@ export async function rebuildBook(
         ? await replayProjectionFrom(root, state.invalidFrom, { materialize: true })
         : await rebuildProjection(root, { materialize: true })
   }
-  if (projection === 'all' || projection === 'ledger') {
+  if (projection !== 'content') {
+    const ledgerName: LedgerProjectionName | 'all' =
+      projection === 'all' || projection === 'ledger' ? 'all' : projection
     const state = await readLedgerProjectionState(root)
     ledgerProjection = fromChapter
-      ? await rebuildLedgerProjection(root, { fromChapter })
+      ? await rebuildLedgerProjection(root, { fromChapter, projection: ledgerName })
       : !force && state?.invalidFrom && state.status !== 'current'
         ? await replayLedgerProjectionFrom(root, state.invalidFrom)
-        : await rebuildLedgerProjection(root)
+        : await rebuildLedgerProjection(root, { projection: ledgerName })
   }
   return {
     projection: contentProjection,
@@ -279,13 +289,20 @@ export async function rebuildBook(
 }
 
 export type ExportFormat = 'merged' | 'split' | 'txt'
+export type ExportPlatform = 'generic' | 'qidian' | 'fanqie'
 
 export interface ExportResult {
   format: ExportFormat
+  platform: ExportPlatform
+  characters: number
   files: string[]
 }
 
-export async function exportBook(root: string, format: ExportFormat): Promise<ExportResult> {
+export async function exportBook(
+  root: string,
+  format: ExportFormat,
+  platform: ExportPlatform = 'generic',
+): Promise<ExportResult> {
   const project = await loadProject(root)
   await assertFinalIntegrity(root)
   await assertProjectionCurrent(root)
@@ -295,6 +312,10 @@ export async function exportBook(root: string, format: ExportFormat): Promise<Ex
   if (chapters.length === 0) throw conflictError('还没有已定稿章节可以导出')
   const exportsDir = projectPaths(root).exports
   await ensureDir(exportsDir)
+  const allText = (await Promise.all(chapters.map(chapter => readTextIfExists(finalPath(root, chapter)))))
+    .filter((text): text is string => Boolean(text))
+    .join('\n')
+  const characters = countPlatformCharacters(allText, platform)
 
   if (format === 'split') {
     const dir = path.join(exportsDir, 'split')
@@ -310,7 +331,7 @@ export async function exportBook(root: string, format: ExportFormat): Promise<Ex
       await atomicWrite(target, `${content.trimEnd()}\n`)
       files.push(target)
     }
-    return { format, files }
+    return { format, platform, characters, files }
   }
 
   const lines: string[] = []
@@ -324,7 +345,14 @@ export async function exportBook(root: string, format: ExportFormat): Promise<Ex
   }
   const target = path.join(exportsDir, format === 'merged' ? 'book-merged.md' : 'book.txt')
   await atomicWrite(target, `${lines.join('\n').trimEnd()}\n`)
-  return { format, files: [target] }
+  return { format, platform, characters, files: [target] }
+}
+
+function countPlatformCharacters(text: string, platform: ExportPlatform): number {
+  const normalized = text.replace(/\r\n?/g, '\n')
+  if (platform === 'qidian') return (normalized.match(/[\u4e00-\u9fff]/g) ?? []).length
+  if (platform === 'fanqie') return (normalized.match(/[\u4e00-\u9fff0-9]/g) ?? []).length
+  return [...normalized.replace(/\s/g, '')].length
 }
 
 

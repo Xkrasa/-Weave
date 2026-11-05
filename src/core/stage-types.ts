@@ -143,6 +143,8 @@ export interface ReviewFinding {
   evidence?: EvidenceSpan
   status: 'open' | 'planned' | 'applied' | 'verified' | 'ignored' | 'waived'
   paragraphIds?: string[]
+  entityRefs?: string[]
+  storylineRefs?: string[]
   waiveReason?: string
   ignoreReason?: string
   revisionId?: string

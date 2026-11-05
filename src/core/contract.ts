@@ -56,6 +56,11 @@ export function normalizeContract(input: unknown): ChapterContract {
     nextLink: stringField(raw.nextLink),
   }
   if (typeof raw.obstacle === 'string' && raw.obstacle.trim()) contract.obstacle = raw.obstacle.trim()
+  if (raw.narrativeMode === 'omniscient') contract.narrativeMode = 'omniscient'
+  else contract.narrativeMode = 'limited'
+  if (Array.isArray(raw.visibleKnowledge)) {
+    contract.visibleKnowledge = stringArray(raw.visibleKnowledge)
+  }
   if (Array.isArray(raw.knowledge)) {
     contract.knowledge = raw.knowledge
       .filter(item => item && typeof item === 'object')
@@ -113,6 +118,13 @@ export function validateContract(
   }
   if (!Number.isSafeInteger(contract.targetWords) || contract.targetWords <= 0) {
     errors.push({ code: 'INVALID_TARGET_WORDS', field: 'targetWords', message: 'targetWords 必须是正整数' })
+  }
+  if (contract.narrativeMode === 'omniscient' && (contract.visibleKnowledge ?? []).length === 0) {
+    errors.push({
+      code: 'OMNISCIENT_WITHOUT_VISIBLE_KNOWLEDGE',
+      field: 'visibleKnowledge',
+      message: '全知视角必须显式列出 visibleKnowledge',
+    })
   }
   for (const [field] of requiredStrings) {
     const value = contract[field]

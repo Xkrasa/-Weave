@@ -7,7 +7,15 @@ import { readCommit, readMainline } from './ledger.ts'
 import { objectHash } from './hash.ts'
 import { conflictError } from './errors.ts'
 
-const NAME = 'ledger-index'
+export const LEDGER_PROJECTIONS = [
+  'ledger-index',
+  'entity-state',
+  'belief',
+  'open-loop',
+  'series-timeline',
+] as const
+export type LedgerProjectionName = typeof LEDGER_PROJECTIONS[number]
+const NAME: LedgerProjectionName = 'ledger-index'
 
 export interface LedgerProjectionState {
   name: string
@@ -53,7 +61,7 @@ function open(root: string): DatabaseSync {
 
 export async function rebuildLedgerProjection(
   root: string,
-  options: { fromChapter?: number } = {},
+  options: { fromChapter?: number; projection?: LedgerProjectionName | 'all' } = {},
 ): Promise<LedgerProjectionState> {
   await ensureDir(projectPaths(root).metadata)
   const head = await readMainline(root)
@@ -70,15 +78,14 @@ export async function rebuildLedgerProjection(
     db.prepare('DELETE FROM ledger_projection_snapshots WHERE chapter >= ?').run(from)
     const applied = await apply(db, root, head, Math.max(0, from - 1))
     db.exec('COMMIT')
-    return writeState(db, {
-      name: NAME,
+    return writeStates(db, projectionNames(options.projection), {
       mainlineRevision: head.mainlineRevision,
       appliedThrough: applied,
       invalidFrom: null,
       replayBaseChapter: Math.max(0, from - 1),
       status: 'current',
       updatedAt: new Date().toISOString(),
-    })
+    }, NAME)
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
@@ -105,15 +112,14 @@ export async function replayLedgerProjectionFrom(
     db.prepare('DELETE FROM ledger_projection_snapshots WHERE chapter > ?').run(base)
     const applied = await apply(db, root, head, base)
     db.exec('COMMIT')
-    return writeState(db, {
-      name: NAME,
+    return writeStates(db, projectionNames('all'), {
       mainlineRevision: head.mainlineRevision,
       appliedThrough: applied,
       invalidFrom: invalidate ? fromChapter : null,
       replayBaseChapter: base,
       status: 'current',
       updatedAt: new Date().toISOString(),
-    })
+    }, NAME)
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
@@ -171,7 +177,10 @@ async function apply(
   return applied
 }
 
-export async function readLedgerProjectionState(root: string): Promise<LedgerProjectionState | null> {
+export async function readLedgerProjectionState(
+  root: string,
+  name: LedgerProjectionName = NAME,
+): Promise<LedgerProjectionState | null> {
   await ensureDir(projectPaths(root).metadata)
   const db = open(root)
   try {
@@ -179,10 +188,10 @@ export async function readLedgerProjectionState(root: string): Promise<LedgerPro
       `SELECT name, mainline_revision, applied_through, invalid_from,
               replay_base_chapter, status, updated_at
        FROM ledger_projection_state WHERE name = ?`,
-    ).get(NAME) as Record<string, unknown> | undefined
+    ).get(name) as Record<string, unknown> | undefined
     if (!row) return null
     return {
-      name: String(row.name),
+      name: String(row.name) as LedgerProjectionName,
       mainlineRevision: Number(row.mainline_revision),
       appliedThrough: Number(row.applied_through),
       invalidFrom: row.invalid_from == null ? null : Number(row.invalid_from),
@@ -193,6 +202,15 @@ export async function readLedgerProjectionState(root: string): Promise<LedgerPro
   } finally {
     db.close()
   }
+}
+
+export async function readLedgerProjectionStates(root: string): Promise<LedgerProjectionState[]> {
+  const states: LedgerProjectionState[] = []
+  for (const name of LEDGER_PROJECTIONS) {
+    const state = await readLedgerProjectionState(root, name)
+    if (state) states.push(state)
+  }
+  return states
 }
 
 export async function assertLedgerProjectionCurrent(root: string): Promise<void> {
@@ -206,18 +224,40 @@ export async function assertLedgerProjectionCurrent(root: string): Promise<void>
     }
   }
   if (!hasLedger) return
-  const state = await readLedgerProjectionState(root)
-  if (!state) throw conflictError('账本投影缺失；请执行 weave rebuild --projection ledger')
-  if (state.mainlineRevision !== head.mainlineRevision) {
-    throw conflictError('账本投影落后于主线；请执行 weave rebuild --projection ledger')
+  for (const name of LEDGER_PROJECTIONS) {
+    const state = await readLedgerProjectionState(root, name)
+    if (!state) {
+      throw conflictError(`账本投影 ${name} 缺失；请执行 weave rebuild --projection ${name}`)
+    }
+    if (state.mainlineRevision !== head.mainlineRevision) {
+      throw conflictError(`账本投影 ${name} 落后于主线；请重建`)
+    }
+    if (state.status !== 'current') {
+      throw conflictError(`账本投影 ${name} 不可用（${state.status}）；请先重建`)
+    }
+    const maxChapter = Math.max(...Object.keys(head.selectedCommitByChapter).map(Number))
+    if (state.appliedThrough < maxChapter) {
+      throw conflictError(`账本投影 ${name} 未应用到最新章节；请先重建`)
+    }
   }
-  if (state.status !== 'current') {
-    throw conflictError(`账本投影不可用（${state.status}）；请先重建`)
+}
+
+function projectionNames(projection?: LedgerProjectionName | 'all'): LedgerProjectionName[] {
+  return !projection || projection === 'all' ? [...LEDGER_PROJECTIONS] : [projection]
+}
+
+function writeStates(
+  db: DatabaseSync,
+  names: LedgerProjectionName[],
+  state: Omit<LedgerProjectionState, 'name'>,
+  primary: LedgerProjectionName,
+): LedgerProjectionState {
+  let result: LedgerProjectionState | null = null
+  for (const name of names) {
+    const written = writeState(db, { ...state, name })
+    if (name === primary) result = written
   }
-  const maxChapter = Math.max(...Object.keys(head.selectedCommitByChapter).map(Number))
-  if (state.appliedThrough < maxChapter) {
-    throw conflictError('账本投影未应用到最新章节；请先重建')
-  }
+  return result ?? writeState(db, { ...state, name: primary })
 }
 
 function writeState(db: DatabaseSync, state: LedgerProjectionState): LedgerProjectionState {
