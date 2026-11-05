@@ -1,0 +1,20 @@
+{
+  "name": "weave",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first long-form writing workbench",
+  "type": "module",
+  "bin": {
+    "weave": "./bin/weave.mjs"
+  },
+  "scripts": {
+    "weave": "node src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
