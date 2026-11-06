@@ -47,6 +47,12 @@ import {
   rewriteParagraph,
 } from './core/revisions.ts'
 import { loadMethods, selectMethods, styleCheck } from './core/methods.ts'
+import {
+  analyzeDeconstruction,
+  approveMethodCandidate,
+  listMethodCandidates,
+  saveMethodCandidates,
+} from './core/method-candidates.ts'
 import { loadAuthorSamples } from './core/style.ts'
 import {
   rebuildSearchIndex,
@@ -94,7 +100,7 @@ interface Parsed {
   flags: Record<string, string | true>
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank', 'open', 'key'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank', 'open', 'key', 'analyze', 'methods'])
 let eventStreamStarted = false
 
 async function main(): Promise<number> {
@@ -557,9 +563,18 @@ async function commandDeconstruct(root: string, parsed: Parsed, json: boolean): 
   const file = parsed.positionals[0]
   if (!file) throw usageError('用法：weave deconstruct <file> [--split-pattern <regex>] [--save]')
   const source = path.resolve(file)
-  const report = await deconstructFile(source, {
+  let report = await deconstructFile(source, {
     splitPattern: optionalString(parsed, 'split-pattern'),
   })
+  let analysis: Awaited<ReturnType<typeof analyzeDeconstruction>> | undefined
+  let candidates: Awaited<ReturnType<typeof saveMethodCandidates>> = []
+  if (parsed.flags.analyze === true) {
+    const config = await loadModelConfig(root)
+    analysis = await analyzeDeconstruction(root, report, config, new AbortController().signal)
+    if (parsed.flags.methods === true && analysis.methods.length > 0) {
+      candidates = await saveMethodCandidates(root, analysis.methods, report.source)
+    }
+  }
   if (parsed.flags.save === true) {
     const dir = path.join(projectPaths(root).references, 'deconstruct')
     await ensureDir(dir)
@@ -567,13 +582,18 @@ async function commandDeconstruct(root: string, parsed: Parsed, json: boolean): 
     await atomicWriteJson(target, report)
     report.savedPath = target
   }
-  if (json) outputJson(report)
+  if (json) outputJson({ ...report, ...(analysis ? { analysis } : {}), ...(candidates.length > 0 ? { methodCandidates: candidates } : {}) })
   else {
     console.log(`拆书报告：${report.source}，${report.totals.chapters} 章`)
     for (const chapter of report.chapters) {
       console.log(`- ${chapter.index}. ${chapter.title}（${chapter.characters} 字，${chapter.structureTags.join('、')}）`)
     }
     if (report.savedPath) console.log(`已保存：${report.savedPath}`)
+    if (analysis) {
+      console.log(`结构分析：${analysis.summary}`)
+      for (const pattern of analysis.patterns) console.log(`- 模式：${pattern}`)
+    }
+    for (const candidate of candidates) console.log(`- 方法卡候选：${candidate.id}（待批准）`)
   }
   return 0
 }
@@ -620,6 +640,20 @@ async function commandMethod(root: string, parsed: Parsed, json: boolean): Promi
     }
     return 0
   }
+  if (action === 'candidates') {
+    const candidates = await listMethodCandidates(root)
+    if (json) outputJson({ candidates })
+    else for (const candidate of candidates) console.log(`${candidate.id}	${candidate.status}	${candidate.source}`)
+    return 0
+  }
+  if (action === 'approve') {
+    const id = parsed.positionals[1]
+    if (!id) throw usageError('用法：weave method approve <id>')
+    const target = await approveMethodCandidate(root, id)
+    if (json) outputJson({ ok: true, id, path: target })
+    else console.log(`已批准方法卡 ${id}：${target}`)
+    return 0
+  }
   if (action === 'history') {
     const chapter = parseChapter(parsed.positionals[1])
     const runsDir = projectPaths(root).runs
@@ -661,7 +695,7 @@ async function commandMethod(root: string, parsed: Parsed, json: boolean): Promi
     }
     return 0
   }
-  throw usageError('用法：weave method list|show <id>|route <chapter>')
+  throw usageError('用法：weave method list|show <id>|candidates|approve <id>|route <chapter>')
 }
 
 async function commandStyle(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -1324,13 +1358,13 @@ function printHelp(): void {
   weave rewrite <chapter> --paragraph <id> --goal <text>
   weave plan status|approve <story|volume|character-arcs|rolling> [--volume <n>]
   weave outline status|generate <from> [--count <n>]|show|check|apply|approve <chapter>
-  weave method list|show <id>|route <chapter> [--platform long-form|short-form|generic|qidian|fanqie] [--max-tokens <n>]
+  weave method list|show <id>|candidates|approve <id>|route <chapter> [--platform long-form|short-form|generic|qidian|fanqie] [--max-tokens <n>]
   weave method history <chapter>
   weave style check <chapter>|samples
   weave search <query> [--chapter <n>] [--entity <id>] [--location <name>] [--storyline <id>] [--time <label>] [--vectors <file>] [--rerank] [--limit <n>]
   weave chunk <chunkId>
   weave index rebuild|status
-  weave deconstruct <file> [--split-pattern <regex>] [--save]
+  weave deconstruct <file> [--split-pattern <regex>] [--save] [--analyze [--methods]]
   weave ui [--port <n>] [--open]
   weave loops list|show <loopId>
   weave timeline series
