@@ -14,6 +14,7 @@ export interface ContractCheckError {
 export interface ContractCheckRecord {
   contractHash: string
   canonHash: string
+  readerPromiseHash?: string
   ok: boolean
   errors: ContractCheckError[]
   checkedAt: string
@@ -280,11 +281,12 @@ export async function writeContractCheck(root: string, contract: ChapterContract
   const { collectLedger } = await import('./story-ledger.ts')
   const ledger = await collectLedger(root, contract.chapter)
   const errors = validateContract(contract, registry, ledger.beliefs)
-  const { validateReaderPromiseReferences } = await import('./reader-promises.ts')
+  const { validateReaderPromiseReferences, readerPromiseCheckHash } = await import('./reader-promises.ts')
   errors.push(...await validateReaderPromiseReferences(root, contract))
   const record: ContractCheckRecord = {
     contractHash: contractHash(contract),
     canonHash: await canonSnapshotHash(root),
+    readerPromiseHash: await readerPromiseCheckHash(root),
     ok: errors.length === 0,
     errors,
     checkedAt: new Date().toISOString(),
@@ -304,6 +306,14 @@ export async function requirePassingContractCheck(root: string, contract: Chapte
   }
   if (record.canonHash !== (await canonSnapshotHash(root))) {
     throw validationError(`设定在合同检查后已修改；请重新执行 weave contract check ${contract.chapter}`)
+  }
+  const { readerPromiseCheckHash, readReaderPromiseBook } = await import('./reader-promises.ts')
+  const currentPromiseHash = await readerPromiseCheckHash(root)
+  if (record.readerPromiseHash !== undefined && record.readerPromiseHash !== currentPromiseHash) {
+    throw validationError(`ReaderPromise 在合同检查后已批准、修改或废弃；请重新执行 weave contract check ${contract.chapter}`)
+  }
+  if (record.readerPromiseHash === undefined && (await readReaderPromiseBook(root)).status !== 'missing') {
+    throw validationError(`ReaderPromise 在旧合同检查后才引入；请重新执行 weave contract check ${contract.chapter}`)
   }
   if (!record.ok) {
     throw validationError(`第 ${contract.chapter} 章合同检查未通过`, record.errors)

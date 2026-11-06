@@ -192,7 +192,7 @@ function runNode(script: string, args: string[]): Promise<{ code: number; stdout
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script, ...args], {
       cwd: path.dirname(script),
-      env: process.env,
+      env: { NODE_ENV: 'test' },
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       timeout: 15_000,

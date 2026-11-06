@@ -490,10 +490,11 @@ async function runSeed(
     record.durations.totalMs = Date.now() - startedAt
     return record
   }
-  if (options.timeoutMs) {
+  if (options.timeoutMs || options.maxOutputTokens) {
     const configPath = path.join(projectDir, '.weave', 'config.json')
     const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>
-    config.timeoutMs = options.timeoutMs
+    if (options.timeoutMs) config.timeoutMs = options.timeoutMs
+    if (options.maxOutputTokens) config.maxOutputTokens = options.maxOutputTokens
     await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
   }
   await writeCanon(projectDir, seed)
@@ -536,21 +537,17 @@ async function runSeed(
     }
     if (options.draftingStrategy === 'beat-first') {
       const generated = await runCli(projectDir, ['beats', 'generate', String(chapter.chapter), '--json'], env)
-      const approved = generated.code === 0
-        ? await runCli(projectDir, ['beats', 'approve', String(chapter.chapter), '--benchmark', '--json'], env)
-        : null
-      record.durations.planningMs += generated.elapsedMs + (approved?.elapsedMs ?? 0)
-      if (generated.code !== 0 || approved?.code !== 0) {
-        const failed = generated.code !== 0 ? generated : approved!
-        errors.push(`beats ${chapter.chapter}: ${errorText(failed)}`)
+      record.durations.planningMs += generated.elapsedMs
+      if (generated.code !== 0) {
+        errors.push(`beats ${chapter.chapter}: ${errorText(generated)}`)
         record.chapters.push({
           chapter: chapter.chapter, mode: 'generated', draftPath: '', characters: 0,
-          elapsedMs: generated.elapsedMs + (approved?.elapsedMs ?? 0), exitCode: failed.code,
+          elapsedMs: generated.elapsedMs, exitCode: generated.code,
         })
         continue
       }
     }
-    const writeArgs = ['write', String(chapter.chapter), '--json', '--strategy', options.draftingStrategy]
+    const writeArgs = ['write', String(chapter.chapter), '--json', '--strategy', options.draftingStrategy, '--benchmark']
     if (options.ablations.authorSamples) writeArgs.push('--author-samples', options.ablations.authorSamples)
     let write = await runCli(projectDir, writeArgs, env)
     record.durations.writeMs += write.elapsedMs

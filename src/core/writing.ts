@@ -11,9 +11,7 @@ import type {
 } from './types.ts'
 import { assertNoPendingImpacts, createImpactReport } from './impact.ts'
 import { loadCharacters, loadContract, contractHash, requirePassingContractCheck } from './contract.ts'
-import { collectMaterials } from './materials.ts'
-import { selectMethods } from './methods.ts'
-import { selectAuthorSamples } from './style.ts'
+import { collectMaterialBundle } from './materials.ts'
 import { formatBeats, requireApprovedBeats, type DraftingStrategy } from './beats.ts'
 import type { AuthorSampleSelection } from './style.ts'
 import { assembleContext } from './context.ts'
@@ -109,6 +107,8 @@ export async function writeChapter(
     draftingStrategy?: DraftingStrategy
     /** Independent author-sample ablation; defaults to scene-aware selection. */
     authorSamples?: 'scene' | 'legacy' | 'off'
+    /** Explicitly allow generated, unapproved beat fixtures for controlled benchmarks only. */
+    benchmark?: boolean
   },
 ): Promise<WriteResult> {
   await assertOutlineApproved(root, chapter)
@@ -136,11 +136,11 @@ export async function writeChapter(
 
   const draftingStrategy = options.draftingStrategy ?? 'prose-first'
   const beatCandidate = draftingStrategy === 'beat-first'
-    ? await requireApprovedBeats(root, chapter)
+    ? await requireApprovedBeats(root, chapter, { allowBenchmarkDraft: options.benchmark === true })
     : null
-  const sampleSelection = await selectAuthorSamples(root, contract, { strategy: options.authorSamples ?? 'scene' })
-  const materials = await collectMaterials(root, contract, { authorSamples: options.authorSamples })
-  const methodSelection = await selectMethods(root, contract.chapter)
+  const { materials, sampleSelection, methodSelection } = await collectMaterialBundle(root, contract, {
+    authorSamples: options.authorSamples,
+  })
   const assembled = assembleContext(contract, materials, modelConfig, {
     ...(beatCandidate ? { beatText: formatBeats(beatCandidate) } : {}),
   })

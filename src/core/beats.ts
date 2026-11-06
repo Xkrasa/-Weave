@@ -35,7 +35,7 @@ export interface BeatCandidate {
   planningRunId?: string
   createdAt: string
   approvedAt?: string
-  approvedBy?: 'author' | 'benchmark'
+  approvedBy?: 'author'
   skippedAt?: string
 }
 
@@ -153,7 +153,6 @@ export async function saveBeatDraft(
 export async function approveBeatCandidate(
   root: string,
   chapter: number,
-  approvedBy: 'author' | 'benchmark' = 'author',
 ): Promise<BeatCandidate> {
   const candidate = await readJsonIfExists<BeatCandidate>(candidatePath(root, chapter))
   if (!candidate) throw conflictError(`第 ${chapter} 章没有节拍候选`)
@@ -163,7 +162,7 @@ export async function approveBeatCandidate(
     status: 'approved',
     contentHash: objectHash({ chapter, beats }),
     approvedAt: new Date().toISOString(),
-    approvedBy,
+    approvedBy: 'author',
   }
   await atomicWriteJson(candidatePath(root, chapter), approved)
   return approved
@@ -182,10 +181,17 @@ export async function skipBeatCandidate(root: string, chapter: number): Promise<
   return skipped
 }
 
-export async function requireApprovedBeats(root: string, chapter: number): Promise<BeatCandidate> {
+export async function requireApprovedBeats(
+  root: string,
+  chapter: number,
+  options: { allowBenchmarkDraft?: boolean } = {},
+): Promise<BeatCandidate> {
   const view = await readBeatCandidate(root, chapter)
   if (view.status === 'modified') throw conflictError(`第 ${chapter} 章节拍在批准后已修改，请重新批准`)
   if (view.status === 'skipped') throw conflictError(`第 ${chapter} 章已跳过节拍，请使用默认 prose-first 策略`)
+  if (options.allowBenchmarkDraft && view.status === 'draft' && view.candidate?.provenance === 'generated') {
+    return view.candidate
+  }
   if (view.status !== 'approved' || !view.candidate) {
     throw conflictError(`第 ${chapter} 章节拍尚未批准；请先执行 beats generate/set 和 beats approve`)
   }

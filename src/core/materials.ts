@@ -26,11 +26,15 @@ interface ReferenceManifest {
   references?: ReferenceManifestEntry[]
 }
 
-export async function collectMaterials(
+export async function collectMaterialBundle(
   root: string,
   contract: ChapterContract,
   options: { authorSamples?: 'scene' | 'legacy' | 'off' } = {},
-): Promise<Material[]> {
+): Promise<{
+  materials: Material[]
+  methodSelection: import('./methods.ts').MethodSelection
+  sampleSelection: import('./style.ts').AuthorSampleSelection
+}> {
   const paths = projectPaths(root)
   const materials: Material[] = []
 
@@ -226,7 +230,8 @@ export async function collectMaterials(
       ),
     )
   }
-  const { samples } = await selectAuthorSamples(root, contract, { strategy: options.authorSamples ?? 'scene' })
+  const sampleSelection = await selectAuthorSamples(root, contract, { strategy: options.authorSamples ?? 'scene' })
+  const { samples } = sampleSelection
   if (samples.length > 0) {
     materials.push(
       material(
@@ -286,7 +291,15 @@ export async function collectMaterials(
     }
   }
 
-  return materials
+  return { materials, methodSelection, sampleSelection }
+}
+
+export async function collectMaterials(
+  root: string,
+  contract: ChapterContract,
+  options: { authorSamples?: 'scene' | 'legacy' | 'off' } = {},
+): Promise<Material[]> {
+  return (await collectMaterialBundle(root, contract, options)).materials
 }
 
 

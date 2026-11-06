@@ -5,7 +5,8 @@ import { createServer, type Server } from 'node:http'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { readerPromiseFindings } from '../src/core/reader-promises.ts'
+import { readerPromiseFindings, recordReaderPayoff } from '../src/core/reader-promises.ts'
+import { loadContract, requirePassingContractCheck } from '../src/core/contract.ts'
 import { collectLoopState } from '../src/core/story-ledger.ts'
 
 const CLI = path.resolve('src/cli.ts')
@@ -98,7 +99,10 @@ async function finalize(dir: string, text: string): Promise<void> {
 
 test('ReaderPromise approval, evidence, extraction candidates and amendment stay separate from OpenLoop', async () => {
   const candidateText = JSON.stringify({
-    candidates: [{ promiseId: 'rp-ledger', action: 'payoff', quote: '林岚确认有人换过账页', occurrence: 1 }],
+    candidates: [
+      { promiseId: 'rp-ledger', action: 'advance', quote: '林岚发现编号不符', occurrence: 1 },
+      { promiseId: 'rp-ledger', action: 'payoff', quote: '林岚确认有人换过账页', occurrence: 1 },
+    ],
   })
   const model = new FakeModel(candidateText)
   await model.start()
@@ -130,21 +134,33 @@ test('ReaderPromise approval, evidence, extraction candidates and amendment stay
     assert.equal(listed.promises.length, 0)
     assert.equal((await runCli(dir, ['promise', 'approve', '--json'])).code, 0)
     assert.equal((await runCli(dir, ['contract', 'check', '1', '--json'])).code, 0)
-    await finalize(dir, '林岚确认有人换过账页。')
+    await finalize(dir, '林岚发现编号不符。林岚确认有人换过账页。')
 
     listed = json<PromiseList>((await runCli(dir, ['promise', 'list', '--json'])).stdout)
     assert.equal(listed.promises[0]?.effectiveStatus, 'active')
-    assert.equal(listed.promises[0]?.advanceCount, 1)
+    assert.equal(listed.promises[0]?.advanceCount, 0, 'planned promiseIds are not actual advances')
 
     const extracted = await runCli(dir, ['promise', 'extract', '1', '--json'])
     assert.equal(extracted.code, 0, extracted.stdout + extracted.stderr)
-    const candidateId = json<{ candidates: Array<{ candidateId: string }> }>(extracted.stdout).candidates[0]!.candidateId
+    const [advanceId, candidateId] = json<{ candidates: Array<{ candidateId: string }> }>(extracted.stdout).candidates.map(item => item.candidateId)
     listed = json<PromiseList>((await runCli(dir, ['promise', 'list', '--json'])).stdout)
     assert.equal(listed.promises[0]?.effectiveStatus, 'active', 'unconfirmed extraction must not change state')
+    assert.equal((await runCli(dir, ['promise', 'confirm', advanceId, '--json'])).code, 0)
+    listed = json<PromiseList>((await runCli(dir, ['promise', 'list', '--json'])).stdout)
+    assert.equal(listed.promises[0]?.advanceCount, 1, 'confirmed advance evidence increments the count')
     assert.equal((await runCli(dir, ['promise', 'confirm', candidateId, '--json'])).code, 0)
     listed = json<PromiseList>((await runCli(dir, ['promise', 'list', '--json'])).stdout)
     assert.equal(listed.promises[0]?.effectiveStatus, 'paid_off')
     assert.equal(listed.promises[0]?.payoff?.evidence.quote, '林岚确认有人换过账页')
+
+    const finalFile = path.join(dir, 'chapters', 'final', '001.md')
+    const originalFinal = await readFile(finalFile, 'utf8')
+    await writeFile(finalFile, '被替换的正文。')
+    await assert.rejects(
+      recordReaderPayoff(dir, { promiseId: 'rp-ledger', chapter: 1, quote: '林岚确认有人换过账页', occurrence: 1 }),
+      /哈希不一致/,
+    )
+    await writeFile(finalFile, originalFinal)
 
     assert.equal((await runCli(dir, ['amend', '1', '--json'])).code, 0)
     await finalize(dir, '林岚发现账页编号与旧照片一致。')
@@ -162,6 +178,7 @@ test('ReaderPromise approval, evidence, extraction candidates and amendment stay
     assert.equal((await runCli(dir, ['promise', 'abandon', 'rp-ledger', '--reason', '作者改换调查方向', '--json'])).code, 0)
     listed = json<PromiseList>((await runCli(dir, ['promise', 'list', '--json'])).stdout)
     assert.equal(listed.promises[0]?.effectiveStatus, 'abandoned')
+    await assert.rejects(requirePassingContractCheck(dir, await loadContract(dir, 1)), /ReaderPromise.*合同检查/)
     assert.equal((await collectLoopState(dir)).loops.length, 0, 'ReaderPromise must not create OpenLoop records')
   } finally {
     await model.close()

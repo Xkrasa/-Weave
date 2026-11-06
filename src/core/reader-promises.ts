@@ -1,12 +1,11 @@
 import path from 'node:path'
-import type { ChapterContract, ModelConfig } from './types.ts'
+import type { ChapterContract, CommitRecord, ModelConfig } from './types.ts'
 import type { ContractCheckError } from './contract.ts'
 import type { EvidenceSpan } from './stage-types.ts'
-import { atomicWriteJson, readJsonIfExists, readTextIfExists } from './io.ts'
+import { atomicWriteJson, fileHash, readJsonIfExists, readTextIfExists } from './io.ts'
 import { objectHash } from './hash.ts'
 import { conflictError, validationError } from './errors.ts'
 import { projectPaths } from './project.ts'
-import { loadContract } from './contract.ts'
 import { currentCommit, finalPath, readMainline } from './ledger.ts'
 import { resolveEvidence } from './stages.ts'
 import { collectLoopState } from './story-ledger.ts'
@@ -107,6 +106,11 @@ export async function readReaderPromiseBook(root: string): Promise<{
   }
 }
 
+export async function readerPromiseCheckHash(root: string): Promise<string> {
+  const book = await readReaderPromiseBook(root)
+  return objectHash({ status: book.status, contentHash: book.contentHash })
+}
+
 export async function saveReaderPromiseDraft(
   root: string,
   content: ReaderPromiseBook,
@@ -173,13 +177,6 @@ export async function collectReaderPromiseStates(root: string, throughChapter: n
   const book = await readReaderPromiseBook(root)
   if (book.status !== 'approved' || !book.content) return []
   const [head, store] = await Promise.all([readMainline(root), loadObservations(root)])
-  const contracts = await Promise.all(
-    Object.entries(head.selectedCommitByChapter)
-      .map(([chapter]) => Number(chapter))
-      .filter(chapter => chapter <= throughChapter)
-      .sort((a, b) => a - b)
-      .map(chapter => loadContract(root, chapter).catch(() => null)),
-  )
   return book.content.promises.map(promise => {
     const observations = store.observations.filter(item => item.promiseId === promise.promiseId && item.chapter <= throughChapter)
     const valid = observations.filter(item => head.selectedCommitByChapter[String(item.chapter)] === item.commitId)
@@ -188,9 +185,6 @@ export async function collectReaderPromiseStates(root: string, throughChapter: n
       item.action === 'payoff' && head.selectedCommitByChapter[String(item.chapter)] !== item.commitId)
     const advanceChapters = new Set<number>()
     for (const item of valid.filter(item => item.action === 'advance')) advanceChapters.add(item.chapter)
-    for (const contract of contracts) {
-      if (contract?.readerIntent?.promiseIds?.includes(promise.promiseId)) advanceChapters.add(contract.chapter)
-    }
     const lastAdvancedChapter = advanceChapters.size > 0 ? Math.max(...advanceChapters) : undefined
     return {
       promise,
@@ -250,8 +244,7 @@ export async function extractReaderPromiseCandidates(
   if (book.status !== 'approved' || !book.content) throw conflictError('没有已批准的 ReaderPromise；请先批准承诺')
   const commit = await currentCommit(root, chapter)
   if (!commit) throw conflictError(`第 ${chapter} 章尚未定稿，不能提取兑现候选`)
-  const prose = await readTextIfExists(finalPath(root, chapter))
-  if (!prose) throw validationError(`第 ${chapter} 章定稿正文不存在`)
+  const prose = await readValidatedCommitProse(root, chapter, commit)
   const taskConfig = resolveTaskConfig(config, 'extraction')
   const result = await completeJsonObject({
     config: taskConfig,
@@ -369,6 +362,16 @@ export async function validateReaderPromiseReferences(
   return errors
 }
 
+async function readValidatedCommitProse(root: string, chapter: number, commit: CommitRecord): Promise<string> {
+  const file = finalPath(root, chapter)
+  if (await fileHash(file) !== commit.contentHash) {
+    throw conflictError(`第 ${chapter} 章定稿正文与所选提交 ${commit.commitId} 的哈希不一致`)
+  }
+  const prose = await readTextIfExists(file)
+  if (!prose) throw validationError(`第 ${chapter} 章定稿正文不存在`)
+  return prose
+}
+
 async function recordObservation(
   root: string,
   input: {
@@ -387,8 +390,7 @@ async function recordObservation(
   if (promise.status === 'abandoned') throw conflictError(`ReaderPromise ${input.promiseId} 已废弃`)
   const commit = await currentCommit(root, input.chapter)
   if (!commit) throw conflictError(`第 ${input.chapter} 章尚未定稿，不能确认兑现`)
-  const prose = await readTextIfExists(finalPath(root, input.chapter))
-  if (!prose) throw validationError(`第 ${input.chapter} 章定稿正文不存在`)
+  const prose = await readValidatedCommitProse(root, input.chapter, commit)
   const evidence = resolveEvidence(prose, input.chapter, input.quote, input.occurrence)
   const observationId = `rpo-${objectHash({ promiseId: input.promiseId, action: input.action, chapter: input.chapter, commitId: commit.commitId }).slice(7, 23)}`
   const store = await loadObservations(root)

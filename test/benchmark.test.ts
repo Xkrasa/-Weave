@@ -143,7 +143,7 @@ test('benchmark pairs anonymizes order and score recovers the configured winner'
 test('benchmark records Fanqie evaluation metadata without turning holdout into a score', async () => {
   const out = await tempDir()
   try {
-    const result = await run(['run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes', '--out', out])
+    const result = await run(['run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes', '--max-output', '4096', '--out', out])
     assert.equal(result.code, 0, result.stderr)
     const report = JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8')) as {
       seeds: Array<{
@@ -165,6 +165,8 @@ test('benchmark records Fanqie evaluation metadata without turning holdout into 
     assert.equal(runFile.platform, 'fanqie')
     assert.equal(runFile.evaluation?.holdout, true)
     assert.equal('winRateA' in report, false)
+    const modelConfig = JSON.parse(await readFile(path.join(out, 'fanqie-rewind-ten-minutes', '.weave', 'config.json'), 'utf8')) as { maxOutputTokens: number }
+    assert.equal(modelConfig.maxOutputTokens, 4096)
   } finally {
     await rm(out, { recursive: true, force: true })
   }
@@ -199,7 +201,7 @@ test('benchmark readerIntent ablation removes only the optional intent', async (
   }
 })
 
-test('benchmark beat-first records benchmark-approved planning and one prose run', async () => {
+test('benchmark beat-first uses unapproved generated fixtures and one prose run', async () => {
   const out = await tempDir()
   try {
     const result = await run([
@@ -209,10 +211,10 @@ test('benchmark beat-first records benchmark-approved planning and one prose run
     assert.equal(result.code, 0, result.stdout + result.stderr)
     const candidate = JSON.parse(await readFile(path.join(out, 'fanqie-rewind-ten-minutes', 'plans', 'beats', '001.json'), 'utf8')) as {
       status: string
-      approvedBy: string
+      approvedBy?: string
     }
-    assert.equal(candidate.status, 'approved')
-    assert.equal(candidate.approvedBy, 'benchmark')
+    assert.equal(candidate.status, 'draft')
+    assert.equal(candidate.approvedBy, undefined)
 
     const runsDir = path.join(out, 'fanqie-rewind-ten-minutes', '.weave', 'runs')
     const runs = await Promise.all((await readdir(runsDir)).map(async name =>

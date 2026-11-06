@@ -1325,7 +1325,7 @@ async function commandBeats(root: string, parsed: Parsed, json: boolean): Promis
       return 0
     }
     case 'approve': {
-      const candidate = await approveBeatCandidate(root, chapter, parsed.flags.benchmark === true ? 'benchmark' : 'author')
+      const candidate = await approveBeatCandidate(root, chapter)
       if (json) outputJson(candidate)
       else console.log(`已批准第 ${chapter} 章节拍（${candidate.approvedBy}）`)
       return 0
@@ -1337,7 +1337,7 @@ async function commandBeats(root: string, parsed: Parsed, json: boolean): Promis
       return 0
     }
     default:
-      throw usageError('用法：weave beats generate|set|show|approve|skip <chapter> [--file <path>] [--benchmark]')
+      throw usageError('用法：weave beats generate|set|show|approve|skip <chapter> [--file <path>]')
   }
 }
 
@@ -1366,6 +1366,7 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
       resumeFromRunId,
       draftingStrategy,
       authorSamples,
+      benchmark: parsed.flags.benchmark === true,
       key: parsed.flags.key === true,
       onDelta: json || events ? undefined : text => process.stdout.write(text),
       onEvent: events
@@ -1788,7 +1789,7 @@ function printHelp(): void {
   weave waivers list|revoke <waiverId>
   weave timeline <chapter>
   weave beats generate|set|show|approve|skip <chapter> [--file <path>] [--benchmark]
-  weave write <chapter> [--json|--events] [--key] [--strategy prose-first|beat-first] [--author-samples scene|legacy|off] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
+  weave write <chapter> [--json|--events] [--key] [--strategy prose-first|beat-first] [--author-samples scene|legacy|off] [--benchmark] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
   weave amend <chapter> [--force]
   weave finalize <chapter>
   weave impact <chapter>
