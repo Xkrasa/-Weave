@@ -264,6 +264,12 @@ test('generated outlines stay candidates until applied, checked and approved', a
       targetWords: 800,
       previousLink: '承接缺页编号',
       nextLink: '找到收货人',
+      readerIntent: {
+        purpose: 'reveal',
+        payoff: '读者知道缺页对应一批不存在的货',
+        intensity: 'medium',
+        hook: '收货人是谁',
+      },
     }],
   })
   const model = new FakeModel([generated, '生成正文'])
@@ -297,6 +303,11 @@ test('generated outlines stay candidates until applied, checked and approved', a
     assert.equal(generatedResult.code, 0, generatedResult.stdout + generatedResult.stderr)
     const candidates = parseJson<{ candidates: Array<{ chapter: number; status: string }> }>(generatedResult.stdout)
     assert.equal(candidates.candidates[0]?.status, 'draft')
+    const candidate = JSON.parse(await readFile(path.join(dir, 'plans', 'candidates', 'chapters', '001.json'), 'utf8')) as {
+      contract: { readerIntent?: { purpose: string; payoff: string } }
+    }
+    assert.equal(candidate.contract.readerIntent?.purpose, 'reveal')
+    assert.equal(candidate.contract.readerIntent?.payoff, '读者知道缺页对应一批不存在的货')
 
     const contractBefore = await readFile(path.join(dir, 'outlines', 'chapters', '001.json'), 'utf8')
     assert.match(contractBefore, /缺页/)

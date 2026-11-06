@@ -2915,6 +2915,15 @@ test('prompt renderers switch without changing materials, and stable layers stay
   const dir = await initBook(model.baseUrl)
   try {
     await contract1(dir)
+    await setContract(dir, 1, {
+      readerIntent: {
+        purpose: 'release',
+        payoff: '读者看到林岚确认账本被人动过',
+        intensity: 'strong',
+        hook: '谁动过账本',
+      },
+    })
+    assert.equal((await checkContract(dir, 1)).code, 0)
     const first = await runCli(dir, ['write', '1', '--json'], { WEAVE_PROMPT_RENDERER: 'mission' })
     assert.equal(first.code, 0, first.stderr)
     const firstPayload = parseJson<{ renderer: string; layers: { stable: string; chapter: string } }>(first.stdout)
@@ -2924,6 +2933,9 @@ test('prompt renderers switch without changing materials, and stable layers stay
     assert.ok(missionBody.includes('【本章任务】'))
     assert.ok(missionBody.includes('【这一章要发生的事】'))
     assert.ok(missionBody.includes('必须发生：'))
+    assert.ok(missionBody.includes('【阅读效果意图（软目标）】'))
+    assert.ok(missionBody.includes('读者看到林岚确认账本被人动过'))
+    assert.ok(missionBody.includes('谁动过账本'))
     assert.equal(missionBody.includes('"mustHappen"'), false)
 
     assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)

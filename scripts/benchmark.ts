@@ -50,6 +50,12 @@ interface SeedChapter {
   targetWords: number
   previousLink: string
   nextLink: string
+  readerIntent?: {
+    purpose: string
+    payoff: string
+    intensity?: 'strong' | 'medium' | 'soft'
+    hook?: string
+  }
 }
 
 interface SeedEvaluation {
@@ -293,7 +299,7 @@ function canonMarkdown(seed: Seed): { premise: string; world: string; style: str
   }
 }
 
-function contractJson(chapter: SeedChapter): Record<string, unknown> {
+function contractJson(chapter: SeedChapter, options: { readerIntentOff?: boolean } = {}): Record<string, unknown> {
   return {
     chapter: chapter.chapter,
     title: chapter.title,
@@ -312,6 +318,7 @@ function contractJson(chapter: SeedChapter): Record<string, unknown> {
     targetWords: chapter.targetWords,
     previousLink: chapter.previousLink,
     nextLink: chapter.nextLink,
+    ...(chapter.readerIntent && !options.readerIntentOff ? { readerIntent: chapter.readerIntent } : {}),
   }
 }
 
@@ -370,10 +377,10 @@ async function writeCanon(dir: string, seed: Seed): Promise<void> {
   )
 }
 
-async function writeContract(dir: string, chapter: SeedChapter): Promise<void> {
+async function writeContract(dir: string, chapter: SeedChapter, options: { readerIntentOff?: boolean } = {}): Promise<void> {
   await writeFile(
     path.join(dir, 'outlines', 'chapters', `${String(chapter.chapter).padStart(3, '0')}.json`),
-    `${JSON.stringify(contractJson(chapter), null, 2)}\n`,
+    `${JSON.stringify(contractJson(chapter, options), null, 2)}\n`,
   )
 }
 
@@ -498,7 +505,7 @@ async function runSeed(
     ...(options.renderer ? { WEAVE_PROMPT_RENDERER: options.renderer } : {}),
   }
   for (const chapter of seed.chapters) {
-    await writeContract(projectDir, chapter)
+    await writeContract(projectDir, chapter, { readerIntentOff: options.ablations.readerIntent === 'off' })
     const check = await runCli(projectDir, ['contract', 'check', String(chapter.chapter), '--json'])
     if (check.code !== 0) {
       errors.push(`contract ${chapter.chapter}: ${check.stdout}${check.stderr}`)
@@ -590,6 +597,9 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
   for (const [key, value] of Object.entries(flags)) {
     if (!key.startsWith('ablation.')) continue
     ablations[key.slice('ablation.'.length)] = String(value)
+  }
+  if (ablations.readerIntent && ablations.readerIntent !== 'off') {
+    throw new Error('--ablation.readerIntent only supports off')
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const outDir = path.resolve(flagString(flags, 'out') ?? path.join(REPO_ROOT, 'bench', 'runs', `${stamp}-${config}`))

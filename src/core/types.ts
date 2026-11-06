@@ -66,6 +66,16 @@ export interface ContractKnowledgeUse {
   fact: string
 }
 
+export interface ChapterReaderIntent {
+  /** Primary reader-facing function; project-specific labels are allowed. */
+  purpose: string
+  /** Concrete experience or answer the reader should receive in this chapter. */
+  payoff: string
+  intensity?: 'strong' | 'medium' | 'soft'
+  /** Specific question or expectation carried into the next chapter. */
+  hook?: string
+}
+
 export interface ChapterContract {
   chapter: number
   title: string
@@ -87,6 +97,8 @@ export interface ChapterContract {
   targetWords: number
   previousLink: string
   nextLink: string
+  /** Optional reader-effect goal; versioned with the contract but never a hard prose gate. */
+  readerIntent?: ChapterReaderIntent
   /** Key chapters may ask for a few paragraph-level candidates. */
   importance?: 'normal' | 'key'
   keyFocus?: string[]

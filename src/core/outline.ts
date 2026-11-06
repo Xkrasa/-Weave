@@ -94,6 +94,12 @@ export async function generateOutlineCandidates(
         targetWords: 3000,
         previousLink: '承接上一章',
         nextLink: '留给下一章',
+        readerIntent: {
+          purpose: '本章主要阅读功能，可选',
+          payoff: '读者本章得到什么，可选',
+          intensity: 'strong | medium | soft，可选',
+          hook: '章末的具体期待，可选',
+        },
       }],
     }, null, 2),
   ].join('\n')

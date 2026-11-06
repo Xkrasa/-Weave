@@ -175,6 +175,17 @@ function renderMissionPrompt(contract: ChapterContract, ordered: Material[]): st
     `留给下一章：${contract.nextLink}`,
     '',
   ]
+  if (contract.readerIntent) {
+    const intent = contract.readerIntent
+    lines.push(
+      '【阅读效果意图（软目标）】',
+      `本章功能：${intent.purpose}`,
+      `读者兑现：${intent.payoff}`,
+      ...(intent.intensity ? [`强度：${intent.intensity}`] : []),
+      ...(intent.hook ? [`章末期待：${intent.hook}`] : []),
+      '',
+    )
+  }
   if (contract.mustHappen.length > 0) {
     lines.push('必须发生：', ...contract.mustHappen.map(item => `- ${item}`), '')
   }

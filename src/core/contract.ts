@@ -73,6 +73,28 @@ export function normalizeContract(input: unknown): ChapterContract {
         return { character: stringField(entry.character), fact: stringField(entry.fact) }
       })
   }
+  if (raw.readerIntent !== undefined) {
+    if (!raw.readerIntent || typeof raw.readerIntent !== 'object' || Array.isArray(raw.readerIntent)) {
+      throw validationError('readerIntent 必须是 JSON 对象')
+    }
+    const intent = raw.readerIntent as Record<string, unknown>
+    const purpose = stringField(intent.purpose)
+    const payoff = stringField(intent.payoff)
+    if (!purpose) throw validationError('readerIntent.purpose 不能为空')
+    if (!payoff) throw validationError('readerIntent.payoff 不能为空')
+    const intensity = intent.intensity
+    if (intensity !== undefined && intensity !== 'strong' && intensity !== 'medium' && intensity !== 'soft') {
+      throw validationError('readerIntent.intensity 必须是 strong、medium 或 soft')
+    }
+    const hook = intent.hook === undefined ? undefined : stringField(intent.hook)
+    if (intent.hook !== undefined && !hook) throw validationError('readerIntent.hook 不能为空')
+    contract.readerIntent = {
+      purpose,
+      payoff,
+      ...(intensity ? { intensity } : {}),
+      ...(hook ? { hook } : {}),
+    }
+  }
   return contract
 }
 

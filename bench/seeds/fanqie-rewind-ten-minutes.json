@@ -44,7 +44,13 @@
       "threads": ["退单十分钟", "异常退款"],
       "targetWords": 1800,
       "previousLink": "开篇即出现退款与罚单",
-      "nextLink": "另外六笔退单都指向同一个站点账号"
+      "nextLink": "另外六笔退单都指向同一个站点账号",
+      "readerIntent": {
+        "purpose": "release",
+        "payoff": "读者看到许舟用新证据撤销罚单，并发现更大的异常退单",
+        "intensity": "strong",
+        "hook": "另外六笔异常退款属于谁"
+      }
     },
     {
       "chapter": 2,

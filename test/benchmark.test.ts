@@ -169,3 +169,32 @@ test('benchmark records Fanqie evaluation metadata without turning holdout into 
     await rm(out, { recursive: true, force: true })
   }
 })
+
+test('benchmark readerIntent ablation removes only the optional intent', async () => {
+  const root = await tempDir()
+  try {
+    const baselineDir = path.join(root, 'baseline')
+    const ablatedDir = path.join(root, 'ablated')
+    const baseline = await run(['run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes', '--out', baselineDir])
+    assert.equal(baseline.code, 0, baseline.stderr)
+    const ablated = await run([
+      'run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes',
+      '--ablation.readerIntent=off', '--out', ablatedDir,
+    ])
+    assert.equal(ablated.code, 0, ablated.stderr)
+
+    const baselineContract = JSON.parse(await readFile(path.join(baselineDir, 'fanqie-rewind-ten-minutes', 'outlines', 'chapters', '001.json'), 'utf8')) as Record<string, unknown>
+    const ablatedContract = JSON.parse(await readFile(path.join(ablatedDir, 'fanqie-rewind-ten-minutes', 'outlines', 'chapters', '001.json'), 'utf8')) as Record<string, unknown>
+    assert.equal(baselineContract.readerIntent !== undefined, true)
+    assert.equal('readerIntent' in ablatedContract, false)
+    const { readerIntent: _ignored, ...baselineRemainder } = baselineContract
+    assert.deepEqual(ablatedContract, baselineRemainder)
+
+    const runFile = JSON.parse(await readFile(path.join(ablatedDir, 'fanqie-rewind-ten-minutes.run.json'), 'utf8')) as {
+      ablations: Record<string, string>
+    }
+    assert.equal(runFile.ablations.readerIntent, 'off')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

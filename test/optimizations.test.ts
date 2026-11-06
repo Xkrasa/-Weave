@@ -394,12 +394,20 @@ test('effect-review detects mid-chapter environment blocks and completes revise 
       targetWords: 800,
       previousLink: '开篇',
       nextLink: '继续',
+      readerIntent: {
+        purpose: 'reveal',
+        payoff: '读者看清林岚怎样比对出编号',
+        intensity: 'medium',
+        hook: '编号属于谁',
+      },
     }, null, 2)}\n`)
     assert.equal((await runCli(dir, ['contract', 'check', '1', '--json'])).code, 0)
     await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), `${draft}\n`)
 
     const reviewed = await runCli(dir, ['effect-review', '1', '--json'])
     assert.equal(reviewed.code, 0, reviewed.stderr)
+    assert.ok(JSON.stringify(model.requests[0]).includes('readerIntent 是软目标'))
+    assert.ok(JSON.stringify(model.requests[0]).includes('读者看清林岚怎样比对出编号'))
     const report = parseJson<{
       findings: Array<{ findingId: string; dimension: string; source: string; quote?: string }>
     }>(reviewed.stdout)

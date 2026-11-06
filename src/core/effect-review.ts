@@ -62,6 +62,10 @@ export async function runEffectReview(
     `第 ${chapter} 章合同：`,
     JSON.stringify(contract, null, 2),
     '',
+    ...(contract.readerIntent ? [
+      '本章 readerIntent 是软目标：请对照 purpose 与 payoff 判断读者实际获得，引用正文给出 warning/info；未达意图不自动升级为 blocking。',
+      '',
+    ] : []),
     '正文：',
     draft,
     '',
