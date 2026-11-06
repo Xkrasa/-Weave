@@ -12,6 +12,7 @@ import { conflictError } from './errors.ts'
 import { rebuildSearchIndex, searchBook, searchIndexHealth } from './search.ts'
 import { listPlans, readApprovedPlan, type CharacterArc, type RollingPlan, type StoryPromise, type VolumeArc } from './planning.ts'
 import { ensureStoryMemory, povMemory } from './memory.ts'
+import { preferenceMaterial, readApprovedPreferences } from './preferences.ts'
 
 interface ReferenceManifestEntry {
   id: string
@@ -241,6 +242,8 @@ export async function collectMaterials(root: string, contract: ChapterContract):
     )
   }
 
+  const preference = preferenceMaterial(await readApprovedPreferences(root).catch(() => []))
+  if (preference) materials.push(preference)
   materials.push(...(await collectPlanningMaterials(root, contract)))
   materials.push(...(await collectRetrievedEvidence(root, contract)))
 

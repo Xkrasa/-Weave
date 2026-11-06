@@ -7,6 +7,7 @@ import { objectHash } from './hash.ts'
 import { loadStage, saveStage } from './stages.ts'
 import { currentCommit } from './ledger.ts'
 import { validationError } from './errors.ts'
+import { recordPreferenceSignal } from './preferences.ts'
 
 export type WaiverScope = 'chapter' | 'entity' | 'storyline' | 'project'
 
@@ -113,6 +114,12 @@ export async function createWaivers(
     await audit(root, 'create', waiver)
   }
   await saveWaivers(root, existing)
+  for (const finding of selected) {
+    await recordPreferenceSignal(root, {
+      kind: 'rejected', source: 'waive', chapter, dimension: finding.dimension,
+      reason: options.reason.trim(), findingId: finding.findingId,
+    }).catch(() => {})
+  }
   return created
 }
 

@@ -66,6 +66,15 @@ import { startUiServer } from './core/ui-server.ts'
 import { approvePlan, listPlans, parsePlanKind } from './core/planning.ts'
 import { usageSummary } from './core/usage.ts'
 import {
+  approvePreference,
+  clearPreferences,
+  disablePreference,
+  listPreferenceCandidates,
+  listPreferenceSignals,
+  readApprovedPreferences,
+  reviewPreferenceCandidates,
+} from './core/preferences.ts'
+import {
   applyCandidate,
   approveCandidate,
   candidateValidation,
@@ -196,6 +205,8 @@ async function main(): Promise<number> {
       return commandDoctor(root, json)
     case 'usage':
       return commandUsage(root, json)
+    case 'preference':
+      return commandPreference(root, parsed, json)
     default:
       throw usageError(`未知命令：${command}`)
   }
@@ -1245,6 +1256,52 @@ async function commandExport(root: string, parsed: Parsed, json: boolean): Promi
   return 0
 }
 
+async function commandPreference(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0] ?? 'status'
+  if (action === 'status') {
+    const [signals, candidates, approved] = await Promise.all([
+      listPreferenceSignals(root),
+      listPreferenceCandidates(root),
+      readApprovedPreferences(root),
+    ])
+    const payload = { signals, candidates, approved }
+    if (json) outputJson(payload)
+    else {
+      console.log(`信号：${signals.length}；候选：${candidates.length}；已批准：${approved.length}`)
+      for (const item of approved) console.log(`- ${item.id}: ${item.rule}`)
+    }
+    return 0
+  }
+  if (action === 'review') {
+    const candidates = await reviewPreferenceCandidates(root)
+    if (json) outputJson({ candidates })
+    else for (const item of candidates) console.log(`${item.id}	${item.status}	${item.evidenceCount} 次	${item.rule}`)
+    return 0
+  }
+  const id = parsed.positionals[1]
+  if (action === 'approve') {
+    if (!id) throw usageError('用法：weave preference approve <id>')
+    const approved = await approvePreference(root, id)
+    if (json) outputJson(approved)
+    else console.log(`已批准偏好 ${approved.id}`)
+    return 0
+  }
+  if (action === 'disable') {
+    if (!id) throw usageError('用法：weave preference disable <id>')
+    await disablePreference(root, id)
+    if (json) outputJson({ ok: true, id })
+    else console.log(`已停用偏好 ${id}`)
+    return 0
+  }
+  if (action === 'clear') {
+    await clearPreferences(root)
+    if (json) outputJson({ ok: true })
+    else console.log('已清除偏好候选与已批准偏好')
+    return 0
+  }
+  throw usageError('用法：weave preference status|review|approve <id>|disable <id>|clear')
+}
+
 async function commandUsage(root: string, json: boolean): Promise<number> {
   const summary = await usageSummary(root)
   if (json) outputJson(summary)
@@ -1388,6 +1445,7 @@ function printHelp(): void {
   weave resolve-impact <chapter> --all --decision accept
   weave rebuild [--projection all|content|ledger|search] [--from <chapter>] [--force]
   weave export --format merged|split|txt [--platform generic|qidian|fanqie|custom] [--count-mode cjk|all]
+  weave preference status|review|approve <id>|disable <id>|clear
   weave usage
   weave doctor
 

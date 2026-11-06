@@ -2988,3 +2988,63 @@ test('key chapters add bounded paragraph candidates while ordinary chapters stay
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('author preferences learn only from repeated signals and can be disabled', async () => {
+  const review = JSON.stringify({
+    summary: '两条建议',
+    findings: [
+      { dimension: '章末追读', severity: 'warning', description: '章末可以更狠', quote: '林岚在码头翻开账本。', occurrence: 1 },
+      { dimension: '章末追读', severity: 'warning', description: '结尾少一句解释', quote: '她发现缺页上留着港务局的印。', occurrence: 1 },
+    ],
+  })
+  const model = new FakeModel([
+    P05_DRAFT,
+    extractionPayload(),
+    coveragePayload(),
+    review,
+    '第二章草稿。',
+    '第二章草稿二。',
+  ])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    for (const finding of ['f1', 'f2']) {
+      const ignored = await runCli(dir, ['ignore', '1', '--finding', finding, '--reason', '作者保留原句节奏', '--json'])
+      assert.equal(ignored.code, 0, ignored.stderr)
+    }
+
+    const signals = parseJson<{ signals: Array<{ dimension: string; kind: string }> }>(
+      (await runCli(dir, ['preference', 'status', '--json'])).stdout,
+    )
+    assert.equal(signals.signals.filter(item => item.kind === 'rejected').length, 2)
+
+    const reviewed = await runCli(dir, ['preference', 'review', '--json'])
+    assert.equal(reviewed.code, 0, reviewed.stderr)
+    const candidates = parseJson<{ candidates: Array<{ id: string; evidenceCount: number; status: string }> }>(reviewed.stdout)
+    assert.equal(candidates.candidates.length, 1)
+    assert.equal(candidates.candidates[0]?.evidenceCount, 2)
+    assert.equal(candidates.candidates[0]?.status, 'draft')
+
+    const id = candidates.candidates[0]!.id
+    assert.equal((await runCli(dir, ['preference', 'approve', id, '--json'])).code, 0)
+
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+    await setContract(dir, 2, { characters: ['林岚'], pov: '林岚' })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    const written = await runCli(dir, ['write', '2', '--json'])
+    assert.equal(written.code, 0, written.stderr)
+    assert.ok(JSON.stringify(model.requests[4]).includes('已批准的创作偏好'))
+    assert.ok(JSON.stringify(model.requests[4]).includes('作者保留原句节奏'))
+
+    assert.equal((await runCli(dir, ['preference', 'disable', id, '--json'])).code, 0)
+    const second = await runCli(dir, ['write', '2', '--json'])
+    assert.equal(second.code, 0, second.stderr)
+    assert.equal(JSON.stringify(model.requests[5]).includes('已批准的创作偏好'), false)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

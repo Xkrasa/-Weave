@@ -15,6 +15,7 @@ import type { ChapterContract, ModelConfig } from './types.ts'
 import { completeJsonObject } from './model.ts'
 import { resolveTaskConfig } from './model-policy.ts'
 import { appendUsage } from './usage.ts'
+import { recordMergeAccepted, recordPreferenceSignal } from './preferences.ts'
 import { draftHash, loadStage, readDraft, resolveEvidence, saveStage } from './stages.ts'
 import { atomicWrite, atomicWriteJson, ensureDir, readJsonIfExists } from './io.ts'
 import { objectHash, hashText } from './hash.ts'
@@ -608,6 +609,10 @@ export async function ignoreFinding(
   if (!reason.trim()) throw validationError('ignore 必须提供理由')
   finding.status = 'ignored'
   finding.ignoreReason = reason.trim()
+  await recordPreferenceSignal(root, {
+    kind: 'rejected', source: 'ignore', chapter, dimension: finding.dimension,
+    reason: reason.trim(), findingId: finding.findingId,
+  }).catch(() => {})
   report.blockingCount = report.findings.filter(
     item => item.severity === 'blocking' && item.status !== 'verified' && item.status !== 'waived',
   ).length
