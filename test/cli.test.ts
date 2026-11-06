@@ -2943,3 +2943,48 @@ test('prompt renderers switch without changing materials, and stable layers stay
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('key chapters add bounded paragraph candidates while ordinary chapters stay single-pass', async () => {
+  const model = new FakeModel([
+    '第一章草稿，开头平铺。\n\n中段没有变化。\n\n结尾停在半句上。',
+    JSON.stringify({ text: '改好的结尾，问题还悬着。' }),
+    JSON.stringify({ text: '另一种收法，把问题推到明天。' }),
+    '第二章草稿。',
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    await setContract(dir, 1, { importance: 'key', keyFocus: ['ending'] })
+    assert.equal((await checkContract(dir, 1)).code, 0)
+    const written = await runCli(dir, ['write', '1', '--json'])
+    assert.equal(written.code, 0, written.stderr)
+    const payload = parseJson<{
+      keyCandidates: Array<{ focus: string; paragraphId: string; revisionIds: string[] }>
+    }>(written.stdout)
+    assert.equal(payload.keyCandidates.length, 1)
+    assert.equal(payload.keyCandidates[0]?.focus, 'ending')
+    assert.equal(payload.keyCandidates[0]?.paragraphId, 'p003')
+    assert.equal(payload.keyCandidates[0]?.revisionIds.length, 2)
+    assert.equal(model.requests.length, 3)
+
+    const draftBefore = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
+    assert.match(draftBefore, /结尾停在半句上/)
+    const merged = await runCli(dir, [
+      'merge', '1', '--revision', payload.keyCandidates[0]!.revisionIds[0]!, '--json',
+    ])
+    assert.equal(merged.code, 0, merged.stderr)
+    assert.match(await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8'), /改好的结尾/)
+
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+    await setContract(dir, 2, { characters: ['林岚'], pov: '林岚' })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    const ordinary = await runCli(dir, ['write', '2', '--json'])
+    assert.equal(ordinary.code, 0, ordinary.stderr)
+    assert.deepEqual(parseJson<{ keyCandidates: unknown[] }>(ordinary.stdout).keyCandidates, [])
+    assert.equal(model.requests.length, 4)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

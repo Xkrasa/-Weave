@@ -59,6 +59,7 @@ import { applyFinalizedChapter, markSearchIndexFailed } from './search.ts'
 import { assertOutlineApproved } from './outline.ts'
 import { ensureStoryMemory } from './memory.ts'
 import { resolveTaskConfig } from './model-policy.ts'
+import { generateKeyCandidates, type KeyCandidateGroup } from './tiered.ts'
 import type {
   ContentCheckReport,
   CoverageAudit,
@@ -82,6 +83,7 @@ export interface WriteResult {
   layers: { stable: string; volume: string; chapter: string; full: string }
   renderer: string
   estimatedTokens: number
+  keyCandidates: KeyCandidateGroup[]
   included: string[]
   omitted: Array<{ sourceId: string; reason: string }>
 }
@@ -95,6 +97,8 @@ export async function writeChapter(
     onEvent?: (event: GenerationEvent) => void
     /** Failed/cancelled run whose partial should be recorded as the reason for this fresh run. */
     resumeFromRunId?: string
+    /** Force the key-chapter path regardless of the contract. */
+    key?: boolean
   },
 ): Promise<WriteResult> {
   await assertOutlineApproved(root, chapter)
@@ -171,6 +175,9 @@ export async function writeChapter(
     if (!text.trim()) throw modelError('模型返回了空正文')
     emit({ type: 'usage', usage: result.usage })
     const draft = await saveDraft(root, chapter, text)
+    const keyCandidates = options.key === true || contract.importance === 'key'
+      ? await generateKeyCandidates(root, chapter, contract, modelConfig, options.signal)
+      : []
     const nextMeta: DraftMeta = {
       chapter,
       contentHash: hashText(text),
@@ -187,6 +194,7 @@ export async function writeChapter(
       run: finished,
       draftPath: draft,
       contextHash: context.contextHash,
+      keyCandidates,
       layers: context.layers,
       renderer: context.renderer,
       estimatedTokens: context.estimatedTokens,

@@ -60,6 +60,8 @@ export function normalizeContract(input: unknown): ChapterContract {
     throw validationError('narrativeMode 必须是 limited 或 omniscient')
   }
   contract.narrativeMode = raw.narrativeMode === 'omniscient' ? 'omniscient' : 'limited'
+  contract.importance = raw.importance === 'key' ? 'key' : 'normal'
+  if (Array.isArray(raw.keyFocus)) contract.keyFocus = stringArray(raw.keyFocus)
   if (Array.isArray(raw.visibleKnowledge)) {
     contract.visibleKnowledge = stringArray(raw.visibleKnowledge)
   }
@@ -139,6 +141,15 @@ export function validateContract(
   }
   if (contract.characters.length === 0) {
     errors.push({ code: 'MISSING_CHARACTERS', field: 'characters', message: 'characters 至少需要一项' })
+  }
+  for (const focus of contract.keyFocus ?? []) {
+    if (!['opening', 'choice', 'climax', 'ending'].includes(focus)) {
+      errors.push({
+        code: 'INVALID_KEY_FOCUS',
+        field: 'keyFocus',
+        message: `未知的关键段落焦点：${focus}（可选 opening/choice/climax/ending）`,
+      })
+    }
   }
 
   const registryByName = new Map(registry.characters.map(character => [character.name, character]))

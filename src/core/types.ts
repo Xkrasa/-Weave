@@ -83,6 +83,9 @@ export interface ChapterContract {
   targetWords: number
   previousLink: string
   nextLink: string
+  /** Key chapters may ask for a few paragraph-level candidates. */
+  importance?: 'normal' | 'key'
+  keyFocus?: string[]
 }
 
 export type MaterialCategory =

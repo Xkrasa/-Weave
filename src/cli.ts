@@ -94,7 +94,7 @@ interface Parsed {
   flags: Record<string, string | true>
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank', 'open'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank', 'open', 'key'])
 let eventStreamStarted = false
 
 async function main(): Promise<number> {
@@ -1016,6 +1016,7 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
     const result = await writeChapter(root, chapter, {
       signal: controller.signal,
       resumeFromRunId,
+      key: parsed.flags.key === true,
       onDelta: json || events ? undefined : text => process.stdout.write(text),
       onEvent: events
         ? (event: GenerationEvent) => {
@@ -1040,12 +1041,16 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
         usage: result.run.usage ?? {},
         attempts: result.run.attempts ?? [],
         recovery: result.run.recovery,
+        keyCandidates: result.keyCandidates,
       })
     } else {
       console.log(`\n\n已生成第 ${chapter} 章草稿：${result.draftPath}`)
       console.log(`运行：${result.run.runId}；估算输入 token：${result.estimatedTokens}`)
       if (result.omitted.length > 0) {
         console.log(`省略材料：${result.omitted.map(item => `${item.sourceId}(${item.reason})`).join('、')}`)
+      }
+      for (const group of result.keyCandidates) {
+        console.log(`关键段落候选（${group.focus} / ${group.paragraphId}）：${group.revisionIds.join('、')}`)
       }
     }
     return 0
@@ -1341,7 +1346,7 @@ function printHelp(): void {
   weave waive <chapter> --finding <id>|--all-warnings --reason <text> [--scope ...] [--until <n>]
   weave waivers list|revoke <waiverId>
   weave timeline <chapter>
-  weave write <chapter> [--json|--events] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
+  weave write <chapter> [--json|--events] [--key] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
   weave amend <chapter> [--force]
   weave finalize <chapter>
   weave impact <chapter>
