@@ -99,6 +99,8 @@ export interface ChapterContract {
   nextLink: string
   /** Optional reader-effect goal; versioned with the contract but never a hard prose gate. */
   readerIntent?: ChapterReaderIntent
+  /** Scene categories used for scoped review and samples; distinct from readerIntent.purpose. */
+  sceneTypes?: string[]
   /** Key chapters may ask for a few paragraph-level candidates. */
   importance?: 'normal' | 'key'
   keyFocus?: string[]

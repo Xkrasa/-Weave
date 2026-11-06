@@ -6,6 +6,7 @@ import { appendUsage } from './usage.ts'
 import { draftHash, resolveEvidence, saveStage } from './stages.ts'
 import { validationError } from './errors.ts'
 import { collectLoopState } from './story-ledger.ts'
+import { loadExpressionLintConfig, runExpressionLint } from './expression-lint.ts'
 
 export interface EffectFinding {
   findingId: string
@@ -16,6 +17,8 @@ export interface EffectFinding {
   evidence?: EvidenceSpan
   source: 'model' | 'lint'
   status: 'open' | 'planned' | 'applied' | 'verified' | 'ignored' | 'waived'
+  ruleId?: string
+  ruleVersion?: number
   revisionId?: string
   paragraphIds?: string[]
   ignoreReason?: string
@@ -197,6 +200,27 @@ async function lintFindings(
       }
       findings.push(finding)
     }
+  }
+
+  const expressionConfig = await loadExpressionLintConfig(root)
+  for (const match of runExpressionLint(contract, draft, expressionConfig)) {
+    const finding: EffectFinding = {
+      findingId: `e-lint-${findings.length + 1}`,
+      dimension: '表达模板',
+      severity: match.severity,
+      description: match.description,
+      quote: match.quote,
+      source: 'lint',
+      status: 'open',
+      ruleId: match.ruleId,
+      ruleVersion: match.ruleVersion,
+    }
+    try {
+      finding.evidence = resolveEvidence(draft, chapter, match.quote, match.occurrence)
+    } catch {
+      // A missing quote must not become a hard failure; keep the advisory without evidence.
+    }
+    findings.push(finding)
   }
 
   const loops = await collectLoopState(root, chapter).catch(() => null)

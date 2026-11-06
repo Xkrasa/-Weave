@@ -65,6 +65,7 @@ export function normalizeContract(input: unknown): ChapterContract {
   if (Array.isArray(raw.visibleKnowledge)) {
     contract.visibleKnowledge = stringArray(raw.visibleKnowledge)
   }
+  if (Array.isArray(raw.sceneTypes)) contract.sceneTypes = stringArray(raw.sceneTypes)
   if (Array.isArray(raw.knowledge)) {
     contract.knowledge = raw.knowledge
       .filter(item => item && typeof item === 'object')
