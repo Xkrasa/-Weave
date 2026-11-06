@@ -8,9 +8,11 @@ import type {
 } from './stage-types.ts'
 import { loadCharacters } from './contract.ts'
 import { validateTimeline } from './timeline.ts'
-import { draftHash, parseJsonObject, resolveEvidence, saveStage } from './stages.ts'
+import { draftHash, resolveEvidence, saveStage } from './stages.ts'
 import { objectHash } from './hash.ts'
-import { completeText } from './model.ts'
+import { completeJsonObject } from './model.ts'
+import { resolveTaskConfig } from './model-policy.ts'
+import { appendUsage } from './usage.ts'
 import { conflictError, validationError } from './errors.ts'
 
 const AUDIT_SYSTEM_PROMPT = [
@@ -49,7 +51,7 @@ export async function runCoverageAudit(
     .map(record => record.recordId)
   const registry = await loadCharacters(root)
   const timeline = validateTimeline(extraction.timeline ?? [], registry)
-  const secondPass = await runSecondPass(chapter, contract, draft, extraction, config, signal)
+  const secondPass = await runSecondPass(root, chapter, contract, draft, extraction, config, signal)
   const warnings: string[] = []
   if (uncoveredSegments.length > 0) warnings.push(`有 ${uncoveredSegments.length} 个段落没有证据覆盖`)
   if (unplanned.length > 5) warnings.push(`有 ${unplanned.length} 条未列入合同的事件，需人工确认`)
@@ -81,6 +83,7 @@ export async function runCoverageAudit(
 }
 
 async function runSecondPass(
+  root: string,
   chapter: number,
   contract: ChapterContract,
   draft: string,
@@ -88,7 +91,8 @@ async function runSecondPass(
   config: ModelConfig,
   signal: AbortSignal,
 ): Promise<{ summary: string; missed: string[]; rejected: string[] }> {
-  const model = config.extractionModel ?? config.model
+  const taskConfig = resolveTaskConfig(config, 'extraction')
+  const model = taskConfig.model
   const prompt = [
     `第 ${chapter} 章合同：`,
     JSON.stringify(contract, null, 2),
@@ -109,13 +113,14 @@ async function runSecondPass(
       missed: [{ summary: '第一遍漏掉的事件', quote: '正文逐字引文', occurrence: 1 }],
     }, null, 2),
   ].join('\n')
-  const result = await completeText({
-    config: { ...config, model },
+  const result = await completeJsonObject({
+    config: { ...taskConfig, model },
     system: AUDIT_SYSTEM_PROMPT,
     user: prompt,
     signal,
   })
-  const raw = parseJsonObject(result.text)
+  await appendUsage(root, { task: 'extraction', model, usage: result.usage })
+  const raw = result.raw
   const summary = typeof raw.summary === 'string' ? raw.summary.trim() : ''
   if (!summary) throw validationError('覆盖审计结果缺少 summary')
   const rawMissed = Array.isArray(raw.missed) ? raw.missed : []

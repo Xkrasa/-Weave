@@ -6,8 +6,10 @@ import type {
   RejectedRecord,
   TimelineEvent,
 } from './stage-types.ts'
-import { completeText } from './model.ts'
-import { draftHash, parseJsonObject, resolveEvidence, saveStage } from './stages.ts'
+import { completeJsonObject } from './model.ts'
+import { resolveTaskConfig } from './model-policy.ts'
+import { appendUsage } from './usage.ts'
+import { draftHash, resolveEvidence, saveStage } from './stages.ts'
 import { validationError } from './errors.ts'
 import { eventIdFor, normalizeAttitude } from './story-ledger.ts'
 import { hashText } from './hash.ts'
@@ -27,7 +29,8 @@ export async function runExtraction(
   config: ModelConfig,
   signal: AbortSignal,
 ): Promise<ExtractionReport> {
-  const model = config.extractionModel ?? config.model
+  const taskConfig = resolveTaskConfig(config, 'extraction')
+  const model = taskConfig.model
   const prompt = [
     `第 ${chapter} 章合同：`,
     JSON.stringify(contract, null, 2),
@@ -98,8 +101,9 @@ export async function runExtraction(
     }, null, 2),
   ].join('\n')
 
-  const result = await completeText({ config: { ...config, model }, system: SYSTEM_PROMPT, user: prompt, signal })
-  const raw = parseJsonObject(result.text)
+  const result = await completeJsonObject({ config: { ...taskConfig, model }, system: SYSTEM_PROMPT, user: prompt, signal })
+  await appendUsage(root, { task: 'extraction', model, usage: result.usage })
+  const raw = result.raw
   const summary = typeof raw.summary === 'string' ? raw.summary.trim() : ''
   if (!summary) throw validationError('抽取结果缺少 summary')
   const noEventsReason = typeof raw.noEventsReason === 'string' && raw.noEventsReason.trim()

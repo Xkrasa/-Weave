@@ -12,8 +12,10 @@ import type {
   RevisionInstruction,
 } from './stage-types.ts'
 import type { ChapterContract, ModelConfig } from './types.ts'
-import { completeText } from './model.ts'
-import { draftHash, loadStage, parseJsonObject, readDraft, resolveEvidence, saveStage } from './stages.ts'
+import { completeJsonObject } from './model.ts'
+import { resolveTaskConfig } from './model-policy.ts'
+import { appendUsage } from './usage.ts'
+import { draftHash, loadStage, readDraft, resolveEvidence, saveStage } from './stages.ts'
 import { atomicWrite, atomicWriteJson, ensureDir, readJsonIfExists } from './io.ts'
 import { objectHash, hashText } from './hash.ts'
 import { projectPaths } from './project.ts'
@@ -182,14 +184,16 @@ export async function reviseChapter(
       paragraphs: [{ paragraphId: 'p001', text: '修改后的完整段落', findingIds: ['f1'] }],
     }, null, 2),
   ].join('\n')
-  const model = config.reviewModel ?? config.model
-  const result = await completeText({
-    config: { ...config, model },
+  const taskConfig = resolveTaskConfig(config, 'revision')
+  const model = taskConfig.model
+  const result = await completeJsonObject({
+    config: { ...taskConfig, model },
     system: REVISION_SYSTEM,
     user: prompt,
     signal,
   })
-  const raw = parseJsonObject(result.text)
+  await appendUsage(root, { task: 'revision', model, usage: result.usage })
+  const raw = result.raw
   const rawParagraphs = Array.isArray(raw.paragraphs) ? raw.paragraphs : []
   const changed: DraftParagraph[] = []
   const rejected: RevisionCandidate['rejected'] = []
@@ -300,14 +304,16 @@ export async function rewriteParagraph(
     '只输出：',
     JSON.stringify({ text: '改写后的完整段落' }, null, 2),
   ].filter(Boolean).join('\n')
-  const model = config.reviewModel ?? config.model
-  const result = await completeText({
-    config: { ...config, model },
+  const taskConfig = resolveTaskConfig(config, 'revision')
+  const model = taskConfig.model
+  const result = await completeJsonObject({
+    config: { ...taskConfig, model },
     system: REVISION_SYSTEM,
     user: prompt,
     signal,
   })
-  const raw = parseJsonObject(result.text)
+  await appendUsage(root, { task: 'revision', model, usage: result.usage })
+  const raw = result.raw
   const text = typeof raw.text === 'string'
     ? raw.text.trim()
     : Array.isArray(raw.paragraphs)
@@ -504,14 +510,16 @@ export async function recheckChapter(
       }],
     }, null, 2),
   ].join('\n')
-  const model = config.reviewModel ?? config.model
-  const result = await completeText({
-    config: { ...config, model },
+  const taskConfig = resolveTaskConfig(config, 'revision')
+  const model = taskConfig.model
+  const result = await completeJsonObject({
+    config: { ...taskConfig, model },
     system: RECHECK_SYSTEM,
     user: prompt,
     signal,
   })
-  const raw = parseJsonObject(result.text)
+  await appendUsage(root, { task: 'revision', model, usage: result.usage })
+  const raw = result.raw
   const resolvedMap = new Map<string, { resolved: boolean; quote?: string; note?: string }>()
   if (Array.isArray(raw.findings)) {
     for (const item of raw.findings) {

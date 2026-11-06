@@ -3,8 +3,9 @@ import type { ChapterContract, ModelConfig } from './types.ts'
 import { atomicWriteJson, ensureDir, readJsonIfExists } from './io.ts'
 import { contractHash, loadCharacters, loadContract, normalizeContract, saveContract } from './contract.ts'
 import { checkPath, validateContract, type ContractCheckRecord } from './contract.ts'
-import { completeText } from './model.ts'
-import { parseJsonObject } from './stages.ts'
+import { completeJsonObject } from './model.ts'
+import { resolveTaskConfig } from './model-policy.ts'
+import { appendUsage } from './usage.ts'
 import { conflictError, validationError } from './errors.ts'
 import { projectPaths } from './project.ts'
 import { listPlans, readApprovedPlan, type RollingPlan, type StoryPromise, type VolumeArc } from './planning.ts'
@@ -97,8 +98,10 @@ export async function generateOutlineCandidates(
     }, null, 2),
   ].join('\n')
 
-  const result = await completeText({ config, system: SYSTEM_PROMPT, user: prompt, signal })
-  const raw = parseJsonObject(result.text)
+  const taskConfig = resolveTaskConfig(config, 'planning')
+  const result = await completeJsonObject({ config: taskConfig, system: SYSTEM_PROMPT, user: prompt, signal })
+  await appendUsage(root, { task: 'planning', model: taskConfig.model, usage: result.usage })
+  const raw = result.raw
   const chapters = Array.isArray(raw.chapters) ? raw.chapters : []
   if (chapters.length === 0) throw validationError('章纲模型没有返回 chapters')
   const candidates: OutlineCandidate[] = []

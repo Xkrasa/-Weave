@@ -26,6 +26,14 @@ export interface ModelConfig {
   effectReviewModel?: string
   /** How structured materials are rendered for the model. */
   promptRenderer?: 'json' | 'mission'
+  /** Optional per-task overrides; see model-policy. */
+  taskModels?: Partial<Record<'planning' | 'writing' | 'extraction' | 'trustedReview' | 'effectReview' | 'revision', {
+    model?: string
+    baseUrl?: string
+    temperature?: number
+    maxOutputTokens?: number
+    contextWindow?: number
+  }>>
   /** Transparent retries allowed only before the first streamed delta. */
   maxRetries?: number
   retryBaseMs?: number
@@ -307,6 +315,7 @@ export interface RunRecord {
   runId: string
   chapter: number
   status: 'running' | 'completed' | 'failed' | 'cancelled'
+  task?: 'planning' | 'writing' | 'extraction' | 'trustedReview' | 'effectReview' | 'revision'
   model: string
   baseUrl: string
   startedAt: string

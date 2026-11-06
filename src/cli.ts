@@ -58,6 +58,7 @@ import {
 import { deconstructFile } from './core/deconstruct.ts'
 import { startUiServer } from './core/ui-server.ts'
 import { approvePlan, listPlans, parsePlanKind } from './core/planning.ts'
+import { usageSummary } from './core/usage.ts'
 import {
   applyCandidate,
   approveCandidate,
@@ -187,6 +188,8 @@ async function main(): Promise<number> {
       return commandExport(root, parsed, json)
     case 'doctor':
       return commandDoctor(root, json)
+    case 'usage':
+      return commandUsage(root, json)
     default:
       throw usageError(`未知命令：${command}`)
   }
@@ -1203,6 +1206,23 @@ async function commandExport(root: string, parsed: Parsed, json: boolean): Promi
   return 0
 }
 
+async function commandUsage(root: string, json: boolean): Promise<number> {
+  const summary = await usageSummary(root)
+  if (json) outputJson(summary)
+  else {
+    console.log(`运行：${summary.totals.runs} 次；token：${summary.totals.totalTokens}`)
+    console.log(`输入 ${summary.totals.promptTokens} / 输出 ${summary.totals.completionTokens}`)
+    for (const [model, bucket] of Object.entries(summary.byModel)) {
+      console.log(`  ${model}: ${bucket.runs} 次，${bucket.totalTokens} token`)
+    }
+    for (const [task, bucket] of Object.entries(summary.byTask)) {
+      console.log(`  ${task}: ${bucket.runs} 次，${bucket.totalTokens} token`)
+    }
+    if (summary.missingUsage > 0) console.log(`另有 ${summary.missingUsage} 次运行没有 usage 记录`)
+  }
+  return 0
+}
+
 async function commandDoctor(root: string, json: boolean): Promise<number> {
   const result = await doctor(root)
   if (json) outputJson({ ...result, ok: result.ok })
@@ -1329,6 +1349,7 @@ function printHelp(): void {
   weave resolve-impact <chapter> --all --decision accept
   weave rebuild [--projection all|content|ledger|search] [--from <chapter>] [--force]
   weave export --format merged|split|txt [--platform generic|qidian|fanqie|custom] [--count-mode cjk|all]
+  weave usage
   weave doctor
 
 全局：

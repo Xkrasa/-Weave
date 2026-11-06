@@ -1,7 +1,9 @@
 import type { ChapterContract, ModelConfig, RunUsage } from './types.ts'
 import type { EvidenceSpan } from './stage-types.ts'
-import { completeText } from './model.ts'
-import { draftHash, parseJsonObject, resolveEvidence, saveStage } from './stages.ts'
+import { completeJsonObject } from './model.ts'
+import { resolveTaskConfig } from './model-policy.ts'
+import { appendUsage } from './usage.ts'
+import { draftHash, resolveEvidence, saveStage } from './stages.ts'
 import { validationError } from './errors.ts'
 import { collectLoopState } from './story-ledger.ts'
 
@@ -47,7 +49,8 @@ export async function runEffectReview(
   config: ModelConfig,
   signal: AbortSignal,
 ): Promise<EffectReviewReport> {
-  const model = config.effectReviewModel ?? config.reviewModel ?? config.model
+  const taskConfig = resolveTaskConfig(config, 'effectReview')
+  const model = taskConfig.model
   const lint = await lintFindings(root, chapter, draft)
   const prompt = [
     `第 ${chapter} 章合同：`,
@@ -69,8 +72,9 @@ export async function runEffectReview(
     }, null, 2),
   ].join('\n')
 
-  const result = await completeText({ config: { ...config, model }, system: SYSTEM_PROMPT, user: prompt, signal })
-  const raw = parseJsonObject(result.text)
+  const result = await completeJsonObject({ config: { ...taskConfig, model }, system: SYSTEM_PROMPT, user: prompt, signal })
+  await appendUsage(root, { task: 'effectReview', model, usage: result.usage })
+  const raw = result.raw
   const summary = typeof raw.summary === 'string' ? raw.summary.trim() : ''
   if (!summary) throw validationError('效果审查结果缺少 summary')
   const findings: EffectFinding[] = []

@@ -1,5 +1,6 @@
 import type { ModelConfig, RunUsage, StreamAttempt } from './types.ts'
-import { modelError, type WeaveError } from './errors.ts'
+import { modelError, validationError, type WeaveError } from './errors.ts'
+import { parseJsonObject } from './stages.ts'
 
 export type { StreamAttempt } from './types.ts'
 
@@ -16,6 +17,43 @@ class AttemptFailure extends Error {
     super(message)
     this.retryable = retryable
     this.retryAfterMs = retryAfterMs
+  }
+}
+
+export interface StructuredResult {
+  raw: Record<string, unknown>
+  text: string
+  usage: RunUsage
+  repairs: number
+}
+
+/**
+ * JSON contract with one repair pass. Every provider path (structured output, tool calls, plain
+ * text) must still pass the same local parse and business validation.
+ */
+export async function completeJsonObject(input: {
+  config: ModelConfig
+  system: string
+  user: string
+  signal: AbortSignal
+}): Promise<StructuredResult> {
+  const first = await completeText(input)
+  try {
+    return { raw: parseJsonObject(first.text), text: first.text, usage: first.usage, repairs: 0 }
+  } catch (firstError) {
+    const message = firstError instanceof Error ? firstError.message : String(firstError)
+    const repair = await completeText({
+      ...input,
+      user: `${input.user}\n\n上一次输出无法解析为 JSON 对象（${message}）。请只输出一个合法的 JSON 对象，不要解释或 Markdown 围栏。`,
+    })
+    try {
+      return { raw: parseJsonObject(repair.text), text: repair.text, usage: repair.usage, repairs: 1 }
+    } catch (secondError) {
+      throw validationError(
+        `模型没有返回可解析的 JSON：${secondError instanceof Error ? secondError.message : String(secondError)}`,
+        { firstError: message },
+      )
+    }
   }
 }
 

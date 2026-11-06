@@ -58,6 +58,7 @@ import { loadStage, requireStage } from './stages.ts'
 import { applyFinalizedChapter, markSearchIndexFailed } from './search.ts'
 import { assertOutlineApproved } from './outline.ts'
 import { ensureStoryMemory } from './memory.ts'
+import { resolveTaskConfig } from './model-policy.ts'
 import type {
   ContentCheckReport,
   CoverageAudit,
@@ -105,7 +106,7 @@ export async function writeChapter(
   const registry = await loadCharacters(root)
   const knowledge = await checkKnowledge(root, chapter, contract, registry)
   if (!knowledge.ok) throw validationError('章节合同要求的信息边界未满足', knowledge.errors)
-  const modelConfig = await loadModelConfig(root)
+  const modelConfig = resolveTaskConfig(await loadModelConfig(root), 'writing')
   const meta = await loadDraftMeta(root, chapter)
   const current = await currentCommit(root, chapter)
 
@@ -134,6 +135,7 @@ export async function writeChapter(
     runId: newRunId(),
     chapter,
     status: 'running',
+    task: 'writing',
     model: modelConfig.model,
     baseUrl: modelConfig.baseUrl,
     startedAt: new Date().toISOString(),
