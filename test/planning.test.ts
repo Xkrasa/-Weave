@@ -243,3 +243,85 @@ test('approved volume, rolling plan and character arcs join the context', async 
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('generated outlines stay candidates until applied, checked and approved', async () => {
+  const generated = JSON.stringify({
+    chapters: [{
+      chapter: 1,
+      title: '潮位',
+      pov: '林岚',
+      time: '第二日',
+      location: '三号泊位',
+      openingState: '林岚带着缺页编号来到码头',
+      endingState: '她确认缺页对应一批不存在的货',
+      goal: '查出一票货的去向',
+      obstacle: '旧档都进了碎纸机',
+      mustHappen: ['林岚在卸货单上找到同一个编号'],
+      mayHappen: [],
+      mustNotHappen: [],
+      characters: ['林岚'],
+      threads: ['账本'],
+      targetWords: 800,
+      previousLink: '承接缺页编号',
+      nextLink: '找到收货人',
+    }],
+  })
+  const model = new FakeModel([generated, '生成正文'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await mkdir(path.join(dir, 'plans', 'volumes'), { recursive: true })
+    await writeFile(path.join(dir, 'plans', 'story.json'), storyEnvelope('账本卖点'))
+    await writeFile(path.join(dir, 'plans', 'volumes', '001.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      kind: 'volume',
+      status: 'draft',
+      provenance: 'generated',
+      contentHash: 'pending',
+      content: {
+        volume: 1,
+        title: '雾港',
+        mainConflict: '林岚与港务局争夺账本',
+        antagonistEscalation: '港务局销毁旧档',
+        protagonistChoice: '她公开一半账本',
+        climax: '冷库对峙',
+        irreversibleChange: '周砚暴露立场',
+        threads: ['账本'],
+        readerPromises: ['缺页来源'],
+      },
+    }, null, 2)}\n`)
+    assert.equal((await runCli(dir, ['plan', 'approve', 'story', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['plan', 'approve', 'volume', '--volume', '1', '--json'])).code, 0)
+
+    const generatedResult = await runCli(dir, ['outline', 'generate', '1', '--count', '1', '--json'])
+    assert.equal(generatedResult.code, 0, generatedResult.stdout + generatedResult.stderr)
+    const candidates = parseJson<{ candidates: Array<{ chapter: number; status: string }> }>(generatedResult.stdout)
+    assert.equal(candidates.candidates[0]?.status, 'draft')
+
+    const contractBefore = await readFile(path.join(dir, 'outlines', 'chapters', '001.json'), 'utf8')
+    assert.match(contractBefore, /缺页/)
+    assert.equal((await runCli(dir, ['outline', 'check', '1', '--json'])).code, 0)
+
+    const blocked = await runCli(dir, ['write', '1', '--json'])
+    assert.equal(blocked.code, 4)
+    assert.match(parseJson<{ error: { message: string } }>(blocked.stdout).error.message, /章纲候选/)
+
+    assert.equal((await runCli(dir, ['outline', 'apply', '1', '--json'])).code, 0)
+    assert.match(await readFile(path.join(dir, 'outlines', 'chapters', '001.json'), 'utf8'), /潮位/)
+
+    const premature = await runCli(dir, ['outline', 'approve', '1', '--json'])
+    assert.equal(premature.code, 4)
+    assert.match(parseJson<{ error: { message: string } }>(premature.stdout).error.message, /检查/)
+
+    assert.equal((await runCli(dir, ['contract', 'check', '1', '--json'])).code, 0)
+    const approved = await runCli(dir, ['outline', 'approve', '1', '--json'])
+    assert.equal(approved.code, 0, approved.stderr)
+    assert.equal(parseJson<{ status: string }>(approved.stdout).status, 'approved')
+
+    const written = await runCli(dir, ['write', '1', '--json'])
+    assert.equal(written.code, 0, written.stdout + written.stderr)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

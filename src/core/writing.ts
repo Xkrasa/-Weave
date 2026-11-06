@@ -56,6 +56,7 @@ import {
 import { conflictError, modelError, reviewBlockedError, validationError, WeaveError } from './errors.ts'
 import { loadStage, requireStage } from './stages.ts'
 import { applyFinalizedChapter, markSearchIndexFailed } from './search.ts'
+import { assertOutlineApproved } from './outline.ts'
 import type {
   ContentCheckReport,
   CoverageAudit,
@@ -92,6 +93,7 @@ export async function writeChapter(
     resumeFromRunId?: string
   },
 ): Promise<WriteResult> {
+  await assertOutlineApproved(root, chapter)
   const contract = await loadContract(root, chapter)
   await requirePassingContractCheck(root, contract)
   await assertFinalIntegrity(root)

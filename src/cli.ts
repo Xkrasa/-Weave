@@ -58,6 +58,14 @@ import {
 import { deconstructFile } from './core/deconstruct.ts'
 import { startUiServer } from './core/ui-server.ts'
 import { approvePlan, listPlans, parsePlanKind } from './core/planning.ts'
+import {
+  applyCandidate,
+  approveCandidate,
+  candidateValidation,
+  generateOutlineCandidates,
+  outlineReport,
+  readCandidate,
+} from './core/outline.ts'
 import { atomicWriteJson, ensureDir } from './core/io.ts'
 import {
   checkKnowledge,
@@ -125,6 +133,8 @@ async function main(): Promise<number> {
       return commandDeconstruct(root, parsed, json)
     case 'plan':
       return commandPlan(root, parsed, json)
+    case 'outline':
+      return commandOutline(root, parsed, json)
     case 'ui':
       return commandUi(root, parsed, json)
     case 'rewrite':
@@ -432,6 +442,69 @@ async function commandPlan(root: string, parsed: Parsed, json: boolean): Promise
     return 0
   }
   throw usageError('用法：weave plan status|approve <story|volume|character-arcs|rolling> [--volume <n>]')
+}
+
+async function commandOutline(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0] ?? 'status'
+  if (action === 'status') {
+    const report = await outlineReport(root)
+    if (json) outputJson(report)
+    else {
+      for (const candidate of report.candidates) {
+        console.log(`第${candidate.chapter}章	${candidate.status}	${candidate.contentHash.slice(0, 16)}`)
+      }
+      if (report.candidates.length === 0) console.log('还没有章纲候选')
+    }
+    return 0
+  }
+  if (action === 'generate') {
+    const fromChapter = parseChapter(parsed.positionals[1])
+    const count = optionalNumber(parsed, 'count') ?? 3
+    const config = await loadModelConfig(root)
+    const candidates = await generateOutlineCandidates(root, {
+      fromChapter,
+      count,
+      config,
+      signal: new AbortController().signal,
+    })
+    if (json) outputJson({ candidates })
+    else {
+      console.log(`已生成 ${candidates.length} 份章纲候选：`)
+      for (const candidate of candidates) {
+        console.log(`  第${candidate.chapter}章 ${candidate.contract.title}`)
+      }
+      console.log('候选不会自动生效；编辑后执行 weave outline apply <chapter>，检查并 approve。')
+    }
+    return 0
+  }
+  const chapter = parseChapter(parsed.positionals[1])
+  if (action === 'show') {
+    const candidate = await readCandidate(root, chapter)
+    if (!candidate) throw validationError(`第 ${chapter} 章没有章纲候选`)
+    if (json) outputJson(candidate)
+    else console.log(JSON.stringify(candidate.contract, null, 2))
+    return 0
+  }
+  if (action === 'check') {
+    const result = await candidateValidation(root, chapter)
+    if (json) outputJson(result)
+    else if (result.ok) console.log(`第 ${chapter} 章候选检查通过`)
+    else for (const error of result.errors) console.error(`- ${error.code}: ${error.message}`)
+    return result.ok ? 0 : 3
+  }
+  if (action === 'apply') {
+    const candidate = await applyCandidate(root, chapter)
+    if (json) outputJson({ ok: true, chapter, contentHash: candidate.contentHash })
+    else console.log(`已写入第 ${chapter} 章候选合同；请执行 contract check 后再 approve`)
+    return 0
+  }
+  if (action === 'approve') {
+    const approved = await approveCandidate(root, chapter)
+    if (json) outputJson(approved)
+    else console.log(`已批准第 ${chapter} 章合同（${approved.contentHash.slice(0, 16)}）`)
+    return 0
+  }
+  throw usageError('用法：weave outline status|generate <from>|show <chapter>|check <chapter>|apply <chapter>|approve <chapter>')
 }
 
 async function commandUi(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -1220,6 +1293,7 @@ function printHelp(): void {
   weave knowledge check <chapter>
   weave rewrite <chapter> --paragraph <id> --goal <text>
   weave plan status|approve <story|volume|character-arcs|rolling> [--volume <n>]
+  weave outline status|generate <from> [--count <n>]|show|check|apply|approve <chapter>
   weave method list|show <id>|route <chapter> [--platform long-form|short-form|generic|qidian|fanqie] [--max-tokens <n>]
   weave method history <chapter>
   weave style check <chapter>|samples
