@@ -87,6 +87,7 @@ import { approvePlan, listPlans, parsePlanKind } from './core/planning.ts'
 import { listPlatformProfiles, loadPlatformProfile } from './core/platform-profiles.ts'
 import { compareHotspots, importHotspot, listHotspots, readHotspot, topicCandidates } from './core/hotspots.ts'
 import { buildPublishDocument, validatePublishMarkdown } from './core/publish.ts'
+import { inspectExternalComponents, runExternalDeslop } from './core/external-components.ts'
 import { usageSummary } from './core/usage.ts'
 import {
   approvePreference,
@@ -180,6 +181,8 @@ async function main(): Promise<number> {
       return commandHotspot(root, parsed, json)
     case 'publish':
       return commandPublish(root, parsed, json)
+    case 'external':
+      return commandExternal(root, parsed, json)
     case 'outline':
       return commandOutline(root, parsed, json)
     case 'ui':
@@ -681,6 +684,29 @@ async function commandPublish(root: string, parsed: Parsed, json: boolean): Prom
     return validation.fail.length === 0 ? 0 : 3
   }
   throw usageError('用法：weave publish build|validate <file>')
+}
+
+async function commandExternal(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0]
+  const componentRoot = path.resolve(optionalString(parsed, 'component-root') ?? 'test/fixtures/oh-story')
+  if (action === 'inspect') {
+    const candidates = await inspectExternalComponents(componentRoot)
+    if (json) outputJson({ candidates })
+    else for (const candidate of candidates) console.log(`${candidate.component}\t${candidate.present ? 'present' : 'missing'}\t${candidate.decision}`)
+    return 0
+  }
+  if (action === 'test-deslop') {
+    const input = parsed.positionals[1]
+    if (!input) throw usageError('用法：weave external test-deslop <fixture> [--component-root <dir>] [--disabled]')
+    const result = await runExternalDeslop(componentRoot, path.resolve(root, input), { disabled: parsed.flags.disabled === true })
+    if (json) outputJson(result)
+    else {
+      console.log(`状态：${result.status}；finding：${result.findings.length}；fixture 未修改：${result.fixtureHashBefore === result.fixtureHashAfter}`)
+      for (const finding of result.findings) console.log(`- [${finding.severity}] ${finding.description}`)
+    }
+    return 0
+  }
+  throw usageError('用法：weave external inspect [--component-root <dir>]|test-deslop <fixture> [--component-root <dir>] [--disabled]')
 }
 
 async function commandOutline(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -1737,6 +1763,7 @@ function printHelp(): void {
   weave hotspot import <file> --captured-at <date> --ranking <name> [--metric <name>] [--channel <name>] [--id <id>]
   weave hotspot list|show <snapshotId>|compare <previousId> <currentId>|candidates <snapshotId>
   weave publish build|validate <file>
+  weave external inspect [--component-root <dir>] | test-deslop <fixture> [--component-root <dir>] [--disabled]
   weave outline status|generate <from> [--count <n>]|show|check|apply|approve <chapter>
   weave method list|show <id>|candidates|approve <id>|route <chapter> [--platform long-form|short-form|generic|qidian|fanqie] [--max-tokens <n>]
   weave method history <chapter>
