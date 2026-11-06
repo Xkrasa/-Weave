@@ -296,23 +296,29 @@ export async function searchBook(
         ? 0
         : filtered.reduce((sum, row) => sum + Number(row.length), 0) / filtered.length
       const hasMultiCharTerm = queryTerms.some(term => [...term].length >= 2)
+      const rareDocCap = Math.max(1, Math.floor(totalDocs * 0.25))
       const scored = filtered.map(row => {
         let score = 0
         let matchedMulti = 0
         let matchedSingle = 0
+        let minSingleDf = Number.POSITIVE_INFINITY
         for (const term of queryTerms) {
           const tfRow = db.prepare('SELECT tf FROM search_terms WHERE term = ? AND chunk_id = ?')
             .get(term, String(row.chunk_id)) as Record<string, unknown> | undefined
           const tf = Number(tfRow?.tf ?? 0)
           if (tf === 0) continue
           const isMulti = [...term].length >= 2
+          const termDf = df.get(term) ?? 0
           if (isMulti) matchedMulti += 1
-          else matchedSingle += 1
+          else {
+            matchedSingle += 1
+            if (termDf < minSingleDf) minSingleDf = termDf
+          }
           const weight = isMulti ? 2.2 : 0.35
-          const idf = Math.log(1 + (totalDocs - (df.get(term) ?? 0) + 0.5) / ((df.get(term) ?? 0) + 0.5))
+          const idf = Math.log(1 + (totalDocs - termDf + 0.5) / (termDf + 0.5))
           score += weight * idf * ((tf * 2.5) / (tf + 1.5 * (0.25 + 0.75 * Number(row.length) / (avgLength || 1))))
         }
-        if (hasMultiCharTerm && matchedMulti === 0 && matchedSingle < 2) {
+        if (hasMultiCharTerm && matchedMulti === 0 && matchedSingle < 2 && minSingleDf > rareDocCap) {
           return { row, score: 0 }
         }
         return { row, score }
@@ -503,7 +509,8 @@ const STOP_CHARS = new Set([
   '说', '要', '去', '你', '会', '着', '看', '好', '这', '那', '来', '里', '后', '前', '时', '把',
   '被', '让', '给', '从', '向', '往', '对', '于', '与', '及', '或', '而', '却', '但', '又', '还',
   '才', '只', '已', '正', '可', '能', '将', '由', '为', '以', '之', '么', '呢', '吗', '吧', '啊',
-  '呀', '她', '他', '它', '们', '个', '中', '人', '出', '过', '得', '地',
+  '呀', '她', '他', '它', '们', '个', '中', '人', '出', '过', '得', '地', '什', '候', '认', '确',
+  '每', '晚', '早', '次', '再', '更', '最', '先', '间',
 ])
 
 function filterQueryTerms(terms: string[]): string[] {

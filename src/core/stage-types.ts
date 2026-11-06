@@ -15,6 +15,7 @@ export interface EvidenceSpan {
 export interface ExtractedRecord {
   recordId: string
   kind: 'event' | 'state_change'
+  dimension?: string
   summary: string
   participants: string[]
   location?: string
@@ -36,6 +37,7 @@ export interface ExtractionReport {
   createdAt: string
   summary: string
   noEventsReason: string | null
+  dimensions?: Record<string, string>
   records: ExtractedRecord[]
   timeline: TimelineEvent[]
   facts: LedgerFact[]
@@ -88,6 +90,11 @@ export interface CoverageAudit {
     covered: string[]
     missed: string[]
     unplanned: string[]
+  }
+  dimensions?: {
+    expected: string[]
+    covered: string[]
+    missed: string[]
   }
   uncoveredSegments: CoverageSegment[]
   noEventsReason: string | null

@@ -7,6 +7,7 @@ import type {
   TimelineReport,
 } from './stage-types.ts'
 import { loadCharacters } from './contract.ts'
+import { deriveExpectedDimensions, evaluateDimensions } from './extraction.ts'
 import { validateTimeline } from './timeline.ts'
 import { draftHash, resolveEvidence, saveStage } from './stages.ts'
 import { objectHash } from './hash.ts'
@@ -49,12 +50,15 @@ export async function runCoverageAudit(
       || record.evidence.some(span => span.quote.includes(node)),
     ))
     .map(record => record.recordId)
+  const expectedDimensions = await deriveExpectedDimensions(root, contract)
+  const dimensions = evaluateDimensions(expectedDimensions, extraction)
   const registry = await loadCharacters(root)
   const timeline = validateTimeline(extraction.timeline ?? [], registry)
   const secondPass = await runSecondPass(root, chapter, contract, draft, extraction, config, signal)
   const warnings: string[] = []
   if (uncoveredSegments.length > 0) warnings.push(`有 ${uncoveredSegments.length} 个段落没有证据覆盖`)
   if (unplanned.length > 5) warnings.push(`有 ${unplanned.length} 条未列入合同的事件，需人工确认`)
+  if (dimensions.missed.length > 0) warnings.push(`未交代必检维度：${dimensions.missed.join('、')}`)
   warnings.push(...timeline.warnings)
 
   const audit: CoverageAudit = {
@@ -65,6 +69,7 @@ export async function runCoverageAudit(
     extractionHash: objectHash(extraction),
     segments,
     contract: { planned, covered, missed, unplanned },
+    dimensions,
     uncoveredSegments,
     noEventsReason: extraction.noEventsReason,
     timeline,
@@ -73,6 +78,7 @@ export async function runCoverageAudit(
     passed:
       extraction.passed
       && missed.length === 0
+      && dimensions.missed.length === 0
       && timeline.passed
       && secondPass.missed.length === 0
       && secondPass.rejected.length === 0

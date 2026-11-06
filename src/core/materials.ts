@@ -456,13 +456,24 @@ function paragraphSpans(text: string, baseByte = 0): Array<{ start: number; end:
   return spans
 }
 
+const REGION_PREFIX = /^(?:海港|旧港|港口|雾港|港区|旧城|城区|城南|城北|城东|城西|小镇)+/
+const PORT_SCENE_CLUSTER = /(?:码头|泊位|栈桥|船坞|[一二三四五六七八九十0-9]+号仓|货仓|仓库|冷库|货柜)/
+
 function sharesLocationToken(left: string, right: string): boolean {
   const cleanLeft = left.replace(/\s+/g, '')
   const cleanRight = right.replace(/\s+/g, '')
   if (cleanLeft.length < 2 || cleanRight.length < 2) return false
-  for (let index = 0; index + 2 <= cleanLeft.length; index += 1) {
-    const token = cleanLeft.slice(index, index + 2)
-    if (cleanRight.includes(token)) return true
+  if (cleanLeft.includes(cleanRight) || cleanRight.includes(cleanLeft)) return true
+  const coreLeft = cleanLeft.replace(REGION_PREFIX, '')
+  const coreRight = cleanRight.replace(REGION_PREFIX, '')
+  if (coreLeft.length >= 2 && coreRight.length >= 2) {
+    for (let index = 0; index + 2 <= coreLeft.length; index += 1) {
+      const token = coreLeft.slice(index, index + 2)
+      if (coreRight.includes(token)) return true
+    }
+  }
+  if (PORT_SCENE_CLUSTER.test(cleanLeft) && PORT_SCENE_CLUSTER.test(cleanRight)) {
+    return true
   }
   return false
 }
@@ -498,7 +509,10 @@ async function collectRetrievedEvidence(root: string, contract: ChapterContract)
     .filter(loop => loop.status !== 'paid_off' && loop.status !== 'abandoned')
     .filter(loop => loop.relatedEntities.includes(contract.pov) || loop.relatedEntities.length === 0)
     .slice(0, 2)
-    .map(loop => loop.summary.trim().slice(0, 60))
+    .map(loop => {
+      if (contract.narrativeMode === 'omniscient') return loop.summary.trim().slice(0, 60)
+      return (loop.evidence[0]?.quote ?? '').trim().slice(0, 60)
+    })
     .filter(Boolean)
   const queries = [...new Set([...retrievalQueries(contract), ...openLoopQueries])]
   const candidates = new Map<string, { score: number; chapter: number; paragraph: number; text: string; sourceCommit: string }>()

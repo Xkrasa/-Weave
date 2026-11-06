@@ -470,38 +470,60 @@ export async function mergeRevision(
   }
   await ensureDir(revisionDir(root, chapter))
   await atomicWriteJson(mergePath(root, chapter, revisionId), report)
+  if (candidate.findings.length > 0) {
+    const reviewReport = await loadStage<ReviewReport>(root, 'review', chapter)
+    const effectReport = await loadStage<EffectReviewReport>(root, 'effect-review', chapter)
+    const allFindings = [
+      ...(reviewReport?.findings ?? []),
+      ...(effectReport?.findings ?? []),
+    ]
+    const dimensions = [...new Set(
+      allFindings
+        .filter(item => candidate.findings.includes(item.findingId))
+        .map(item => item.dimension)
+        .filter(Boolean),
+    )]
+    await recordMergeAccepted(root, chapter, revisionId, dimensions).catch(() => {})
+  }
   return report
 }
+
+export type RecheckResult = ReviewReport | EffectReviewReport
 
 export async function recheckChapter(
   root: string,
   chapter: number,
   config: ModelConfig,
   signal: AbortSignal,
-): Promise<ReviewReport> {
+): Promise<RecheckResult> {
   const report = await loadStage<ReviewReport>(root, 'review', chapter)
-  if (!report) throw validationError(`第 ${chapter} 章没有审查报告`)
-  const applied = report.findings.filter(finding => finding.status === 'applied')
+  const effectReport = await loadStage<EffectReviewReport>(root, 'effect-review', chapter)
+  if (!report && !effectReport) throw validationError(`第 ${chapter} 章没有审查报告`)
+  const reviewApplied = report ? report.findings.filter(finding => finding.status === 'applied') : []
+  const effectApplied = effectReport ? effectReport.findings.filter(finding => finding.status === 'applied') : []
+  const applied: Array<ReviewFinding | EffectFinding> = [...reviewApplied, ...effectApplied]
   if (applied.length === 0) throw validationError('没有 applied finding，无法复检')
   const draft = await readDraft(root, chapter)
   const currentHash = draftHash(draft)
   const check = await loadStage<ContentCheckReport>(root, 'content-check', chapter)
   const extraction = await loadStage<ExtractionReport>(root, 'extraction', chapter)
   const audit = await loadStage<CoverageAudit>(root, 'audit', chapter)
-  if (!check || check.draftHash !== currentHash) {
-    throw conflictError('合并后需要先重新运行 weave check')
-  }
-  if (!extraction || extraction.draftHash !== currentHash) {
-    throw conflictError('合并后需要先重新运行 weave extract')
-  }
-  if (!audit || audit.draftHash !== currentHash) {
-    throw conflictError('合并后需要先重新运行 weave audit')
+  if (reviewApplied.length > 0) {
+    if (!check || check.draftHash !== currentHash) {
+      throw conflictError('合并后需要先重新运行 weave check')
+    }
+    if (!extraction || extraction.draftHash !== currentHash) {
+      throw conflictError('合并后需要先重新运行 weave extract')
+    }
+    if (!audit || audit.draftHash !== currentHash) {
+      throw conflictError('合并后需要先重新运行 weave audit')
+    }
   }
   const revisionIds = [...new Set(applied.map(finding => finding.revisionId).filter((id): id is string => Boolean(id)))]
   let merged = false
   for (const revisionId of revisionIds) {
-    const report = await readJsonIfExists<MergeReport>(mergePath(root, chapter, revisionId))
-    if (report?.status === 'merged' && report.mergedDraftHash === currentHash) {
+    const mergeReport = await readJsonIfExists<MergeReport>(mergePath(root, chapter, revisionId))
+    if (mergeReport?.status === 'merged' && mergeReport.mergedDraftHash === currentHash) {
       merged = true
       break
     }
@@ -559,12 +581,12 @@ export async function recheckChapter(
     }
   }
   for (const finding of applied) {
-    const result = resolvedMap.get(finding.findingId)
-    let resolved = result?.resolved === true
-    if (resolved && result?.quote) {
+    const res = resolvedMap.get(finding.findingId)
+    let resolved = res?.resolved === true
+    if (resolved && res?.quote) {
       try {
-        finding.evidence = resolveEvidence(draft, chapter, result.quote)
-        finding.quote = result.quote
+        finding.evidence = resolveEvidence(draft, chapter, res.quote)
+        finding.quote = res.quote
       } catch {
         resolved = false
       }
@@ -572,8 +594,17 @@ export async function recheckChapter(
       resolved = false
     }
     finding.status = resolved ? 'verified' : 'open'
-    finding.recheckNote = result?.note
+    finding.recheckNote = res?.note
     finding.recheckedAt = new Date().toISOString()
+  }
+  if (effectReport && effectApplied.length > 0) {
+    effectReport.draftHash = currentHash
+    if (result.usage) effectReport.usage = result.usage
+    await saveStage(root, 'effect-review', chapter, effectReport)
+  }
+  if (!report || reviewApplied.length === 0) {
+    if (!effectReport) throw validationError('没有可复检的审查报告')
+    return effectReport
   }
   let nextId = report.findings.reduce((max, finding) => {
     const match = /^f(\d+)$/.exec(finding.findingId)
@@ -606,8 +637,8 @@ export async function recheckChapter(
     report.findings.push(finding)
   }
   report.draftHash = currentHash
-  report.extractionHash = objectHash(extraction)
-  report.auditHash = objectHash(audit)
+  if (extraction) report.extractionHash = objectHash(extraction)
+  if (audit) report.auditHash = objectHash(audit)
   report.blockingCount = report.findings.filter(
     finding => finding.severity === 'blocking' && finding.status !== 'verified' && finding.status !== 'waived',
   ).length

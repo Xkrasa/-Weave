@@ -19,6 +19,8 @@ export interface EffectFinding {
   revisionId?: string
   paragraphIds?: string[]
   ignoreReason?: string
+  recheckNote?: string
+  recheckedAt?: string
 }
 
 export interface EffectReviewReport {

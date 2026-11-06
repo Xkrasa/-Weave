@@ -1,4 +1,4 @@
-import type { BeliefAttitude, ChapterContract, LedgerBelief, LedgerFact, LoopChange, ModelConfig } from './types.ts'
+import type { ChapterContract, LedgerBelief, LedgerFact, LoopChange, ModelConfig } from './types.ts'
 import type {
   EvidenceSpan,
   ExtractedRecord,
@@ -11,7 +11,7 @@ import { resolveTaskConfig } from './model-policy.ts'
 import { appendUsage } from './usage.ts'
 import { draftHash, resolveEvidence, saveStage } from './stages.ts'
 import { validationError } from './errors.ts'
-import { eventIdFor, normalizeAttitude } from './story-ledger.ts'
+import { collectLedger, collectLoopState, effectiveFacts, eventIdFor, normalizeAttitude } from './story-ledger.ts'
 import { hashText } from './hash.ts'
 
 const SYSTEM_PROMPT = [
@@ -19,7 +19,140 @@ const SYSTEM_PROMPT = [
   '只输出一个 JSON 对象，不要输出解释、Markdown 代码围栏或额外文字。',
   '每条记录必须有至少一条原文证据。引文必须从正文逐字复制，不得改写、补全或拼接。',
   '无法确定的内容不要编造；本章确实没有状态变化时填写 noEventsReason。',
+  '对于提示中列出的每个必检维度（expectedDimensions），必须在对应结构字段（records/facts/beliefs/loops）中给出带证据的变化，或在 dimensions 对象中显式说明“unchanged: 具体原因”。',
+  '不得用 unchanged 掩盖正文中实际发生的变化；没有具体原因的空声明视为未交代。',
 ].join('\n')
+
+const POSSESSION_TRIGGER_PATTERN = /拿到|交出|交给|夺走|递给|易手|偷走|丢失|换取|归还/
+const KNOWLEDGE_TRIGGER_PATTERN = /秘密|得知|发现真相|获知|认出|偷听|揭穿/
+const STATUS_TRIGGER_PATTERN = /受伤|死亡|昏迷|被捕|中毒|晋升|突破|残废/
+const RELATIONSHIP_TRIGGER_PATTERN = /决裂|结盟|背叛|立誓|反目|和解|拜师/
+const LOOP_TRIGGER_PATTERN = /伏笔|回收|揭晓悬念/
+
+export async function deriveExpectedDimensions(root: string, contract: ChapterContract): Promise<string[]> {
+  const expected = new Set<string>(['event'])
+  const priorChapter = Math.max(0, contract.chapter - 1)
+  const ledger = priorChapter > 0 ? await collectLedger(root, priorChapter) : { events: [], facts: [], beliefs: [] }
+  const activeFacts = priorChapter > 0 ? effectiveFacts(ledger.facts, priorChapter) : []
+  const chapterCharacters = new Set(contract.characters)
+  const characterFacts = activeFacts.filter(fact => chapterCharacters.has(fact.subject))
+
+  if (contract.location.trim() || characterFacts.some(fact => fact.predicate === 'location')) {
+    expected.add('location')
+  }
+
+  const contractText = [contract.goal, contract.obstacle, ...contract.mustHappen].join(' ')
+  const mustHappenText = contract.mustHappen.join(' ')
+
+  if (
+    POSSESSION_TRIGGER_PATTERN.test(contractText)
+    || characterFacts.some(fact => fact.predicate === 'possession')
+  ) {
+    expected.add('possession')
+  }
+
+  if (
+    (contract.knowledge?.length ?? 0) > 0
+    || KNOWLEDGE_TRIGGER_PATTERN.test(mustHappenText)
+  ) {
+    expected.add('knowledge')
+  }
+
+  if (
+    STATUS_TRIGGER_PATTERN.test(mustHappenText)
+    || characterFacts.some(fact => ['status', 'condition', 'injury', 'health'].includes(fact.predicate))
+  ) {
+    expected.add('status')
+  }
+
+  if (
+    RELATIONSHIP_TRIGGER_PATTERN.test(mustHappenText)
+    || characterFacts.some(fact => fact.predicate === 'relationship')
+  ) {
+    expected.add('relationship')
+  }
+
+  if (LOOP_TRIGGER_PATTERN.test(mustHappenText)) {
+    expected.add('loop')
+  } else if (priorChapter > 0) {
+    const loopState = await collectLoopState(root, priorChapter)
+    const dueLoop = loopState.loops.some(loop =>
+      loop.status !== 'paid_off'
+      && loop.status !== 'abandoned'
+      && loop.targetToChapter !== undefined
+      && loop.targetToChapter <= contract.chapter
+      && (loop.relatedEntities.length === 0 || loop.relatedEntities.some(entity => chapterCharacters.has(entity))),
+    )
+    if (dueLoop) expected.add('loop')
+  }
+
+  return [...expected]
+}
+
+export function evaluateDimensions(
+  expected: string[],
+  extraction: ExtractionReport,
+): { expected: string[]; covered: string[]; missed: string[] } {
+  if (extraction.noEventsReason) {
+    return { expected: [...expected], covered: [...expected], missed: [] }
+  }
+  const covered: string[] = []
+  const missed: string[] = []
+  for (const dim of expected) {
+    if (isDimensionCovered(dim, extraction)) {
+      covered.push(dim)
+    } else {
+      missed.push(dim)
+    }
+  }
+  return { expected: [...expected], covered, missed }
+}
+
+const UNCHANGED_WITH_REASON = /^(?:unchanged|无变化)\s*[:：]\s*(\S.*)$/i
+
+/** A bare "unchanged" is not an explanation; the reason must carry some substance. */
+function isExplicitUnchanged(value: string): boolean {
+  const match = UNCHANGED_WITH_REASON.exec(value.trim())
+  if (!match) return false
+  const reason = match[1]!.trim()
+  if (reason.length < 4) return false
+  return !/^(?:原因|略|暂无|无|同上|none|n\/a)$/i.test(reason)
+}
+
+function isDimensionCovered(dim: string, extraction: ExtractionReport): boolean {
+  const topLevel = extraction.dimensions?.[dim]
+  if (typeof topLevel === 'string' && isExplicitUnchanged(topLevel)) return true
+
+  for (const record of extraction.records) {
+    if (record.dimension === dim || record.payload.dimension === dim) return true
+    const payloadDims = objectOrNull(record.payload.dimensions)
+    if (payloadDims && typeof payloadDims[dim] === 'string' && isExplicitUnchanged(String(payloadDims[dim]))) {
+      return true
+    }
+  }
+
+  switch (dim) {
+    case 'event':
+      return extraction.records.some(record => record.kind === 'event')
+    case 'location':
+      return extraction.records.some(record => Boolean(record.location?.trim()))
+        || extraction.facts.some(fact => fact.predicate === 'location')
+    case 'possession':
+      return extraction.facts.some(fact => fact.predicate === 'possession')
+    case 'knowledge':
+      return extraction.beliefs.length > 0
+    case 'status':
+      return extraction.facts.some(fact =>
+        ['status', 'condition', 'injury', 'health', 'alive', 'dead'].includes(fact.predicate),
+      )
+    case 'relationship':
+      return extraction.facts.some(fact => fact.predicate === 'relationship')
+    case 'loop':
+      return extraction.loops.length > 0
+    default:
+      return false
+  }
+}
 
 export async function runExtraction(
   root: string,
@@ -31,9 +164,16 @@ export async function runExtraction(
 ): Promise<ExtractionReport> {
   const taskConfig = resolveTaskConfig(config, 'extraction')
   const model = taskConfig.model
+  const expectedDimensions = await deriveExpectedDimensions(root, contract)
+  const dimensionTemplate = Object.fromEntries(
+    expectedDimensions.map(dim => [dim, 'unchanged: 具体原因（本章该维度确实没有变化时填写）']),
+  )
   const prompt = [
     `第 ${chapter} 章合同：`,
     JSON.stringify(contract, null, 2),
+    '',
+    `本章必检维度（expectedDimensions）：${expectedDimensions.join('、')}`,
+    '每个必检维度必须由 records/facts/beliefs/loops 中的记录覆盖，或在 dimensions 中显式声明 "unchanged: 原因"。',
     '',
     '正文：',
     draft,
@@ -42,9 +182,11 @@ export async function runExtraction(
     JSON.stringify({
       summary: '本章发生了什么，200 字以内',
       noEventsReason: null,
+      dimensions: dimensionTemplate,
       records: [{
         recordId: 'r1',
         kind: 'event',
+        dimension: 'event',
         summary: '一条可验证的事件或状态变化',
         participants: ['人物名'],
         location: '地点',
@@ -109,6 +251,14 @@ export async function runExtraction(
   const noEventsReason = typeof raw.noEventsReason === 'string' && raw.noEventsReason.trim()
     ? raw.noEventsReason.trim()
     : null
+  const dimensionsRaw = objectOrNull(raw.dimensions)
+  const dimensions: Record<string, string> | undefined = dimensionsRaw
+    ? Object.fromEntries(
+        Object.entries(dimensionsRaw)
+          .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].trim().length > 0)
+          .map(([key, value]) => [key, value.trim()]),
+      )
+    : undefined
   const recordsRaw = Array.isArray(raw.records) ? raw.records : []
   const timelineRaw = Array.isArray(raw.timeline) ? raw.timeline : []
   const rejected: RejectedRecord[] = []
@@ -149,6 +299,7 @@ export async function runExtraction(
       payload: objectOrNull(recordRaw.payload) ?? {},
       evidence,
     }
+    if (typeof recordRaw.dimension === 'string' && recordRaw.dimension.trim()) record.dimension = recordRaw.dimension.trim()
     if (typeof recordRaw.location === 'string' && recordRaw.location.trim()) record.location = recordRaw.location.trim()
     if (typeof recordRaw.storyTime === 'string' && recordRaw.storyTime.trim()) record.storyTime = recordRaw.storyTime.trim()
     seenRecordIds.add(recordId)
@@ -362,6 +513,7 @@ export async function runExtraction(
     createdAt: new Date().toISOString(),
     summary,
     noEventsReason,
+    ...(dimensions && Object.keys(dimensions).length > 0 ? { dimensions } : {}),
     records,
     timeline,
     facts,

@@ -143,7 +143,7 @@ test('long chapter continuation preserves prose mode when tail excerpt has non-z
     findings: [],
   })
 
-  const model = new FakeModel([longChapter1, extraction, audit, review, '第二章正文。'])
+  const model = new FakeModel([longChapter1, extraction, audit, review, '第二章正文。', '第二章医院草稿。'])
   await model.start()
   const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-opt-cont-'))
   try {
@@ -227,13 +227,42 @@ test('long chapter continuation preserves prose mode when tail excerpt has non-z
     assert.equal(body.includes('铁梯下持钥匙来人的身份'), false, 'model-authored loop summary must not enter limited POV')
     assert.ok(body.includes('短句利落，极少感叹'), 'character voice field must reach prompt')
     assert.equal(body.includes('sourceContentHash'), false, 'raw evidence hashes should be stripped from POV knowledge prompt')
+
+    // Disjoint venue sharing only the region prefix ("海港码头" -> "海港医院") must degrade to summary.
+    await writeFile(path.join(dir, 'outlines', 'chapters', '002.json'), `${JSON.stringify({
+      chapter: 2,
+      title: '病房',
+      pov: '林岚',
+      time: '第二夜',
+      location: '海港医院',
+      openingState: '林岚来到医院',
+      endingState: '她问出病历',
+      goal: '查病历',
+      obstacle: '护士阻拦',
+      mustHappen: ['林岚查病历'],
+      mayHappen: [],
+      mustNotHappen: [],
+      characters: ['林岚'],
+      threads: ['底单'],
+      targetWords: 800,
+      previousLink: '离开码头',
+      nextLink: '继续',
+    }, null, 2)}\n`)
+    assert.equal((await runCli(dir, ['contract', 'check', '2', '--json'])).code, 0)
+    const disjoint = await runCli(dir, ['write', '2', '--json'])
+    assert.equal(disjoint.code, 0, disjoint.stderr)
+    const disjointIncluded = parseJson<{ included: string[] }>(disjoint.stdout).included
+    assert.ok(
+      disjointIncluded.includes('pov:previous-summary:1'),
+      `expected summary fallback for 海港码头 -> 海港医院, got: ${JSON.stringify(disjointIncluded)}`,
+    )
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
   }
 })
 
-test('searchBook suppresses single-character stopword noise and ranks multi-char hits first', async () => {
+test('searchBook suppresses single-character stopword noise and preserves rare content-char recall', async () => {
   const model = new FakeModel(['占位'])
   await model.start()
   const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-opt-search-'))
@@ -249,6 +278,8 @@ test('searchBook suppresses single-character stopword noise and ranks multi-char
     const chapters = [
       '她把铁盒放在桌下，里头只有半截火柴和一张旧船票。',
       '老陈在门房登记了看门人换班的时间表，每晚子时交接钥匙。',
+      '阁楼角落锁着一只包铜边的樟木匣，锁孔里塞着干海藻。',
+      '她沿着长街往北走，把湿透的围巾搭在木椅背上。',
     ]
     for (const [idx, text] of chapters.entries()) {
       const ch = idx + 1
@@ -282,13 +313,21 @@ test('searchBook suppresses single-character stopword noise and ranks multi-char
     const parsed = parseJson<{ results: Array<{ chapter: number; text: string }> }>(search.stdout)
     assert.equal(parsed.results.length, 1, `irrelevant chapter with only stopword matches must be excluded: ${JSON.stringify(parsed.results)}`)
     assert.equal(parsed.results[0]?.chapter, 2)
+
+    const rareCharSearch = await runCli(dir, ['search', '检查樟箱', '--json'])
+    assert.equal(rareCharSearch.code, 0, rareCharSearch.stderr)
+    const rareParsed = parseJson<{ results: Array<{ chapter: number }> }>(rareCharSearch.stdout)
+    assert.ok(
+      rareParsed.results.some(item => item.chapter === 3),
+      `rare content character '樟' must still recall chapter 3: ${JSON.stringify(rareParsed.results)}`,
+    )
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
   }
 })
 
-test('effect-review detects mid-chapter environment blocks and integrates with revise and ignore', async () => {
+test('effect-review detects mid-chapter environment blocks and completes revise -> merge -> recheck loop', async () => {
   const envParagraph = '海风裹着浓重的雾气从海面涌上来，天色在云层下渐渐暗成铁灰，路灯在细雨与水汽里投下摇晃的阴影。'
   const draft = [
     '林岚推开档案室的木门，把湿透的账本按在桌角。',
@@ -296,6 +335,7 @@ test('effect-review detects mid-chapter environment blocks and integrates with r
     '她抽出一张空白登记表，对准印章缺口比对编号。',
   ].join('\n\n')
 
+  const rewrittenP2 = '窗外海风撞响铁皮水落管，林岚顾不上擦干袖口，直接翻到账本第三页。'
   const effectJson = JSON.stringify({
     summary: '中段有纯环境铺陈拖慢节奏。',
     findings: [{
@@ -309,12 +349,22 @@ test('effect-review detects mid-chapter environment blocks and integrates with r
   const revisionJson = JSON.stringify({
     paragraphs: [{
       paragraphId: 'p002',
-      text: '窗外海风撞响铁皮水落管，林岚顾不上擦干袖口，直接翻到账本第三页。',
+      text: rewrittenP2,
       findingIds: ['e-lint-1'],
     }],
   })
+  const recheckJson = JSON.stringify({
+    summary: '中段纯环境铺陈已改为动作推进。',
+    findings: [{
+      findingId: 'e-lint-1',
+      resolved: true,
+      note: '已融入人物翻账动作',
+      quote: rewrittenP2,
+    }],
+    newFindings: [],
+  })
 
-  const model = new FakeModel([effectJson, revisionJson])
+  const model = new FakeModel([effectJson, revisionJson, recheckJson])
   await model.start()
   const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-opt-effect-'))
   try {
@@ -359,16 +409,245 @@ test('effect-review detects mid-chapter environment blocks and integrates with r
 
     const revised = await runCli(dir, ['revise', '1', '--findings', envFinding.findingId, '--json'])
     assert.equal(revised.code, 0, revised.stderr)
-    const revPayload = parseJson<{ candidate: { revisionId: string; paragraphs: Array<{ paragraphId: string }> } }>(revised.stdout)
+    const revPayload = parseJson<{ revisionId: string; candidate: { revisionId: string; paragraphs: Array<{ paragraphId: string }> } }>(revised.stdout)
     assert.equal(revPayload.candidate.paragraphs[0]?.paragraphId, 'p002')
 
     const ignored = await runCli(dir, ['ignore', '1', '--finding', 'e1', '--reason', '保留此处克制叙述', '--json'])
     assert.equal(ignored.code, 0, ignored.stderr)
+
+    const merged = await runCli(dir, ['merge', '1', '--revision', revPayload.revisionId, '--json'])
+    assert.equal(merged.code, 0, merged.stderr)
+
+    const rechecked = await runCli(dir, ['recheck', '1', '--json'])
+    assert.equal(rechecked.code, 0, rechecked.stderr)
+
     const savedEffect = JSON.parse(await readFile(path.join(dir, '.weave', 'stages', 'effect-review', '001.json'), 'utf8')) as {
-      findings: Array<{ findingId: string; status: string; ignoreReason?: string }>
+      findings: Array<{ findingId: string; status: string; ignoreReason?: string; recheckNote?: string }>
     }
-    assert.equal(savedEffect.findings.find(item => item.findingId === envFinding.findingId)?.status, 'applied')
+    assert.equal(savedEffect.findings.find(item => item.findingId === envFinding.findingId)?.status, 'verified')
+    assert.equal(savedEffect.findings.find(item => item.findingId === envFinding.findingId)?.recheckNote, '已融入人物翻账动作')
     assert.equal(savedEffect.findings.find(item => item.findingId === 'e1')?.status, 'ignored')
+
+    const prefStatus = parseJson<{ signals: Array<{ kind: string; source: string; dimension: string }> }>(
+      (await runCli(dir, ['preference', 'status', '--json'])).stdout,
+    )
+    assert.ok(prefStatus.signals.some(item => item.kind === 'accepted' && item.source === 'merge' && item.dimension === '环境与描写'))
+    assert.ok(prefStatus.signals.some(item => item.kind === 'rejected' && item.source === 'ignore' && item.dimension === '人物声音'))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+
+test('coverage audit fails when an expected dimension from contract is omitted ("该报未报")', async () => {
+  const draft = '林岚在三号仓门口拦住周砚，试图把盖有红印的底单交给他，但听见哨声后又收回手。'
+  // Extraction covers the mustHappen string ("林岚把底单交给周砚") in record summary,
+  // but omits the required 'possession' dimension (no possession fact and no dimensions.possession explanation).
+  const omittedPossessionExtraction = JSON.stringify({
+    summary: '林岚试图把底单交给周砚但因哨声中止',
+    noEventsReason: null,
+    records: [{
+      recordId: 'r1',
+      kind: 'event',
+      summary: '林岚把底单交给周砚的尝试因哨声中断',
+      participants: ['林岚', '周砚'],
+      location: '三号仓门口',
+      storyTime: '第一夜',
+      payload: {},
+      evidence: [{ quote: draft, occurrence: 1 }],
+    }],
+    timeline: [{
+      eventId: 'e1',
+      recordId: 'r1',
+      summary: '林岚与周砚在三号仓门口交接底单未遂',
+      dayOffset: 0,
+      durationDays: 0,
+      participants: ['林岚', '周砚'],
+      causedBy: [],
+      type: 'main',
+      evidence: [{ quote: draft, occurrence: 1 }],
+    }],
+    facts: [],
+    beliefs: [],
+    loops: [],
+  })
+  const auditSecondPass = JSON.stringify({
+    summary: '第二遍无额外事件遗漏',
+    missed: [],
+  })
+
+  const model = new FakeModel([omittedPossessionExtraction, auditSecondPass])
+  await model.start()
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-opt-dim-miss-'))
+  try {
+    assert.equal(
+      (await runCli(dir, ['init', '.', '--title', '维度漏报测试', '--model', 'fake', '--base-url', model.baseUrl, '--workflow', 'p05'])).code,
+      0,
+    )
+    await writeFile(
+      path.join(dir, 'canon', 'characters.json'),
+      `${JSON.stringify({
+        characters: [
+          { name: '林岚', status: 'alive', introducedIn: 1 },
+          { name: '周砚', status: 'alive', introducedIn: 1 },
+        ],
+      }, null, 2)}\n`,
+    )
+    await writeFile(path.join(dir, 'outlines', 'chapters', '001.json'), `${JSON.stringify({
+      chapter: 1,
+      title: '交接',
+      pov: '林岚',
+      time: '第一夜',
+      location: '三号仓门口',
+      openingState: '林岚持有底单',
+      endingState: '底单交接被打断',
+      goal: '把底单交给周砚',
+      obstacle: '巡夜哨声逼近',
+      mustHappen: ['林岚把底单交给周砚'],
+      mayHappen: [],
+      mustNotHappen: [],
+      characters: ['林岚', '周砚'],
+      threads: ['底单'],
+      targetWords: 800,
+      previousLink: '开篇',
+      nextLink: '继续',
+    }, null, 2)}\n`)
+    assert.equal((await runCli(dir, ['contract', 'check', '1', '--json'])).code, 0)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), `${draft}\n`)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+
+    const extracted = await runCli(dir, ['extract', '1', '--json'])
+    assert.equal(extracted.code, 0, extracted.stderr)
+
+    const audited = await runCli(dir, ['audit', '1', '--json'])
+    assert.equal(audited.code, 3, 'audit must fail with blocking code 3 when expected dimension possession is omitted')
+    const auditReport = parseJson<{
+      passed: boolean
+      dimensions?: { expected: string[]; covered: string[]; missed: string[] }
+      warnings: string[]
+    }>(audited.stdout)
+    assert.equal(auditReport.passed, false)
+    assert.ok(auditReport.dimensions?.expected.includes('possession'))
+    assert.deepEqual(auditReport.dimensions?.missed, ['possession'])
+    assert.ok(auditReport.warnings.some(item => item.includes('未交代必检维度：possession')))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('coverage audit passes when expected dimension is explicitly accounted for as unchanged or via ledger fact', async () => {
+  const draft = '林岚在三号仓门口拦住周砚，刚掏出底单就听见哨声，只能把底单重新塞回自己暗袋。'
+  const explicitUnchangedExtraction = JSON.stringify({
+    summary: '林岚因哨声收回底单，持有权未变',
+    noEventsReason: null,
+    dimensions: {
+      event: 'changed: 交接被哨声打断',
+      location: 'unchanged: 仍在三号仓门口',
+      possession: 'unchanged: 底单仍由林岚持有，未完成交接',
+    },
+    records: [{
+      recordId: 'r1',
+      kind: 'event',
+      dimension: 'event',
+      summary: '林岚把底单交给周砚时被哨声打断，底单收回暗袋',
+      participants: ['林岚', '周砚'],
+      location: '三号仓门口',
+      storyTime: '第一夜',
+      payload: {},
+      evidence: [{ quote: draft, occurrence: 1 }],
+    }],
+    timeline: [{
+      eventId: 'e1',
+      recordId: 'r1',
+      summary: '林岚收回底单',
+      dayOffset: 0,
+      durationDays: 0,
+      participants: ['林岚', '周砚'],
+      causedBy: [],
+      type: 'main',
+      evidence: [{ quote: draft, occurrence: 1 }],
+    }],
+    facts: [],
+    beliefs: [],
+    loops: [],
+  })
+  const auditSecondPass = JSON.stringify({
+    summary: '第二遍无遗漏',
+    missed: [],
+  })
+
+  const bareUnchanged = JSON.parse(explicitUnchangedExtraction) as Record<string, unknown>
+  bareUnchanged.summary = '林岚收回底单，持有权未变（但未解释维度）'
+  ;(bareUnchanged.dimensions as Record<string, string>).possession = 'unchanged'
+
+  const model = new FakeModel([
+    explicitUnchangedExtraction,
+    auditSecondPass,
+    JSON.stringify(bareUnchanged),
+    auditSecondPass,
+  ])
+  await model.start()
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-opt-dim-pass-'))
+  try {
+    assert.equal(
+      (await runCli(dir, ['init', '.', '--title', '维度交代通过测试', '--model', 'fake', '--base-url', model.baseUrl, '--workflow', 'p05'])).code,
+      0,
+    )
+    await writeFile(
+      path.join(dir, 'canon', 'characters.json'),
+      `${JSON.stringify({
+        characters: [
+          { name: '林岚', status: 'alive', introducedIn: 1 },
+          { name: '周砚', status: 'alive', introducedIn: 1 },
+        ],
+      }, null, 2)}\n`,
+    )
+    await writeFile(path.join(dir, 'outlines', 'chapters', '001.json'), `${JSON.stringify({
+      chapter: 1,
+      title: '交接',
+      pov: '林岚',
+      time: '第一夜',
+      location: '三号仓门口',
+      openingState: '林岚持有底单',
+      endingState: '底单仍在林岚手中',
+      goal: '把底单交给周砚',
+      obstacle: '巡夜哨声逼近',
+      mustHappen: ['林岚把底单交给周砚'],
+      mayHappen: [],
+      mustNotHappen: [],
+      characters: ['林岚', '周砚'],
+      threads: ['底单'],
+      targetWords: 800,
+      previousLink: '开篇',
+      nextLink: '继续',
+    }, null, 2)}\n`)
+    assert.equal((await runCli(dir, ['contract', 'check', '1', '--json'])).code, 0)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), `${draft}\n`)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    const audited = await runCli(dir, ['audit', '1', '--json'])
+    assert.equal(audited.code, 0, audited.stderr)
+    const auditReport = parseJson<{
+      passed: boolean
+      dimensions?: { expected: string[]; covered: string[]; missed: string[] }
+    }>(audited.stdout)
+    assert.equal(auditReport.passed, true)
+    assert.deepEqual(auditReport.dimensions?.missed, [])
+    assert.ok(auditReport.dimensions?.covered.includes('possession'))
+
+    // A bare "unchanged" without a reason is not an explanation; it must still count as missed.
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    const bareAudit = await runCli(dir, ['audit', '1', '--json'])
+    assert.equal(bareAudit.code, 3, 'bare unchanged without reason must not satisfy the dimension audit')
+    const bareReport = parseJson<{
+      passed: boolean
+      dimensions?: { missed: string[] }
+    }>(bareAudit.stdout)
+    assert.equal(bareReport.passed, false)
+    assert.deepEqual(bareReport.dimensions?.missed, ['possession'])
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
