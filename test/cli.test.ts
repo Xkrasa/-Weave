@@ -2675,3 +2675,88 @@ test('legacy revision mode keeps the prompt minimal for A/B comparison', async (
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('effect review stays advisory and downgrades blocking severity', async () => {
+  const effect = JSON.stringify({
+    summary: '结尾把问题解释完了，读者没有下一步可追。',
+    findings: [{
+      dimension: '章末追读',
+      severity: 'blocking',
+      description: '结局解释过满',
+      quote: '她发现缺页上留着港务局的印。',
+      occurrence: 1,
+    }],
+  })
+  const model = new FakeModel([effect])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    await writeFile(
+      path.join(dir, 'chapters', 'drafts', '001.md'),
+      '林岚在码头翻开账本。\n\n她发现缺页上留着港务局的印。\n\n总之，她终于明白了一切。\n',
+    )
+    const reviewed = await runCli(dir, ['effect-review', '1', '--json'])
+    assert.equal(reviewed.code, 0, reviewed.stderr)
+    const payload = parseJson<{
+      passed: boolean
+      findings: Array<{ severity: string; source: string; dimension: string; quote?: string }>
+    }>(reviewed.stdout)
+    assert.equal(payload.passed, true)
+    assert.ok(payload.findings.every(item => item.severity === 'warning' || item.severity === 'info'))
+    assert.ok(payload.findings.some(item => item.source === 'lint' && item.dimension === '章末追读'))
+    const modelFinding = payload.findings.find(item => item.source === 'model')
+    assert.equal(modelFinding?.severity, 'warning')
+    assert.equal(modelFinding?.quote, '她发现缺页上留着港务局的印。')
+
+    const saved = JSON.parse(await readFile(path.join(dir, '.weave', 'stages', 'effect-review', '001.json'), 'utf8'))
+    assert.equal(saved.passed, true)
+
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 0, finalized.stderr)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('effect review lints overdue loops from the real ledger', async () => {
+  const effect = JSON.stringify({ summary: '本章没有明显效果问题。', findings: [] })
+  const model = new FakeModel([
+    P05_DRAFT,
+    loopExtractionPayload([{
+      loopId: 'loop-1',
+      kind: 'plant',
+      summary: '账本缺页的来源',
+      targetFromChapter: 1,
+      targetToChapter: 1,
+      relatedEntities: ['林岚'],
+      evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+    }]),
+    coveragePayload(),
+    warningReviewFor('她发现缺页上留着港务局的印。'),
+    effect,
+  ])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+
+    await setContract(dir, 2, { characters: ['林岚'], pov: '林岚' })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '002.md'), '林岚回到码头，缺页还在桌上。\n')
+
+    const reviewed = await runCli(dir, ['effect-review', '2', '--json'])
+    assert.equal(reviewed.code, 0, reviewed.stderr)
+    const payload = parseJson<{ findings: Array<{ description: string; source: string }> }>(reviewed.stdout)
+    assert.ok(payload.findings.some(item =>
+      item.source === 'lint' && item.description.includes('账本缺页的来源') && item.description.includes('仍为 planted'),
+    ), JSON.stringify(payload.findings))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

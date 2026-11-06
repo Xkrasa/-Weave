@@ -37,6 +37,7 @@ import { runContentCheck } from './core/content-check.ts'
 import { runExtraction } from './core/extraction.ts'
 import { runCoverageAudit, runTimelineReport } from './core/audit.ts'
 import { runReview } from './core/review.ts'
+import { runEffectReview } from './core/effect-review.ts'
 import { applyWaivers, createWaivers, loadWaivers, revokeWaiver } from './core/waivers.ts'
 import {
   ignoreFinding,
@@ -145,6 +146,8 @@ async function main(): Promise<number> {
       return commandAudit(root, parsed, json)
     case 'review':
       return commandReview(root, parsed, json)
+    case 'effect-review':
+      return commandEffectReview(root, parsed, json)
     case 'revise':
       return commandRevise(root, parsed, json)
     case 'merge':
@@ -775,6 +778,23 @@ async function commandReview(root: string, parsed: Parsed, json: boolean): Promi
   return report.passed ? 0 : 7
 }
 
+async function commandEffectReview(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const contract = await loadContract(root, chapter)
+  const draft = await readDraft(root, chapter)
+  const config = await loadModelConfig(root)
+  const report = await runEffectReview(root, chapter, contract, draft, config, new AbortController().signal)
+  if (json) outputJson(report)
+  else {
+    console.log(`第 ${chapter} 章阅读效果审查（仅建议，不阻断定稿）`)
+    console.log(report.summary)
+    for (const finding of report.findings) {
+      console.log(`- [${finding.severity}] ${finding.dimension}: ${finding.description}`)
+    }
+  }
+  return 0
+}
+
 async function commandRevise(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const chapter = parseChapter(parsed.positionals[0])
   const rawFindings = optionalString(parsed, 'findings')
@@ -1187,6 +1207,7 @@ function printHelp(): void {
   weave extract <chapter>
   weave audit <chapter>
   weave review <chapter> [--waive-warnings --waive-reason <text>]
+  weave effect-review <chapter>
   weave revise <chapter> --findings <id,...>
   weave merge <chapter> --revision <id> [--choices p001=base|revision|manual]
   weave recheck <chapter>

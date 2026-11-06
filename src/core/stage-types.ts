@@ -1,6 +1,6 @@
 import type { LedgerBelief, LedgerFact, LoopChange, RunUsage } from './types.ts'
 
-export type StageKind = 'content-check' | 'extraction' | 'audit' | 'review' | 'timeline'
+export type StageKind = 'content-check' | 'extraction' | 'audit' | 'review' | 'effect-review' | 'timeline'
 
 export interface EvidenceSpan {
   sourceId: string

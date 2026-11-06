@@ -23,6 +23,7 @@ export interface ModelConfig {
   snapshotEvery: number
   extractionModel?: string
   reviewModel?: string
+  effectReviewModel?: string
   /** Transparent retries allowed only before the first streamed delta. */
   maxRetries?: number
   retryBaseMs?: number
