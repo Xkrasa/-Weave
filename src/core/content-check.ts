@@ -69,6 +69,19 @@ export async function runContentCheck(
     }
   }
 
+  const opening = draft.trim().split(/\n{2,}/)[0] ?? ''
+  const openingSignals = /[“”"]/.test(opening)
+    || contract.characters.some(name => opening.includes(name))
+  const settingWords = (opening.match(/风|雨|雾|雪|云|光|天|海|山|街|屋|灯|气味|声音|潮|水|树|夜|晨|石|墙/g) ?? []).length
+  if (!openingSignals && settingWords >= 3 && opening.length >= 30) {
+    findings.push({
+      severity: 'warning',
+      code: 'ENVIRONMENT_OPENING',
+      message: '开篇连续铺陈环境，没有人物动作、对话或具体问题；读者可能在这里流失',
+      quote: [...opening].slice(0, 40).join(''),
+    })
+  }
+
   const tail = draft.trim()
   if (tail.length > 10 && !/[。！？…～—”」』）)】]$/.test(tail)) {
     findings.push({

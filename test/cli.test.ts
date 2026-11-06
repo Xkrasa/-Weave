@@ -2920,6 +2920,7 @@ test('prompt renderers switch without changing materials, and stable layers stay
     const firstPayload = parseJson<{ renderer: string; layers: { stable: string; chapter: string } }>(first.stdout)
     assert.equal(firstPayload.renderer, 'mission')
     const missionBody = JSON.stringify(model.requests[0])
+    assert.ok(missionBody.includes('环境描写'))
     assert.ok(missionBody.includes('【本章任务】'))
     assert.ok(missionBody.includes('【这一章要发生的事】'))
     assert.ok(missionBody.includes('必须发生：'))
@@ -3066,6 +3067,34 @@ test('content check blocks prose that ends mid-sentence', async () => {
 
     await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), P05_DRAFT)
     assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('content check warns when a chapter opens with an environment block', async () => {
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload()])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    await writeFile(
+      path.join(dir, 'chapters', 'drafts', '001.md'),
+      '风从海面压过来，带着铁锈和柴油味。天还没黑透，西边云层低矮，只剩一条黄线。\n\n林岚把帆布包抱在胸前。\n',
+    )
+    const warned = await runCli(dir, ['check', '1', '--json'])
+    assert.equal(warned.code, 0, warned.stderr)
+    const warnedPayload = parseJson<{ findings: Array<{ code: string; severity: string }> }>(warned.stdout)
+    assert.ok(warnedPayload.findings.some(item => item.code === 'ENVIRONMENT_OPENING' && item.severity === 'warning'))
+
+    await writeFile(
+      path.join(dir, 'chapters', 'drafts', '001.md'),
+      '林岚把帆布包抱在胸前，走进仓库。\n\n风从海面压过来，带着铁锈和柴油味。\n',
+    )
+    const clean = await runCli(dir, ['check', '1', '--json'])
+    assert.equal(clean.code, 0, clean.stderr)
+    const cleanPayload = parseJson<{ findings: Array<{ code: string }> }>(clean.stdout)
+    assert.equal(cleanPayload.findings.some(item => item.code === 'ENVIRONMENT_OPENING'), false)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
