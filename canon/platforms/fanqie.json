@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "platform": "fanqie",
+  "version": 1,
+  "verifiedOn": "2026-10-29",
+  "scope": "番茄长篇小说；发布字段以 Web 创建作品页面和上游核验记录为限，不把经验节奏当成平台算法",
+  "audience": ["手机阅读用户", "偏好明确目标、及时反馈和较低理解门槛的读者"],
+  "sources": [
+    {
+      "id": "oh-story-fanqie-publish",
+      "url": "https://github.com/zenstory-ai/oh-story-claudecode/blob/aa0f874362504c715b8efaec7938df87e70a4742/skills/story-publish/references/fanqie.md",
+      "kind": "upstream-reference",
+      "verifiedOn": "2026-10-29",
+      "note": "上游汇总的番茄作家帮助中心与 Web 创建作品弹窗核验；仍需以作者当前后台为准"
+    },
+    {
+      "id": "oh-story-fanqie-rubric",
+      "url": "https://github.com/zenstory-ai/oh-story-claudecode/blob/aa0f874362504c715b8efaec7938df87e70a4742/skills/story-review/references/rubrics/fanqie.md",
+      "kind": "soft-rubric",
+      "verifiedOn": "2026-11-06",
+      "note": "只作软效果维度参考，不使用固定配额或完读率断言"
+    }
+  ],
+  "reviewFocus": [
+    "开篇是否快速建立具体异常或冲突",
+    "章末是否留下具体翻页问题",
+    "题材与核心卖点是否持续兑现",
+    "手机端段落和信息量是否易读",
+    "情绪铺垫是否获得具体反馈"
+  ],
+  "publish": {
+    "title": { "required": true, "maxChars": 15 },
+    "signingMode": { "required": true, "choices": ["连载模式", "完本模式"], "requiresAccountReview": true },
+    "targetAudience": { "required": false, "choices": ["男频", "女频"], "requiresExplicitAuthorChoice": true },
+    "protagonists": { "required": false, "maxPerPerson": 5, "maxPeople": 2 },
+    "synopsis": { "required": false, "maxChars": 500, "minimumUnverified": true },
+    "readingTags": { "requiresTargetAudience": true, "mainCategoryRequired": true, "mainCategorySingleChoice": true, "lockedAfterSigning": true },
+    "contentTags": { "minimumRequired": false },
+    "cover": { "required": false, "width": 600, "height": 800, "maxBytes": 5242880, "requiresTitleAndPenName": true }
+  },
+  "pendingPlatformVerification": [
+    "App 端规则与界面",
+    "不同账号等级下的字段与签约模式",
+    "留空是否被拦截及实际提交结果",
+    "作品简介是否存在 50 字下限",
+    "阅读标签与内容标签的当前完整候选"
+  ]
+}

@@ -84,6 +84,9 @@ import {
   type ReaderPromiseBook,
 } from './core/reader-promises.ts'
 import { approvePlan, listPlans, parsePlanKind } from './core/planning.ts'
+import { listPlatformProfiles, loadPlatformProfile } from './core/platform-profiles.ts'
+import { compareHotspots, importHotspot, listHotspots, readHotspot, topicCandidates } from './core/hotspots.ts'
+import { buildPublishDocument, validatePublishMarkdown } from './core/publish.ts'
 import { usageSummary } from './core/usage.ts'
 import {
   approvePreference,
@@ -171,6 +174,12 @@ async function main(): Promise<number> {
       return commandPlan(root, parsed, json)
     case 'promise':
       return commandPromise(root, parsed, json)
+    case 'platform':
+      return commandPlatform(root, parsed, json)
+    case 'hotspot':
+      return commandHotspot(root, parsed, json)
+    case 'publish':
+      return commandPublish(root, parsed, json)
     case 'outline':
       return commandOutline(root, parsed, json)
     case 'ui':
@@ -240,6 +249,8 @@ async function main(): Promise<number> {
 
 async function commandInit(parsed: Parsed, json: boolean): Promise<number> {
   const dir = path.resolve(parsed.positionals[0] ?? '.')
+  const platform = optionalString(parsed, 'platform')
+  if (platform && !['fanqie', 'qidian', 'generic'].includes(platform)) throw usageError('--platform 只能是 fanqie、qidian 或 generic')
   const result = await initProject(dir, {
     title: optionalString(parsed, 'title'),
     language: optionalString(parsed, 'language'),
@@ -250,6 +261,7 @@ async function commandInit(parsed: Parsed, json: boolean): Promise<number> {
     contextWindow: optionalNumber(parsed, 'context-window'),
     maxOutputTokens: optionalNumber(parsed, 'max-output'),
     snapshotEvery: optionalNumber(parsed, 'snapshot-every'),
+    platform: platform as 'fanqie' | 'qidian' | 'generic' | undefined,
     workflowVersion: parseWorkflow(parsed),
   })
   if (json) {
@@ -571,6 +583,104 @@ async function commandPromise(root: string, parsed: Parsed, json: boolean): Prom
     default:
       throw usageError('用法：weave promise set|approve|list|show|payoff|extract|confirm|abandon')
   }
+}
+
+async function commandPlatform(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0] ?? 'list'
+  if (action === 'list') {
+    const profiles = await listPlatformProfiles(root)
+    if (json) outputJson({ profiles })
+    else for (const profile of profiles) console.log(profile)
+    return 0
+  }
+  if (action === 'show') {
+    const profile = await loadPlatformProfile(root, parsed.positionals[1] ?? 'fanqie')
+    if (json) outputJson(profile)
+    else console.log(JSON.stringify(profile, null, 2))
+    return 0
+  }
+  throw usageError('用法：weave platform list|show <fanqie>')
+}
+
+async function commandHotspot(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0]
+  switch (action) {
+    case 'import': {
+      const file = parsed.positionals[1]
+      if (!file) throw usageError('用法：weave hotspot import <file> --captured-at <date> --ranking <name> [--metric <name>] [--channel <name>] [--id <id>]')
+      const snapshot = await importHotspot(root, file, {
+        capturedAt: requiredString(parsed, 'captured-at'),
+        ranking: requiredString(parsed, 'ranking'),
+        channel: optionalString(parsed, 'channel'),
+        metricName: optionalString(parsed, 'metric'),
+        sampling: optionalString(parsed, 'sampling'),
+        snapshotId: optionalString(parsed, 'id'),
+        ...(optionalString(parsed, 'filter') ? { filters: { custom: parsed.flags.filter as string } } : {}),
+      })
+      if (json) outputJson({ ok: true, snapshot })
+      else console.log(`已导入热点快照 ${snapshot.snapshotId}：${snapshot.entries.length} 条；数据质量警告 ${snapshot.dataQuality.warnings.length} 条`)
+      return 0
+    }
+    case 'list': {
+      const snapshots = await listHotspots(root)
+      if (json) outputJson({ snapshots })
+      else for (const snapshot of snapshots) console.log(`${snapshot.snapshotId}\t${snapshot.capturedAt}\t${snapshot.scope.ranking}\t${snapshot.entryCount} 条`)
+      return 0
+    }
+    case 'show': {
+      const snapshotId = parsed.positionals[1]
+      if (!snapshotId) throw usageError('用法：weave hotspot show <snapshotId>')
+      const snapshot = await readHotspot(root, snapshotId)
+      if (json) outputJson(snapshot)
+      else console.log(JSON.stringify(snapshot, null, 2))
+      return 0
+    }
+    case 'compare': {
+      const previous = parsed.positionals[1]
+      const current = parsed.positionals[2]
+      if (!previous || !current) throw usageError('用法：weave hotspot compare <previousId> <currentId>')
+      const report = await compareHotspots(root, previous, current)
+      if (json) outputJson(report)
+      else console.log(JSON.stringify(report, null, 2))
+      return 0
+    }
+    case 'candidates': {
+      const snapshotId = parsed.positionals[1]
+      if (!snapshotId) throw usageError('用法：weave hotspot candidates <snapshotId>')
+      const candidates = await topicCandidates(root, snapshotId)
+      if (json) outputJson({ candidates })
+      else for (const candidate of candidates) console.log(`${candidate.value}\t${candidate.sampleCount} 本\t${candidate.note}`)
+      return 0
+    }
+    default:
+      throw usageError('用法：weave hotspot import|list|show|compare|candidates')
+  }
+}
+
+async function commandPublish(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0]
+  if (action === 'build') {
+    const result = await buildPublishDocument(root)
+    if (json) outputJson({ ok: result.validation.fail.length === 0, ...result })
+    else {
+      console.log(`发布资料候选：${result.path}`)
+      for (const warning of result.validation.warn) console.log(`- ${warning}`)
+      for (const failure of result.validation.fail) console.error(`- ${failure}`)
+    }
+    return result.validation.fail.length === 0 ? 0 : 3
+  }
+  if (action === 'validate') {
+    const file = parsed.positionals[1]
+    if (!file) throw usageError('用法：weave publish validate <file>')
+    const validation = await validatePublishMarkdown(root, file)
+    if (json) outputJson({ ok: validation.fail.length === 0, ...validation })
+    else {
+      for (const warning of validation.warn) console.log(`- ${warning}`)
+      for (const failure of validation.fail) console.error(`- ${failure}`)
+    }
+    return validation.fail.length === 0 ? 0 : 3
+  }
+  throw usageError('用法：weave publish build|validate <file>')
 }
 
 async function commandOutline(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -1610,7 +1720,7 @@ function printHelp(): void {
   console.log(`Weave 0.1.0
 
 用法：
-  weave init [dir] --title <name> --model <model> --base-url <url> [--snapshot-every <n>] [--workflow p0|p05]
+  weave init [dir] --title <name> --model <model> --base-url <url> [--snapshot-every <n>] [--workflow p0|p05] [--platform fanqie|qidian|generic]
   weave status
   weave contract show|set <chapter> [--file <path>]
   weave contract check <chapter> | --all
@@ -1623,6 +1733,10 @@ function printHelp(): void {
   weave promise set --file <path> | approve | list | show <promiseId>
   weave promise payoff <promiseId> --chapter <n> --quote <text> [--occurrence <n>]
   weave promise extract <chapter> | confirm <candidateId> | abandon <promiseId> --reason <text>
+  weave platform list|show <fanqie>
+  weave hotspot import <file> --captured-at <date> --ranking <name> [--metric <name>] [--channel <name>] [--id <id>]
+  weave hotspot list|show <snapshotId>|compare <previousId> <currentId>|candidates <snapshotId>
+  weave publish build|validate <file>
   weave outline status|generate <from> [--count <n>]|show|check|apply|approve <chapter>
   weave method list|show <id>|candidates|approve <id>|route <chapter> [--platform long-form|short-form|generic|qidian|fanqie] [--max-tokens <n>]
   weave method history <chapter>

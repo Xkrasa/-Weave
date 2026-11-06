@@ -4,7 +4,7 @@ import type { ReviewReport } from './stage-types.ts'
 import { listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
 import { loadContract } from './contract.ts'
 import { loadStage, readDraft } from './stages.ts'
-import { projectPaths } from './project.ts'
+import { loadProject, projectPaths } from './project.ts'
 import { loadStyleConstitution } from './style.ts'
 
 export interface MethodModule {
@@ -117,7 +117,7 @@ export async function selectMethods(
   const contract = await loadContract(root, chapter)
   const review = await loadStage<ReviewReport>(root, 'review', chapter)
   const purpose = options.purpose ?? 'write'
-  const platform = options.platform ?? 'long-form'
+  const platform = options.platform ?? (await loadProject(root)).platform ?? 'long-form'
   const candidateModules = (await loadMethods(root)).filter(module => {
     if (purpose !== 'rewrite' && purpose !== 'route' && /revision/.test(module.scope.toLowerCase())) {
       return false

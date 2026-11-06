@@ -483,6 +483,7 @@ async function runSeed(
   const init = await runCli(projectDir, [
     'init', '.', '--title', seed.title, '--model', options.model,
     '--base-url', options.baseUrl, '--workflow', 'p0',
+    ...(seed.platform ? ['--platform', seed.platform] : []),
   ])
   if (init.code !== 0) {
     errors.push(`init: ${init.stderr || init.stdout}`)

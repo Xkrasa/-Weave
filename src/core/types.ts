@@ -8,6 +8,8 @@ export interface ProjectConfig {
   language: string
   targetWords: number
   chapterWords: number
+  /** Optional target platform used only to select soft review and method profiles. */
+  platform?: 'fanqie' | 'qidian' | 'generic'
   createdAt: string
 }
 

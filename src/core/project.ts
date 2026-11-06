@@ -104,6 +104,7 @@ export interface InitOptions {
   contextWindow?: number
   maxOutputTokens?: number
   snapshotEvery?: number
+  platform?: 'fanqie' | 'qidian' | 'generic'
   workflowVersion?: 1 | 2
 }
 
@@ -123,6 +124,7 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
     language: options.language?.trim() || 'zh-CN',
     targetWords: positiveInt(options.targetWords, 1_000_000, 'targetWords'),
     chapterWords: positiveInt(options.chapterWords, 3000, 'chapterWords'),
+    ...(options.platform ? { platform: options.platform } : {}),
     createdAt: new Date().toISOString(),
   }
   const config: ModelConfig = {

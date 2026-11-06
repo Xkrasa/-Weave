@@ -8,6 +8,8 @@ import { validationError } from './errors.ts'
 import { collectLoopState } from './story-ledger.ts'
 import { loadExpressionLintConfig, runExpressionLint } from './expression-lint.ts'
 import { readerPromiseFindings } from './reader-promises.ts'
+import { loadProject } from './project.ts'
+import { loadPlatformProfile, platformReviewPrompt } from './platform-profiles.ts'
 
 export interface EffectFinding {
   findingId: string
@@ -61,6 +63,10 @@ export async function runEffectReview(
 ): Promise<EffectReviewReport> {
   const taskConfig = resolveTaskConfig(config, 'effectReview')
   const model = taskConfig.model
+  const project = await loadProject(root)
+  const platformPrompt = project.platform === 'fanqie'
+    ? platformReviewPrompt(await loadPlatformProfile(root, 'fanqie'))
+    : ''
   const lint = await lintFindings(root, chapter, contract, draft)
   const prompt = [
     `第 ${chapter} 章合同：`,
@@ -70,6 +76,7 @@ export async function runEffectReview(
       '本章 readerIntent 是软目标：请对照 purpose 与 payoff 判断读者实际获得，引用正文给出 warning/info；未达意图不自动升级为 blocking。',
       '',
     ] : []),
+    ...(platformPrompt ? [platformPrompt, ''] : []),
     '正文：',
     draft,
     '',
