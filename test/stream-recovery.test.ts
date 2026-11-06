@@ -37,7 +37,7 @@ function parseJson<T>(stdout: string): T {
   return JSON.parse(stdout.slice(start, end + 1)) as T
 }
 
-type Behaviour = 'ok' | '429' | '500' | 'break'
+type Behaviour = 'ok' | '429' | '500' | 'break' | 'empty'
 
 class ScriptedModel {
   readonly requests: Array<Record<string, unknown>> = []
@@ -90,6 +90,11 @@ class ScriptedModel {
         return
       }
       response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+      if (behaviour === 'empty') {
+        response.write(`data: ${JSON.stringify({ usage: { prompt_tokens: 10, completion_tokens: 0, total_tokens: 10 } })}\n\n`)
+        response.end('data: [DONE]\n\n')
+        return
+      }
       if (behaviour === 'break') {
         response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: '半' } }] })}\n\n`)
         setTimeout(() => response.destroy(), 10)
@@ -227,6 +232,41 @@ test('resume rejects a run from another chapter or without a partial', async () 
     const payload = parseJson<{ error: { message: string } }>(missing.stdout)
     assert.match(payload.error.message, /未找到运行记录/)
     assert.equal(model.requests.length, 0)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('retries a reasoning-only or empty response before surfacing failure', async () => {
+  const model = new ScriptedModel(['empty', 'ok'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    const written = await runCli(dir, ['write', '1', '--json'])
+    assert.equal(written.code, 0, written.stdout + written.stderr)
+    assert.equal(model.requests.length, 2)
+    const payload = parseJson<{ attempts: Array<{ status: string }> }>(written.stdout)
+    assert.deepEqual(payload.attempts.map(item => item.status), ['retry', 'ok'])
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('empty responses exhaust the retry budget without writing a draft', async () => {
+  const model = new ScriptedModel(['empty', 'empty', 'empty', 'empty'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    const written = await runCli(dir, ['write', '1', '--json'])
+    assert.equal(written.code, 5)
+    assert.equal(model.requests.length, 4)
+    const run = await latestRun(dir)
+    assert.equal(run.status, 'failed')
+    assert.deepEqual((run.attempts ?? []).map(item => (item as { status: string }).status), ['retry', 'retry', 'retry', 'failed'])
+    const drafts = await readdir(path.join(dir, 'chapters', 'drafts'))
+    assert.equal(drafts.filter(name => name.endsWith('.md')).length, 0)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })

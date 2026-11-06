@@ -97,6 +97,8 @@ export async function streamChapter(input: {
           input.onDelta(text)
         },
       })
+      // Reasoning-only or silently truncated responses produce no prose; retry is safe here.
+      if (!emitted) throw new AttemptFailure('模型返回了空正文', true)
       attempts.push({ attempt, status: 'ok', startedAt })
       return { usage, attempts }
     } catch (error) {
@@ -186,6 +188,7 @@ async function streamOnce(input: {
         if (result.usage) usage = result.usage
       }
     }
+    buffer += decoder.decode()
     if (buffer.trim()) {
       const result = parseEvent(buffer)
       if (result.text) input.onDelta(result.text)
