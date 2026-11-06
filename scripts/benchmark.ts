@@ -736,6 +736,14 @@ function renderReport(report: BenchReport): string {
   return `${lines.join('\n')}\n`
 }
 
+
+/** Final prose is authoritative; drafts are cleared after finalize. */
+async function chapterText(runDir: string, seed: string, chapter: number): Promise<string> {
+  const stem = String(chapter).padStart(3, '0')
+  const final = await readFile(path.join(runDir, seed, 'chapters', 'final', `${stem}.md`), 'utf8').catch(() => null)
+  return final ?? ''
+}
+
 async function commandPairs(flags: Record<string, string | true>): Promise<number> {
   const a = flagString(flags, 'a')
   const b = flagString(flags, 'b')
@@ -759,12 +767,16 @@ async function commandPairs(flags: Record<string, string | true>): Promise<numbe
       const left = swapped ? chapterB : chapterA
       const right = swapped ? chapterA : chapterB
       const pairId = `${runA.seed}-ch${chapterA.chapter}`
+      const leftText = await chapterText(a, runA.seed, chapterA.chapter)
+      const rightText = await chapterText(b, runB.seed, chapterA.chapter)
+      // Failed or missing chapters are not scoreable; leave them out instead of pairing empty text.
+      if (!leftText.trim() || !rightText.trim()) continue
       pairs.push({
         pairId,
         seed: runA.seed,
         chapter: chapterA.chapter,
-        left: (await readFile(path.join(a, left.draftPath), 'utf8').catch(() => '')),
-        right: (await readFile(path.join(a, right.draftPath), 'utf8').catch(() => '')),
+        left: leftText,
+        right: rightText,
       })
       mapping.push({ pairId, left: swapped ? 'b' : 'a', right: swapped ? 'a' : 'b' })
     }

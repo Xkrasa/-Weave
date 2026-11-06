@@ -111,6 +111,12 @@ test('benchmark pairs anonymizes order and score recovers the configured winner'
     assert.equal(pairs.code, 0, pairs.stderr)
     const built = JSON.parse(pairs.stdout.trim()) as { pairs: number }
     assert.equal(built.pairs, 4)
+    const pairPayload = JSON.parse(await readFile(path.join(pairsDir, 'pairs.json'), 'utf8')) as Array<{
+      left: string
+      right: string
+    }>
+    assert.ok(pairPayload.every(pair => pair.left.trim().length > 0 && pair.right.trim().length > 0),
+      'pairs must carry final prose, not empty strings')
 
     const pairFile = path.join(pairsDir, 'pairs.json')
     const mapping = JSON.parse(await readFile(path.join(pairsDir, 'mapping.json'), 'utf8')) as {
