@@ -34,6 +34,7 @@ import { selectMethods, styleCheck } from './methods.ts'
 import { approvePlan, listPlans, parsePlanKind } from './planning.ts'
 import { applyCandidate, approveCandidate, candidateValidation, outlineReport } from './outline.ts'
 import { runEffectReview } from './effect-review.ts'
+import { evalReport, listEvalSessions, nextEvalPair, recordEvalScore, type EvalScore } from './blind-eval.ts'
 import {
   approvePreference,
   disablePreference,
@@ -205,6 +206,26 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
   if (chapter && request.method === 'GET' && parts[3] === 'history') {
     sendJson(response, 200, await chapterHistory(root, chapter))
     return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/evals') {
+    sendJson(response, 200, { sessions: await listEvalSessions(root) })
+    return
+  }
+  if (parts[1] === 'evals' && parts[2]) {
+    const sessionId = decodeURIComponent(parts[2])
+    if (request.method === 'GET' && parts[3] === 'next') {
+      sendJson(response, 200, await nextEvalPair(root, sessionId, url.searchParams.get('reader') ?? 'author'))
+      return
+    }
+    if (request.method === 'POST' && parts[3] === 'scores') {
+      const body = await readJsonBody<Partial<EvalScore>>(request)
+      sendJson(response, 200, await recordEvalScore(root, sessionId, body))
+      return
+    }
+    if (request.method === 'GET' && parts[3] === 'report') {
+      sendJson(response, 200, await evalReport(root, sessionId, { force: url.searchParams.get('force') === '1' }))
+      return
+    }
   }
   if (request.method === 'GET' && url.pathname === '/api/plans') {
     sendJson(response, 200, { plans: await listPlans(root) })

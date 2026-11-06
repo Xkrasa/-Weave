@@ -15,6 +15,7 @@
         <span id="project-subtitle" class="muted"></span>
       </div>
       <div class="top-actions">
+        <button class="ghost" id="btn-eval">盲评</button>
         <button class="ghost" id="btn-search">搜索</button>
         <button class="ghost" id="btn-deconstruct">拆书</button>
         <button class="ghost" id="btn-doctor">体检</button>
@@ -108,6 +109,38 @@
           <input id="search-time" placeholder="时间">
         </div>
         <div id="search-results" class="results"></div>
+      </div>
+    </div>
+
+    <div id="eval-view" class="eval-view hidden">
+      <div class="eval-head">
+        <div>
+          <div class="eyebrow">盲评 · 只看正文，不看来源</div>
+          <strong id="eval-title"></strong>
+          <span id="eval-progress" class="muted small"></span>
+        </div>
+        <div class="eval-actions">
+          <button id="eval-report" class="ghost">查看结果</button>
+          <button id="eval-close" class="icon">×</button>
+        </div>
+      </div>
+      <div class="eval-columns">
+        <section class="eval-col">
+          <div class="eval-col-head"><strong>左</strong><button data-eval-stop="Left" class="ghost">选中文字 → 标为弃读点</button></div>
+          <div id="eval-stop-Left" class="eval-stop muted small"></div>
+          <article id="eval-left" class="eval-text"></article>
+        </section>
+        <section class="eval-col">
+          <div class="eval-col-head"><strong>右</strong><button data-eval-stop="Right" class="ghost">选中文字 → 标为弃读点</button></div>
+          <div id="eval-stop-Right" class="eval-stop muted small"></div>
+          <article id="eval-right" class="eval-text"></article>
+        </section>
+      </div>
+      <div class="eval-foot">
+        <input id="eval-note" placeholder="一句话理由（可选）：例如“右边开头就进冲突”" autocomplete="off">
+        <button data-eval-winner="left" class="accent">更想继续读左边</button>
+        <button data-eval-winner="tie">差不多</button>
+        <button data-eval-winner="right" class="accent">更想继续读右边</button>
       </div>
     </div>
 

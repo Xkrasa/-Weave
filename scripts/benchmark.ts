@@ -52,12 +52,20 @@ interface SeedChapter {
   nextLink: string
 }
 
+interface SeedEvaluation {
+  focus: string[]
+  materialPolicy: string
+  holdout: boolean
+}
+
 interface Seed {
   id: string
   kind: 'craft' | 'longitudinal'
   title: string
   genre: string
   audience: string
+  platform?: 'fanqie' | 'qidian' | 'generic'
+  evaluation?: SeedEvaluation
   promise: string
   premise: string
   world: string
@@ -324,6 +332,8 @@ interface ChapterRecord {
 interface SeedRun {
   seed: string
   kind: Seed['kind']
+  platform?: Seed['platform']
+  evaluation?: SeedEvaluation
   config: string
   ablations: Record<string, string>
   mode: 'fake' | 'real'
@@ -433,6 +443,8 @@ async function runSeed(
   const record: SeedRun = {
     seed: seed.id,
     kind: seed.kind,
+    platform: seed.platform ?? 'generic',
+    ...(seed.evaluation ? { evaluation: seed.evaluation } : {}),
     config: options.config,
     ablations: options.ablations,
     mode: options.mode,
@@ -643,6 +655,8 @@ interface BenchReport {
   seeds: Array<{
     seed: string
     kind: Seed['kind']
+    platform?: Seed['platform']
+    evaluation?: SeedEvaluation
     chapters: number
     writeMs: number
     totalMs: number
@@ -687,6 +701,8 @@ function buildReport(
     seeds: runs.map(run => ({
       seed: run.seed,
       kind: run.kind,
+      platform: run.platform ?? 'generic',
+      ...(run.evaluation ? { evaluation: run.evaluation } : {}),
       chapters: run.chapters.length,
       writeMs: run.durations.writeMs,
       totalMs: run.durations.totalMs,
@@ -719,11 +735,21 @@ function renderReport(report: BenchReport): string {
     '',
     '## Seeds',
     '',
-    '| seed | kind | chapters | chars | tokens | write ms | errors | retried |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- |',
-    ...report.seeds.map(seed => `| ${seed.seed} | ${seed.kind} | ${seed.chapters} | ${seed.characters} | ${seed.estimatedTokens} | ${seed.writeMs} | ${seed.errors} | ${seed.retried} |`),
+    '| seed | platform | kind | chapters | chars | tokens | write ms | errors | retried |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    ...report.seeds.map(seed => `| ${seed.seed} | ${seed.platform ?? 'generic'} | ${seed.kind} | ${seed.chapters} | ${seed.characters} | ${seed.estimatedTokens} | ${seed.writeMs} | ${seed.errors} | ${seed.retried} |`),
     '',
   ]
+  for (const seed of report.seeds.filter(item => item.evaluation)) {
+    lines.push(
+      `## Evaluation — ${seed.seed}`,
+      '',
+      `- platform: ${seed.platform ?? 'generic'} · holdout: ${seed.evaluation!.holdout}`,
+      `- focus: ${seed.evaluation!.focus.join(' / ')}`,
+      `- materials: ${seed.evaluation!.materialPolicy}`,
+      '',
+    )
+  }
   if (report.errors.length > 0) {
     lines.push('## Errors', '', ...report.errors.map(error => `- ${error.seed}: ${error.error}`), '')
   }
@@ -831,7 +857,10 @@ async function commandScore(flags: Record<string, string | true>): Promise<numbe
   })
   const byId = new Map(mapping.entries.map(entry => [entry.pairId, entry]))
   const tally = { a: 0, b: 0, tie: 0, unknown: 0 }
-  for (const score of scores) {
+  // `weave eval` appends re-judgements; only the latest score per (pair, reader) counts.
+  const latest = new Map<string, (typeof scores)[number]>()
+  for (const score of scores) latest.set(`${score.pairId}\u0000${score.reader ?? ''}`, score)
+  for (const score of latest.values()) {
     const entry = byId.get(score.pairId)
     if (!entry) { tally.unknown += 1; continue }
     if (score.winner === 'tie') { tally.tie += 1; continue }

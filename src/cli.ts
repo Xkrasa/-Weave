@@ -63,6 +63,7 @@ import {
 } from './core/search.ts'
 import { deconstructFile } from './core/deconstruct.ts'
 import { startUiServer } from './core/ui-server.ts'
+import { evalReport, importEvalPairs, listEvalSessions } from './core/blind-eval.ts'
 import { approvePlan, listPlans, parsePlanKind } from './core/planning.ts'
 import { usageSummary } from './core/usage.ts'
 import {
@@ -207,6 +208,8 @@ async function main(): Promise<number> {
       return commandUsage(root, json)
     case 'preference':
       return commandPreference(root, parsed, json)
+    case 'eval':
+      return commandEval(root, parsed, json)
     default:
       throw usageError(`未知命令：${command}`)
   }
@@ -1256,6 +1259,40 @@ async function commandExport(root: string, parsed: Parsed, json: boolean): Promi
   return 0
 }
 
+async function commandEval(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0]
+  switch (action) {
+    case 'import': {
+      const dir = parsed.positionals[1]
+      if (!dir) throw usageError('用法：weave eval import <pairsDir> [--id <sessionId>] [--title <text>]')
+      const summary = await importEvalPairs(root, dir, {
+        sessionId: optionalString(parsed, 'id'),
+        title: optionalString(parsed, 'title'),
+      })
+      if (json) outputJson({ ok: true, session: summary })
+      else console.log(`已导入盲评会话 ${summary.sessionId}：${summary.total} 对；在 weave ui 顶栏「盲评」中阅读`)
+      return 0
+    }
+    case 'list': {
+      const sessions = await listEvalSessions(root)
+      if (json) outputJson({ ok: true, sessions })
+      else if (sessions.length === 0) console.log('还没有盲评会话；用 weave eval import <pairsDir> 导入')
+      else for (const item of sessions) console.log(`${item.sessionId}  ${item.scored}/${item.total}  ${item.title}`)
+      return 0
+    }
+    case 'report': {
+      const id = parsed.positionals[1]
+      if (!id) throw usageError('用法：weave eval report <sessionId> [--force]')
+      const report = await evalReport(root, id, { force: parsed.flags.force === true })
+      if (json) outputJson({ ok: true, report })
+      else console.log(JSON.stringify(report, null, 2))
+      return 0
+    }
+    default:
+      throw usageError('用法：weave eval import <pairsDir>|list|report <sessionId> [--force]')
+  }
+}
+
 async function commandPreference(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const action = parsed.positionals[0] ?? 'status'
   if (action === 'status') {
@@ -1446,6 +1483,8 @@ function printHelp(): void {
   weave rebuild [--projection all|content|ledger|search] [--from <chapter>] [--force]
   weave export --format merged|split|txt [--platform generic|qidian|fanqie|custom] [--count-mode cjk|all]
   weave preference status|review|approve <id>|disable <id>|clear
+  weave eval import <pairsDir> [--id <sessionId>] [--title <text>]
+  weave eval list | report <sessionId> [--force]
   weave usage
   weave doctor
 

@@ -139,3 +139,33 @@ test('benchmark pairs anonymizes order and score recovers the configured winner'
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('benchmark records Fanqie evaluation metadata without turning holdout into a score', async () => {
+  const out = await tempDir()
+  try {
+    const result = await run(['run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes', '--out', out])
+    assert.equal(result.code, 0, result.stderr)
+    const report = JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8')) as {
+      seeds: Array<{
+        seed: string
+        platform?: string
+        evaluation?: { focus: string[]; materialPolicy: string; holdout: boolean }
+      }>
+    }
+    assert.equal(report.seeds[0]?.seed, 'fanqie-rewind-ten-minutes')
+    assert.equal(report.seeds[0]?.platform, 'fanqie')
+    assert.equal(report.seeds[0]?.evaluation?.holdout, true)
+    assert.ok(report.seeds[0]?.evaluation?.focus.some(item => item.includes('对方反应')))
+    assert.match(report.seeds[0]?.evaluation?.materialPolicy ?? '', /不注入任何参考作品原文/)
+
+    const runFile = JSON.parse(await readFile(path.join(out, 'fanqie-rewind-ten-minutes.run.json'), 'utf8')) as {
+      platform?: string
+      evaluation?: { holdout: boolean }
+    }
+    assert.equal(runFile.platform, 'fanqie')
+    assert.equal(runFile.evaluation?.holdout, true)
+    assert.equal('winRateA' in report, false)
+  } finally {
+    await rm(out, { recursive: true, force: true })
+  }
+})

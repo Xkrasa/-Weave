@@ -10,6 +10,7 @@ const state = {
   waivers: [],
   preferences: {},
   writeController: null,
+  eval: null,
 };
 
 const $ = selector => document.querySelector(selector);
@@ -636,6 +637,116 @@ async function showExport() {
   } catch (error) { toast(error.message, true); }
 }
 
+// ---- Blind pairwise reading -------------------------------------------------
+// The page never receives which strategy produced a side; the server keeps mapping sealed.
+
+function evalPath(suffix = '') {
+  return `/api/evals/${encodeURIComponent(state.eval.sessionId)}${suffix}`;
+}
+
+function proseHtml(text) {
+  return String(text || '').split(/\n+/).map(line => line.trim()).filter(Boolean)
+    .map(line => `<p>${escapeHtml(line)}</p>`).join('');
+}
+
+async function showEvalSessions() {
+  try {
+    const payload = await api('/api/evals');
+    if (!payload.sessions.length) {
+      showModal('盲评', '<p class="muted">还没有盲评会话。先用 benchmark 生成匿名对照，再运行 <code>weave eval import &lt;pairsDir&gt;</code> 导入。</p>', [{ label: '关闭', action: closeModal }]);
+      return;
+    }
+    const body = payload.sessions.map(item => `
+      <div class="eval-session">
+        <div><strong>${escapeHtml(item.title)}</strong><div class="muted small">${escapeHtml(item.sessionId)} · 已评 ${item.scored}/${item.total}${item.sealed ? '' : ' · 无 mapping'}</div></div>
+        <div><button data-eval-open="${escapeHtml(item.sessionId)}" class="accent">${item.scored < item.total ? '继续阅读' : '再看一遍'}</button>
+        <button data-eval-result="${escapeHtml(item.sessionId)}">结果</button></div>
+      </div>`).join('');
+    showModal('盲评会话', body, [{ label: '关闭', action: closeModal }]);
+    $$('#modal-body [data-eval-open]').forEach(node => node.addEventListener('click', () => openEval(node.dataset.evalOpen, node.closest('.eval-session').querySelector('strong').textContent)));
+    $$('#modal-body [data-eval-result]').forEach(node => node.addEventListener('click', () => {
+      state.eval = { sessionId: node.dataset.evalResult };
+      showEvalReport().catch(error => toast(error.message, true));
+    }));
+  } catch (error) { toast(error.message, true); }
+}
+
+async function openEval(sessionId, title) {
+  state.eval = { sessionId, title, pair: null, stopLeft: '', stopRight: '' };
+  closeModal();
+  $('#eval-title').textContent = title || sessionId;
+  $('#eval-view').classList.remove('hidden');
+  await loadNextPair().catch(error => toast(error.message, true));
+}
+
+async function loadNextPair() {
+  const payload = await api(evalPath('/next'));
+  state.eval.pair = payload.pair;
+  state.eval.stopLeft = '';
+  state.eval.stopRight = '';
+  $('#eval-note').value = '';
+  $('#eval-stop-Left').textContent = '';
+  $('#eval-stop-Right').textContent = '';
+  $('#eval-progress').textContent = `已评 ${payload.progress.scored}/${payload.progress.total}`;
+  const done = !payload.pair;
+  $$('#eval-view [data-eval-winner], #eval-view [data-eval-stop]').forEach(node => { node.disabled = done; });
+  if (done) {
+    $('#eval-left').innerHTML = '<p class="muted">这一组已经全部评完。</p>';
+    $('#eval-right').innerHTML = '<p class="muted">点“查看结果”解封胜率。</p>';
+    return;
+  }
+  $('#eval-left').innerHTML = proseHtml(payload.pair.left);
+  $('#eval-right').innerHTML = proseHtml(payload.pair.right);
+  $('#eval-left').scrollTop = 0;
+  $('#eval-right').scrollTop = 0;
+}
+
+function markEvalStop(side) {
+  const selection = window.getSelection();
+  const text = selection ? selection.toString().trim() : '';
+  const column = $(side === 'Left' ? '#eval-left' : '#eval-right');
+  if (!text || !selection.anchorNode || !column.contains(selection.anchorNode)) {
+    toast(`先在${side === 'Left' ? '左' : '右'}栏选中你想停下的那一句`, true);
+    return;
+  }
+  state.eval[`stop${side}`] = text;
+  $(`#eval-stop-${side}`).textContent = `弃读点：${text.length > 60 ? `${text.slice(0, 60)}…` : text}`;
+}
+
+async function submitEvalScore(winner) {
+  if (!state.eval?.pair) return;
+  try {
+    await api(evalPath('/scores'), {
+      method: 'POST',
+      body: {
+        pairId: state.eval.pair.pairId,
+        winner,
+        note: $('#eval-note').value,
+        stopLeft: state.eval.stopLeft || undefined,
+        stopRight: state.eval.stopRight || undefined,
+      },
+    });
+    await loadNextPair();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function showEvalReport(force = false) {
+  const report = await api(evalPath(`/report${force ? '?force=1' : ''}`));
+  const labels = report.labels || {};
+  const body = report.revealed
+    ? `<p>已评 ${report.scored}/${report.total}${report.complete ? '' : '（提前解封）'}</p>
+       <p>A（${escapeHtml(labels.a || 'a')}）胜 ${report.wins.a} · B（${escapeHtml(labels.b || 'b')}）胜 ${report.wins.b} · 平 ${report.ties}</p>
+       <p>A 胜率：${report.winRateA === null ? '无决定性结果' : `${Math.round(report.winRateA * 100)}%`}</p>
+       <p>弃读点：A ${report.stopPoints.a ?? 0} 处 · B ${report.stopPoints.b ?? 0} 处</p>
+       <p class="muted small">${escapeHtml(report.note)}</p>`
+    : `<p>已评 ${report.scored}/${report.total}，平 ${report.ties}。</p><p class="muted small">${escapeHtml(report.note)}</p>`;
+  const actions = [{ label: '关闭', action: closeModal }];
+  if (!report.revealed && report.scored > 0) {
+    actions.unshift({ label: '提前解封', action: () => showEvalReport(true).catch(error => toast(error.message, true)) });
+  }
+  showModal('盲评结果', body, actions);
+}
+
 function bind() {
   $('#draft').addEventListener('input', () => {
     state.dirty = true;
@@ -651,6 +762,11 @@ function bind() {
   $('#btn-doctor').addEventListener('click', showDoctor);
   $('#btn-export').addEventListener('click', showExport);
   $('#btn-search').addEventListener('click', openSearch);
+  $('#btn-eval').addEventListener('click', showEvalSessions);
+  $('#eval-close').addEventListener('click', () => $('#eval-view').classList.add('hidden'));
+  $('#eval-report').addEventListener('click', () => showEvalReport().catch(error => toast(error.message, true)));
+  $$('#eval-view [data-eval-winner]').forEach(node => node.addEventListener('click', () => submitEvalScore(node.dataset.evalWinner)));
+  $$('#eval-view [data-eval-stop]').forEach(node => node.addEventListener('click', () => markEvalStop(node.dataset.evalStop)));
   $('#drawer-close').addEventListener('click', () => $('#drawer').classList.add('hidden'));
   $('#modal-close').addEventListener('click', closeModal);
   $('#search-form').addEventListener('submit', event => { event.preventDefault(); runSearch().catch(error => toast(error.message, true)); });
