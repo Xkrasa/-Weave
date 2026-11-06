@@ -69,6 +69,16 @@ export async function runContentCheck(
     }
   }
 
+  const tail = draft.trim()
+  if (tail.length > 10 && !/[。！？…～”」』）)】]$/.test(tail)) {
+    findings.push({
+      severity: 'blocking',
+      code: 'TRUNCATED_ENDING',
+      message: '正文在句中断开（结尾没有终止标点）；可能是输出被截断',
+      quote: [...tail].slice(-12).join(''),
+    })
+  }
+
   const duplicateHits = await countDuplicateSentences(root, chapter, draft)
   if (duplicateHits > 0) {
     findings.push({

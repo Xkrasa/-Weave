@@ -3048,3 +3048,23 @@ test('author preferences learn only from repeated signals and can be disabled', 
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('content check blocks prose that ends mid-sentence', async () => {
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload()])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), '林岚在码头翻开账本。\n\n她停下来，把调')
+    const checked = await runCli(dir, ['check', '1', '--json'])
+    assert.equal(checked.code, 3)
+    const payload = parseJson<{ passed: boolean; findings: Array<{ code: string; severity: string }> }>(checked.stdout)
+    assert.equal(payload.passed, false)
+    assert.ok(payload.findings.some(item => item.code === 'TRUNCATED_ENDING' && item.severity === 'blocking'))
+
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), P05_DRAFT)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
