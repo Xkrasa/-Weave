@@ -753,6 +753,7 @@ async function commandPairs(flags: Record<string, string | true>): Promise<numbe
   const seeds = await readdir(a)
   const pairs: Array<Record<string, unknown>> = []
   const mapping: Array<Record<string, unknown>> = []
+  let skipped = 0
   for (const name of seeds) {
     if (!name.endsWith('.run.json')) continue
     const runA = JSON.parse(await readFile(path.join(a, name), 'utf8')) as SeedRun
@@ -769,8 +770,12 @@ async function commandPairs(flags: Record<string, string | true>): Promise<numbe
       const pairId = `${runA.seed}-ch${chapterA.chapter}`
       const leftText = await chapterText(a, runA.seed, chapterA.chapter)
       const rightText = await chapterText(b, runB.seed, chapterA.chapter)
-      // Failed or missing chapters are not scoreable; leave them out instead of pairing empty text.
-      if (!leftText.trim() || !rightText.trim()) continue
+      // Failed, missing or truncated chapters are not scoreable prose.
+      const MIN_PAIR_CHARS = 200
+      if (leftText.trim().length < MIN_PAIR_CHARS || rightText.trim().length < MIN_PAIR_CHARS) {
+        skipped += 1
+        continue
+      }
       pairs.push({
         pairId,
         seed: runA.seed,
@@ -805,7 +810,7 @@ async function commandPairs(flags: Record<string, string | true>): Promise<numbe
       '',
     ].join('\n'),
   )
-  console.log(JSON.stringify({ ok: true, pairs: pairs.length, outDir, note: 'mapping stays sealed until scores are collected' }, null, 2))
+  console.log(JSON.stringify({ ok: true, pairs: pairs.length, skipped, outDir, note: 'mapping stays sealed until scores are collected' }, null, 2))
   return 0
 }
 
