@@ -423,6 +423,7 @@ async function runSeed(
     apiKey: string
     timeoutMs?: number
     maxOutputTokens?: number
+    renderer?: 'json' | 'mission'
   },
 ): Promise<SeedRun> {
   const startedAt = Date.now()
@@ -480,7 +481,10 @@ async function runSeed(
     if (finalized.code !== 0) errors.push(`prior finalize ${chapter}: ${finalized.stdout}${finalized.stderr}`)
   }
 
-  const env: Record<string, string> = options.apiKey ? { WEAVE_API_KEY: options.apiKey } : {}
+  const env: Record<string, string> = {
+    ...(options.apiKey ? { WEAVE_API_KEY: options.apiKey } : {}),
+    ...(options.renderer ? { WEAVE_PROMPT_RENDERER: options.renderer } : {}),
+  }
   for (const chapter of seed.chapters) {
     await writeContract(projectDir, chapter)
     const check = await runCli(projectDir, ['contract', 'check', String(chapter.chapter), '--json'])
@@ -560,6 +564,11 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
   if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000)) {
     throw new Error('--timeout-ms must be an integer >= 1000')
   }
+  const rendererRaw = flagString(flags, 'prompt-renderer')
+  if (rendererRaw && rendererRaw !== 'json' && rendererRaw !== 'mission') {
+    throw new Error('--prompt-renderer must be json or mission')
+  }
+  const renderer = rendererRaw as 'json' | 'mission' | undefined
   const maxOutputTokens = flagString(flags, 'max-output') ? Number(flagString(flags, 'max-output')) : undefined
   if (maxOutputTokens !== undefined && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 256)) {
     throw new Error('--max-output must be an integer >= 256')
@@ -596,7 +605,7 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
     for (const seed of seeds) {
       const seedBase = mode === 'fake' ? fakeModels.get(seed.id)!.baseUrl : baseUrl
       const run = await runSeed(seed, {
-        outDir, config, ablations, mode, baseUrl: seedBase, model, apiKey, timeoutMs, maxOutputTokens,
+        outDir, config, ablations, mode, baseUrl: seedBase, model, apiKey, timeoutMs, maxOutputTokens, renderer,
       })
       runs.push(run)
       await writeFile(path.join(outDir, `${seed.id}.run.json`), `${JSON.stringify(run, null, 2)}\n`)
@@ -762,6 +771,28 @@ async function commandPairs(flags: Record<string, string | true>): Promise<numbe
   }
   await writeFile(path.join(outDir, 'pairs.json'), `${JSON.stringify(pairs, null, 2)}\n`)
   await writeFile(path.join(outDir, 'mapping.json'), `${JSON.stringify({ a, b, entries: mapping }, null, 2)}\n`)
+  await writeFile(
+    path.join(outDir, 'scores.template.jsonl'),
+    `${mapping.map(entry => JSON.stringify({ pairId: entry.pairId, winner: 'left|right|tie', reader: '', note: '' })).join('\n')}\n`,
+  )
+  await writeFile(
+    path.join(outDir, 'README.md'),
+    [
+      '# 盲评说明',
+      '',
+      '1. 打开 `pairs.json`，只看 `left` / `right`，不要看 `mapping.json`。',
+      '2. 对每一对选择更愿意继续读的一版，写入 `scores.jsonl`（照抄 `scores.template.jsonl` 的格式）。',
+      '3. 主要指标是“愿意继续读”；字数、剧情推进只作辅助。',
+      '4. 收集完成后运行：',
+      '',
+      '```bash',
+      'node scripts/benchmark.ts score --pairs <pairs.json> --scores <scores.jsonl>',
+      '```',
+      '',
+      '`mapping.json` 在评分完成前不要打开；它记录左右分别属于哪次运行。',
+      '',
+    ].join('\n'),
+  )
   console.log(JSON.stringify({ ok: true, pairs: pairs.length, outDir, note: 'mapping stays sealed until scores are collected' }, null, 2))
   return 0
 }
