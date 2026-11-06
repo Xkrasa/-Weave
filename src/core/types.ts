@@ -24,6 +24,8 @@ export interface ModelConfig {
   extractionModel?: string
   reviewModel?: string
   effectReviewModel?: string
+  /** How structured materials are rendered for the model. */
+  promptRenderer?: 'json' | 'mission'
   /** Transparent retries allowed only before the first streamed delta. */
   maxRetries?: number
   retryBaseMs?: number

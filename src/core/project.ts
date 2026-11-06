@@ -137,6 +137,7 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
     snapshotEvery: positiveInt(options.snapshotEvery, 10, 'snapshotEvery'),
     maxRetries: 3,
     retryBaseMs: 800,
+    promptRenderer: 'json',
   }
 
   for (const dirPath of [

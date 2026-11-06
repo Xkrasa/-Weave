@@ -78,6 +78,8 @@ export interface WriteResult {
   run: RunRecord
   draftPath: string
   contextHash: string
+  layers: { stable: string; volume: string; chapter: string; full: string }
+  renderer: string
   estimatedTokens: number
   included: string[]
   omitted: Array<{ sourceId: string; reason: string }>
@@ -183,6 +185,8 @@ export async function writeChapter(
       run: finished,
       draftPath: draft,
       contextHash: context.contextHash,
+      layers: context.layers,
+      renderer: context.renderer,
       estimatedTokens: context.estimatedTokens,
       included: context.included.map(item => item.sourceId),
       omitted: context.omitted,

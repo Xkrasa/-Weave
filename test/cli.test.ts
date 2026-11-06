@@ -2908,3 +2908,38 @@ test('POV knowledge splits critical scene state from compressible background', a
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('prompt renderers switch without changing materials, and stable layers stay stable', async () => {
+  const model = new FakeModel(['第一章正文。', '第二章正文。', '第二章正文（json）。'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    const first = await runCli(dir, ['write', '1', '--json'], { WEAVE_PROMPT_RENDERER: 'mission' })
+    assert.equal(first.code, 0, first.stderr)
+    const firstPayload = parseJson<{ renderer: string; layers: { stable: string; chapter: string } }>(first.stdout)
+    assert.equal(firstPayload.renderer, 'mission')
+    const missionBody = JSON.stringify(model.requests[0])
+    assert.ok(missionBody.includes('【本章任务】'))
+    assert.ok(missionBody.includes('【这一章要发生的事】'))
+    assert.ok(missionBody.includes('必须发生：'))
+    assert.equal(missionBody.includes('"mustHappen"'), false)
+
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+    await setContract(dir, 2, { characters: ['林岚'], pov: '林岚' })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    const second = await runCli(dir, ['write', '2', '--json'], { WEAVE_PROMPT_RENDERER: 'mission' })
+    assert.equal(second.code, 0, second.stderr)
+    const secondPayload = parseJson<{ layers: { stable: string; chapter: string } }>(second.stdout)
+    assert.equal(secondPayload.layers.stable, firstPayload.layers.stable)
+    assert.notEqual(secondPayload.layers.chapter, firstPayload.layers.chapter)
+
+    const json = await runCli(dir, ['write', '2', '--json'], { WEAVE_PROMPT_RENDERER: 'json' })
+    assert.equal(json.code, 0, json.stderr)
+    assert.equal(parseJson<{ renderer: string }>(json.stdout).renderer, 'json')
+    assert.ok(JSON.stringify(model.requests[2]).includes('mustHappen'))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

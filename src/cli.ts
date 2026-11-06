@@ -1029,6 +1029,8 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
         runId: result.run.runId,
         draft: result.draftPath,
         contextHash: result.contextHash,
+        layers: result.layers,
+        renderer: result.renderer,
         estimatedTokens: result.estimatedTokens,
         included: result.included,
         omitted: result.omitted,

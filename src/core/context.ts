@@ -9,10 +9,21 @@ const SYSTEM_PROMPT = [
   '用具体动作、选择与后果推进场景，避免空泛总结和模板化抒情。',
 ].join('\n')
 
+export type PromptRenderer = 'json' | 'mission'
+
+export interface ContextLayers {
+  stable: string
+  volume: string
+  chapter: string
+  full: string
+}
+
 export interface AssembledContext {
   system: string
   user: string
   contextHash: string
+  layers: ContextLayers
+  renderer: PromptRenderer
   included: Material[]
   omitted: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
   estimatedTokens: number
@@ -27,6 +38,7 @@ export function assembleContext(
   materials: Material[],
   config: ModelConfig,
 ): { decision: MaterialDecision; context: AssembledContext | null } {
+  const renderer = renderMode(config)
   const contractText = JSON.stringify(contract, null, 2)
   const framing = `${SYSTEM_PROMPT}\n章节合同：\n${contractText}\n材料：\n`
   const fixedTokens =
@@ -104,10 +116,12 @@ export function assembleContext(
   }
 
   const ordered = included.sort((a, b) => categoryRank(a) - categoryRank(b))
-  const sections = ordered.map(item => `【${item.label}｜${item.category}/${item.provenance}】\n${item.text}`)
-  const user = `章节合同：\n${contractText}\n\n${sections.join('\n\n')}\n\n请写出第 ${contract.chapter} 章《${contract.title}》正文：`
   const system = SYSTEM_PROMPT
+  const user = renderer === 'mission'
+    ? renderMissionPrompt(contract, ordered)
+    : renderJsonPrompt(contract, contractText, ordered)
   const usedTokens = fixedTokens + used
+  const layers = buildLayers(system, ordered, user)
   return {
     decision: {
       decision: 'ready',
@@ -120,10 +134,102 @@ export function assembleContext(
       system,
       user,
       contextHash: objectHash({ system, user, sources: ordered.map(item => [item.sourceId, item.contentHash]) }),
+      layers,
+      renderer,
       included: ordered,
       omitted,
       estimatedTokens: usedTokens,
     },
+  }
+}
+
+function renderMode(config: ModelConfig): PromptRenderer {
+  const override = process.env.WEAVE_PROMPT_RENDERER
+  if (override === 'json' || override === 'mission') return override
+  return config.promptRenderer === 'mission' ? 'mission' : 'json'
+}
+
+function renderJsonPrompt(contract: ChapterContract, contractText: string, ordered: Material[]): string {
+  const sections = ordered.map(item => `【${item.label}｜${item.category}/${item.provenance}】\n${item.text}`)
+  return `章节合同：\n${contractText}\n\n${sections.join('\n\n')}\n\n请写出第 ${contract.chapter} 章《${contract.title}》正文：`
+}
+
+/**
+ * Prose task brief. Hard constraints stay as explicit lists so they remain auditable;
+ * only the contract narrative is turned into sentences.
+ */
+function renderMissionPrompt(contract: ChapterContract, ordered: Material[]): string {
+  const lines: string[] = [
+    `【本章任务】写出第 ${contract.chapter} 章《${contract.title}》的正文。`,
+    '',
+    '【这一章要发生的事】',
+    `视角：${contract.pov}；时间：${contract.time}；地点：${contract.location}。`,
+    `开场：${contract.openingState}`,
+    `目标：${contract.goal}`,
+    `阻力：${contract.obstacle ?? '未指定'}`,
+    `收束：${contract.endingState}`,
+    `承接上一章：${contract.previousLink}`,
+    `留给下一章：${contract.nextLink}`,
+    '',
+  ]
+  if (contract.mustHappen.length > 0) {
+    lines.push('必须发生：', ...contract.mustHappen.map(item => `- ${item}`), '')
+  }
+  if (contract.mustNotHappen.length > 0) {
+    lines.push('绝对不可以发生：', ...contract.mustNotHappen.map(item => `- ${item}`), '')
+  }
+  if ((contract.knowledge ?? []).length > 0) {
+    lines.push(
+      '信息边界：',
+      ...(contract.knowledge ?? []).map(item => `- ${item.character} 只知道：${item.fact}`),
+      '',
+    )
+  }
+
+  const groups: Array<{ title: string; categories: Material['category'][] }> = [
+    { title: '【故事与风格】', categories: ['author'] },
+    { title: '【本章可用的事实与衔接】', categories: ['derived-locator'] },
+    { title: '【前文证据】', categories: ['finalized-history'] },
+    { title: '【未来计划（不是既成事实）】', categories: ['future-plan'] },
+    { title: '【参考资料（不是本书事实）】', categories: ['reference'] },
+  ]
+  for (const group of groups) {
+    const items = ordered.filter(item => group.categories.includes(item.category))
+    if (items.length === 0) continue
+    lines.push(group.title)
+    for (const item of items) {
+      lines.push(`## ${item.label}`, item.text, '')
+    }
+  }
+
+  lines.push(
+    '【写作要求】',
+    '- 只写正文，不写标题、说明或 Markdown 围栏。',
+    '- 用具体动作、选择和代价推进，不写总结式收束。',
+    '- 不得让角色使用其尚未获知的信息，不得改变合同之外的关键设定。',
+    '- 场景结束时的局势必须与开始时不同。',
+    '',
+  )
+  return lines.join('\n')
+}
+
+/**
+ * Provider caches see literal text, not our hashes. These layers exist for audit and for
+ * keeping the long-lived prefix byte-stable; a cache claim still needs provider usage data.
+ */
+function buildLayers(system: string, ordered: Material[], user: string): ContextLayers {
+  const stable = ordered.filter(item => item.category === 'author')
+  const volume = ordered.filter(item => item.category === 'future-plan')
+  const chapter = ordered.filter(item =>
+    item.category === 'derived-locator'
+    || item.category === 'finalized-history'
+    || item.category === 'reference',
+  )
+  return {
+    stable: objectHash({ system, materials: stable.map(item => [item.sourceId, item.contentHash]) }),
+    volume: objectHash({ materials: volume.map(item => [item.sourceId, item.contentHash]) }),
+    chapter: objectHash({ user, materials: chapter.map(item => [item.sourceId, item.contentHash]) }),
+    full: objectHash({ system, user }),
   }
 }
 
