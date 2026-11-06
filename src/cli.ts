@@ -18,6 +18,15 @@ import {
   writeContractCheck,
 } from './core/contract.ts'
 import { writeChapter, amendChapter, finalizeChapter } from './core/writing.ts'
+import {
+  approveBeatCandidate,
+  generateBeatCandidate,
+  readBeatCandidate,
+  saveBeatDraft,
+  skipBeatCandidate,
+  type DraftingStrategy,
+  type SceneBeat,
+} from './core/beats.ts'
 import { findRecoverableRun } from './core/runs.ts'
 import { createImpactReport, loadImpactReport, resolveImpact } from './core/impact.ts'
 import { currentCommit, readMainline } from './core/ledger.ts'
@@ -200,6 +209,8 @@ async function main(): Promise<number> {
       return commandIgnore(root, parsed, json)
     case 'timeline':
       return commandTimeline(root, parsed, json)
+    case 'beats':
+      return commandBeats(root, parsed, json)
     case 'write':
       return commandWrite(root, parsed, json)
     case 'amend':
@@ -1141,9 +1152,54 @@ async function commandTimeline(root: string, parsed: Parsed, json: boolean): Pro
   return report.passed ? 0 : 3
 }
 
+async function commandBeats(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0]
+  const chapter = parseChapter(parsed.positionals[1])
+  switch (action) {
+    case 'generate': {
+      const candidate = await generateBeatCandidate(root, chapter, await loadModelConfig(root), new AbortController().signal)
+      if (json) outputJson(candidate)
+      else console.log(`已生成第 ${chapter} 章节拍草案；请编辑并执行 weave beats approve ${chapter}`)
+      return 0
+    }
+    case 'set': {
+      const file = requiredString(parsed, 'file')
+      const raw = JSON.parse(await readFile(path.resolve(file), 'utf8')) as unknown
+      const beats = (Array.isArray(raw) ? raw : (raw as { beats?: unknown }).beats) as SceneBeat[]
+      const candidate = await saveBeatDraft(root, chapter, beats)
+      if (json) outputJson(candidate)
+      else console.log(`已保存第 ${chapter} 章节拍草案；请执行 weave beats approve ${chapter}`)
+      return 0
+    }
+    case 'show': {
+      const view = await readBeatCandidate(root, chapter)
+      if (json) outputJson(view)
+      else console.log(JSON.stringify(view, null, 2))
+      return 0
+    }
+    case 'approve': {
+      const candidate = await approveBeatCandidate(root, chapter, parsed.flags.benchmark === true ? 'benchmark' : 'author')
+      if (json) outputJson(candidate)
+      else console.log(`已批准第 ${chapter} 章节拍（${candidate.approvedBy}）`)
+      return 0
+    }
+    case 'skip': {
+      const candidate = await skipBeatCandidate(root, chapter)
+      if (json) outputJson(candidate)
+      else console.log(`已跳过第 ${chapter} 章节拍；默认 prose-first 可继续使用`)
+      return 0
+    }
+    default:
+      throw usageError('用法：weave beats generate|set|show|approve|skip <chapter> [--file <path>] [--benchmark]')
+  }
+}
+
 async function commandWrite(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const chapter = parseChapter(parsed.positionals[0])
   const events = parsed.flags.events === true
+  const strategy = String(parsed.flags.strategy ?? 'prose-first')
+  if (strategy !== 'prose-first' && strategy !== 'beat-first') throw usageError('--strategy 只能是 prose-first 或 beat-first')
+  const draftingStrategy = strategy as DraftingStrategy
   const resumeFromRunId = await resolveResumeRun(root, chapter, parsed)
   if (events && json) throw usageError('--events 与 --json 不能同时使用')
   const controller = new AbortController()
@@ -1158,6 +1214,7 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
     const result = await writeChapter(root, chapter, {
       signal: controller.signal,
       resumeFromRunId,
+      draftingStrategy,
       key: parsed.flags.key === true,
       onDelta: json || events ? undefined : text => process.stdout.write(text),
       onEvent: events
@@ -1177,6 +1234,8 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
         contextHash: result.contextHash,
         layers: result.layers,
         renderer: result.renderer,
+        draftingStrategy: result.draftingStrategy,
+        beatContentHash: result.beatContentHash,
         estimatedTokens: result.estimatedTokens,
         included: result.included,
         omitted: result.omitted,
@@ -1571,7 +1630,8 @@ function printHelp(): void {
   weave waive <chapter> --finding <id>|--all-warnings --reason <text> [--scope ...] [--until <n>]
   weave waivers list|revoke <waiverId>
   weave timeline <chapter>
-  weave write <chapter> [--json|--events] [--key] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
+  weave beats generate|set|show|approve|skip <chapter> [--file <path>] [--benchmark]
+  weave write <chapter> [--json|--events] [--key] [--strategy prose-first|beat-first] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
   weave amend <chapter> [--force]
   weave finalize <chapter>
   weave impact <chapter>

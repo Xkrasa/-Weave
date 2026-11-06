@@ -10,7 +10,7 @@
  *
  * Usage:
  *   node scripts/benchmark.ts run --suite craft|longitudinal|all [--seed <id>] [--config baseline]
- *                                 [--ablation retrieval=off] [--mode fake|real]
+ *                                 [--ablation retrieval=off] [--strategy prose-first|beat-first] [--mode fake|real]
  *                                 [--base-url <url>] [--model <id>] [--out <dir>]
  *   node scripts/benchmark.ts pairs --a <runDir> --b <runDir> [--out <dir>]
  *   node scripts/benchmark.ts score --pairs <pairs.json> --scores <scores.jsonl>
@@ -226,7 +226,16 @@ class FakeModel {
     const messages = Array.isArray(body.messages) ? body.messages as Array<Record<string, unknown>> : []
     const user = String(messages.find(message => message.role === 'user')?.content ?? '')
     const chapter = this.chapterFromPrompt(user)
-    const prose = scaffoldProse(this.seed, chapter, this.salt)
+    const prose = JSON.stringify(messages).includes('场景节拍规划器')
+      ? JSON.stringify({ beats: [{
+          goal: chapter.goal,
+          obstacle: chapter.obstacle,
+          turn: '行动获得新的证据或代价',
+          infoRelease: '本章只释放合同允许的信息',
+          emotionalLanding: '人物根据新局势作出选择',
+          endingState: chapter.endingState,
+        }] })
+      : scaffoldProse(this.seed, chapter, this.salt)
     response.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache',
@@ -341,6 +350,7 @@ interface SeedRun {
   kind: Seed['kind']
   platform?: Seed['platform']
   evaluation?: SeedEvaluation
+  draftingStrategy: 'prose-first' | 'beat-first'
   config: string
   ablations: Record<string, string>
   mode: 'fake' | 'real'
@@ -354,7 +364,7 @@ interface SeedRun {
     matched: string[]
     missed: string[]
   }>
-  durations: { writeMs: number; totalMs: number }
+  durations: { writeMs: number; totalMs: number; planningMs: number }
   errors: string[]
 }
 
@@ -441,6 +451,7 @@ async function runSeed(
     timeoutMs?: number
     maxOutputTokens?: number
     renderer?: 'json' | 'mission'
+    draftingStrategy: 'prose-first' | 'beat-first'
   },
 ): Promise<SeedRun> {
   const startedAt = Date.now()
@@ -452,13 +463,14 @@ async function runSeed(
     kind: seed.kind,
     platform: seed.platform ?? 'generic',
     ...(seed.evaluation ? { evaluation: seed.evaluation } : {}),
+    draftingStrategy: options.draftingStrategy,
     config: options.config,
     ablations: options.ablations,
     mode: options.mode,
     model: options.model,
     projectDir,
     chapters: [],
-    durations: { writeMs: 0, totalMs: 0 },
+    durations: { writeMs: 0, totalMs: 0, planningMs: 0 },
     errors,
   }
 
@@ -515,13 +527,30 @@ async function runSeed(
       })
       continue
     }
-    let write = await runCli(projectDir, ['write', String(chapter.chapter), '--json'], env)
+    if (options.draftingStrategy === 'beat-first') {
+      const generated = await runCli(projectDir, ['beats', 'generate', String(chapter.chapter), '--json'], env)
+      const approved = generated.code === 0
+        ? await runCli(projectDir, ['beats', 'approve', String(chapter.chapter), '--benchmark', '--json'], env)
+        : null
+      record.durations.planningMs += generated.elapsedMs + (approved?.elapsedMs ?? 0)
+      if (generated.code !== 0 || approved?.code !== 0) {
+        const failed = generated.code !== 0 ? generated : approved!
+        errors.push(`beats ${chapter.chapter}: ${errorText(failed)}`)
+        record.chapters.push({
+          chapter: chapter.chapter, mode: 'generated', draftPath: '', characters: 0,
+          elapsedMs: generated.elapsedMs + (approved?.elapsedMs ?? 0), exitCode: failed.code,
+        })
+        continue
+      }
+    }
+    const writeArgs = ['write', String(chapter.chapter), '--json', '--strategy', options.draftingStrategy]
+    let write = await runCli(projectDir, writeArgs, env)
     record.durations.writeMs += write.elapsedMs
     let retried = false
     if (write.code === 5 && options.mode === 'real') {
       // A stalled stream is not transparently retried by the CLI; the harness retries as a fresh run.
       retried = true
-      write = await runCli(projectDir, ['write', String(chapter.chapter), '--json'], env)
+      write = await runCli(projectDir, writeArgs, env)
       record.durations.writeMs += write.elapsedMs
     }
     if (write.code !== 0) {
@@ -588,6 +617,9 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
     throw new Error('--prompt-renderer must be json or mission')
   }
   const renderer = rendererRaw as 'json' | 'mission' | undefined
+  const strategyRaw = flagString(flags, 'strategy') ?? 'prose-first'
+  if (strategyRaw !== 'prose-first' && strategyRaw !== 'beat-first') throw new Error('--strategy must be prose-first or beat-first')
+  const draftingStrategy = strategyRaw as 'prose-first' | 'beat-first'
   const maxOutputTokens = flagString(flags, 'max-output') ? Number(flagString(flags, 'max-output')) : undefined
   if (maxOutputTokens !== undefined && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 256)) {
     throw new Error('--max-output must be an integer >= 256')
@@ -627,7 +659,7 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
     for (const seed of seeds) {
       const seedBase = mode === 'fake' ? fakeModels.get(seed.id)!.baseUrl : baseUrl
       const run = await runSeed(seed, {
-        outDir, config, ablations, mode, baseUrl: seedBase, model, apiKey, timeoutMs, maxOutputTokens, renderer,
+        outDir, config, ablations, mode, baseUrl: seedBase, model, apiKey, timeoutMs, maxOutputTokens, renderer, draftingStrategy,
       })
       runs.push(run)
       await writeFile(path.join(outDir, `${seed.id}.run.json`), `${JSON.stringify(run, null, 2)}\n`)
@@ -636,7 +668,7 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
     for (const fake of fakeModels.values()) await fake.stop()
   }
 
-  const report = buildReport(runs, { suite, config, ablations, mode, model })
+  const report = buildReport(runs, { suite, config, ablations, mode, model, draftingStrategy })
   await writeFile(path.join(outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
   await writeFile(path.join(outDir, 'report.md'), renderReport(report))
   console.log(JSON.stringify({
@@ -658,9 +690,10 @@ interface BenchReport {
   ablations: Record<string, string>
   mode: 'fake' | 'real'
   model: string
+  draftingStrategy: 'prose-first' | 'beat-first'
   createdAt: string
   note: string
-  totals: { seeds: number; chapters: number; writeMs: number; totalMs: number; characters: number }
+  totals: { seeds: number; chapters: number; writeMs: number; totalMs: number; planningMs: number; characters: number }
   recall: { expectations: number; matchedTerms: number; missedTerms: number }
   seeds: Array<{
     seed: string
@@ -670,6 +703,7 @@ interface BenchReport {
     chapters: number
     writeMs: number
     totalMs: number
+    planningMs: number
     characters: number
     estimatedTokens: number
     omitted: number
@@ -682,7 +716,7 @@ interface BenchReport {
 
 function buildReport(
   runs: SeedRun[],
-  meta: { suite: string; config: string; ablations: Record<string, string>; mode: 'fake' | 'real'; model: string },
+  meta: { suite: string; config: string; ablations: Record<string, string>; mode: 'fake' | 'real'; model: string; draftingStrategy: 'prose-first' | 'beat-first' },
 ): BenchReport {
   const errors = runs.flatMap(run => run.errors.map(error => ({ seed: run.seed, error })))
   const recall = runs.flatMap(run => run.recall ?? [])
@@ -696,6 +730,7 @@ function buildReport(
     ablations: meta.ablations,
     mode: meta.mode,
     model: meta.model,
+    draftingStrategy: meta.draftingStrategy,
     createdAt: new Date().toISOString(),
     note: meta.mode === 'fake'
       ? 'Fake mode: deterministic scaffold prose. Measures plumbing only, never literary quality.'
@@ -705,6 +740,7 @@ function buildReport(
       chapters: runs.reduce((sum, run) => sum + run.chapters.length, 0),
       writeMs: runs.reduce((sum, run) => sum + run.durations.writeMs, 0),
       totalMs: runs.reduce((sum, run) => sum + run.durations.totalMs, 0),
+      planningMs: runs.reduce((sum, run) => sum + run.durations.planningMs, 0),
       characters: runs.reduce((sum, run) => sum + run.chapters.reduce((inner, item) => inner + item.characters, 0), 0),
     },
     recall: { expectations, matchedTerms, missedTerms },
@@ -716,6 +752,7 @@ function buildReport(
       chapters: run.chapters.length,
       writeMs: run.durations.writeMs,
       totalMs: run.durations.totalMs,
+      planningMs: run.durations.planningMs,
       characters: run.chapters.reduce((sum, item) => sum + item.characters, 0),
       estimatedTokens: run.chapters.reduce((sum, item) => sum + (item.estimatedTokens ?? 0), 0),
       omitted: run.chapters.reduce((sum, item) => sum + (item.omitted?.length ?? 0), 0),
@@ -732,6 +769,7 @@ function renderReport(report: BenchReport): string {
     `# Weave benchmark — ${report.suite} / ${report.config}`,
     '',
     `- mode: **${report.mode}** · model: \`${report.model}\``,
+    `- draftingStrategy: ${report.draftingStrategy}`,
     `- ablations: ${Object.keys(report.ablations).length === 0 ? 'none' : JSON.stringify(report.ablations)}`,
     `- created: ${report.createdAt}`,
     `- note: ${report.note}`,
@@ -740,7 +778,7 @@ function renderReport(report: BenchReport): string {
     '',
     `- seeds: ${report.totals.seeds} · chapters: ${report.totals.chapters}`,
     `- generated characters: ${report.totals.characters}`,
-    `- write time: ${report.totals.writeMs} ms · total: ${report.totals.totalMs} ms`,
+    `- write time: ${report.totals.writeMs} ms · planning: ${report.totals.planningMs} ms · total: ${report.totals.totalMs} ms`,
     `- recall terms matched/missed: ${report.recall.matchedTerms}/${report.recall.missedTerms}`,
     '',
     '## Seeds',

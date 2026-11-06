@@ -198,3 +198,30 @@ test('benchmark readerIntent ablation removes only the optional intent', async (
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test('benchmark beat-first records benchmark-approved planning and one prose run', async () => {
+  const out = await tempDir()
+  try {
+    const result = await run([
+      'run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes',
+      '--strategy', 'beat-first', '--out', out,
+    ])
+    assert.equal(result.code, 0, result.stdout + result.stderr)
+    const candidate = JSON.parse(await readFile(path.join(out, 'fanqie-rewind-ten-minutes', 'plans', 'beats', '001.json'), 'utf8')) as {
+      status: string
+      approvedBy: string
+    }
+    assert.equal(candidate.status, 'approved')
+    assert.equal(candidate.approvedBy, 'benchmark')
+
+    const runsDir = path.join(out, 'fanqie-rewind-ten-minutes', '.weave', 'runs')
+    const runs = await Promise.all((await readdir(runsDir)).map(async name =>
+      JSON.parse(await readFile(path.join(runsDir, name), 'utf8')) as { task: string; draftingStrategy?: string }))
+    assert.equal(runs.filter(run => run.task === 'planning').length, 4)
+    assert.equal(runs.filter(run => run.task === 'writing' && run.draftingStrategy === 'beat-first').length, 4)
+    const report = JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8')) as { draftingStrategy?: string }
+    assert.equal(report.draftingStrategy, 'beat-first')
+  } finally {
+    await rm(out, { recursive: true, force: true })
+  }
+})

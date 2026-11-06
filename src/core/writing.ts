@@ -13,6 +13,7 @@ import { assertNoPendingImpacts, createImpactReport } from './impact.ts'
 import { loadCharacters, loadContract, contractHash, requirePassingContractCheck } from './contract.ts'
 import { collectMaterials } from './materials.ts'
 import { selectMethods } from './methods.ts'
+import { formatBeats, requireApprovedBeats, type DraftingStrategy } from './beats.ts'
 import { assembleContext } from './context.ts'
 import { streamChapter } from './model.ts'
 import { loadModelConfig, loadProject } from './project.ts'
@@ -82,6 +83,8 @@ export interface WriteResult {
   contextHash: string
   layers: { stable: string; volume: string; chapter: string; full: string }
   renderer: string
+  draftingStrategy: DraftingStrategy
+  beatContentHash?: string
   estimatedTokens: number
   keyCandidates: KeyCandidateGroup[]
   included: string[]
@@ -99,6 +102,8 @@ export async function writeChapter(
     resumeFromRunId?: string
     /** Force the key-chapter path regardless of the contract. */
     key?: boolean
+    /** Optional experiment; defaults to the existing single-pass prose path. */
+    draftingStrategy?: DraftingStrategy
   },
 ): Promise<WriteResult> {
   await assertOutlineApproved(root, chapter)
@@ -124,9 +129,15 @@ export async function writeChapter(
     throw conflictError('草稿引用了不存在的正式版本；请重新创建草稿')
   }
 
+  const draftingStrategy = options.draftingStrategy ?? 'prose-first'
+  const beatCandidate = draftingStrategy === 'beat-first'
+    ? await requireApprovedBeats(root, chapter)
+    : null
   const materials = await collectMaterials(root, contract)
   const methodSelection = await selectMethods(root, contract.chapter)
-  const assembled = assembleContext(contract, materials, modelConfig)
+  const assembled = assembleContext(contract, materials, modelConfig, {
+    ...(beatCandidate ? { beatText: formatBeats(beatCandidate) } : {}),
+  })
   if (assembled.decision.decision !== 'ready') {
     throw validationError(assembled.decision.message, assembled.decision)
   }
@@ -146,6 +157,8 @@ export async function writeChapter(
     contextHash: context.contextHash,
     promptHash: hashText(`${context.system}\n${context.user}`),
     materialSourceIds: context.included.map(item => item.sourceId),
+    draftingStrategy,
+    ...(beatCandidate ? { beatContentHash: beatCandidate.contentHash } : {}),
     methodSelection,
     ...(recovery ? { recovery } : {}),
   }
@@ -197,6 +210,8 @@ export async function writeChapter(
       keyCandidates,
       layers: context.layers,
       renderer: context.renderer,
+      draftingStrategy,
+      ...(beatCandidate ? { beatContentHash: beatCandidate.contentHash } : {}),
       estimatedTokens: context.estimatedTokens,
       included: context.included.map(item => item.sourceId),
       omitted: context.omitted,

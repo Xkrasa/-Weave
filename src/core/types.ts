@@ -350,6 +350,8 @@ export interface RunRecord {
   contextHash?: string
   promptHash?: string
   materialSourceIds: string[]
+  draftingStrategy?: 'prose-first' | 'beat-first'
+  beatContentHash?: string
   methodSelection?: {
     modules: Array<{ id: string; version: number; reason: string }>
     reasons: string[]

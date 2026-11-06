@@ -40,9 +40,12 @@ export function assembleContext(
   contract: ChapterContract,
   materials: Material[],
   config: ModelConfig,
+  options: { beatText?: string } = {},
 ): { decision: MaterialDecision; context: AssembledContext | null } {
   const renderer = renderMode(config)
-  const contractText = JSON.stringify(contract, null, 2)
+  const contractText = `${JSON.stringify(contract, null, 2)}${options.beatText
+    ? `\n\n已批准的场景节拍（生成辅助材料，不是既成事实）：\n${options.beatText}`
+    : ''}`
   const framing = `${SYSTEM_PROMPT}\n章节合同：\n${contractText}\n材料：\n`
   const fixedTokens =
     estimateTokens(SYSTEM_PROMPT, config.charsPerToken) +
@@ -121,7 +124,7 @@ export function assembleContext(
   const ordered = included.sort((a, b) => categoryRank(a) - categoryRank(b))
   const system = SYSTEM_PROMPT
   const user = renderer === 'mission'
-    ? renderMissionPrompt(contract, ordered)
+    ? renderMissionPrompt(contract, ordered, options.beatText)
     : renderJsonPrompt(contract, contractText, ordered)
   const usedTokens = fixedTokens + used
   const layers = buildLayers(system, ordered, user)
@@ -161,7 +164,7 @@ function renderJsonPrompt(contract: ChapterContract, contractText: string, order
  * Prose task brief. Hard constraints stay as explicit lists so they remain auditable;
  * only the contract narrative is turned into sentences.
  */
-function renderMissionPrompt(contract: ChapterContract, ordered: Material[]): string {
+function renderMissionPrompt(contract: ChapterContract, ordered: Material[], beatText?: string): string {
   const lines: string[] = [
     `【本章任务】写出第 ${contract.chapter} 章《${contract.title}》的正文。`,
     '',
@@ -185,6 +188,9 @@ function renderMissionPrompt(contract: ChapterContract, ordered: Material[]): st
       ...(intent.hook ? [`章末期待：${intent.hook}`] : []),
       '',
     )
+  }
+  if (beatText) {
+    lines.push('【已批准的场景节拍（辅助材料，不是既成事实）】', beatText, '')
   }
   if (contract.mustHappen.length > 0) {
     lines.push('必须发生：', ...contract.mustHappen.map(item => `- ${item}`), '')
