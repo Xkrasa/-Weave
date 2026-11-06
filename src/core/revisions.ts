@@ -11,7 +11,7 @@ import type {
   RevisionCandidate,
   RevisionInstruction,
 } from './stage-types.ts'
-import type { ModelConfig } from './types.ts'
+import type { ChapterContract, ModelConfig } from './types.ts'
 import { completeText } from './model.ts'
 import { draftHash, loadStage, parseJsonObject, readDraft, resolveEvidence, saveStage } from './stages.ts'
 import { atomicWrite, atomicWriteJson, ensureDir, readJsonIfExists } from './io.ts'
@@ -43,6 +43,80 @@ export interface RevisionPlanView {
   createdAt: string
   findings: ReviewFinding[]
   instructions: RevisionInstruction[]
+}
+
+
+/**
+ * Extra creative context for line edits: neighbours, contract, POV knowledge, style samples,
+ * routed methods, and the constraints the rewrite must not break.
+ */
+async function revisionContext(
+  root: string,
+  chapter: number,
+  contract: ChapterContract,
+  paragraphs: DraftParagraph[],
+  targetIds: Set<string>,
+): Promise<string[]> {
+  const prior = await collectLedger(root, Math.max(0, chapter - 1))
+  const povFacts = effectiveFacts(prior.facts, Math.max(0, chapter - 1))
+    .filter(fact => fact.subject === contract.pov)
+  const povBeliefs = effectiveBeliefs(prior.beliefs, contract.pov, Math.max(0, chapter - 1))
+  const style = await loadStyleConstitution(root)
+  const samples = (await loadAuthorSamples(root, 1)).map(sample => sample.text.slice(0, 800))
+  const selection = await selectMethods(root, chapter, { purpose: 'rewrite' })
+  const library = await loadMethods(root)
+  const methods = library.filter(module => selection.modules.some(item => item.id === module.id))
+  const neighbours = neighbourParagraphs(paragraphs, targetIds, 2)
+  return [
+    '本章合同：',
+    JSON.stringify(contract, null, 2),
+    '',
+    '视角知识：',
+    JSON.stringify({ pov: contract.pov, facts: povFacts, beliefs: povBeliefs }, null, 2),
+    '',
+    '风格宪法：',
+    styleText(style),
+    ...(samples.length > 0 ? ['', '作者样本：', samples.join('\n---\n')] : []),
+    ...(methods.length > 0 ? ['', '可用方法：', methods.map(methodText).join('\n\n')] : []),
+    '',
+    '前后文（role=target 的段落才可修改，其余只用于衔接）：',
+    JSON.stringify(neighbours, null, 2),
+    '',
+    '不可改变：',
+    JSON.stringify({
+      mustHappen: contract.mustHappen,
+      mustNotHappen: contract.mustNotHappen,
+      facts: povFacts.map(fact => `${fact.subject}.${fact.predicate}=${fact.object}`),
+    }, null, 2),
+    '',
+    '要求：不得新增未经正文支持的关键事实，不得越出 POV 知识边界，不得为消除 finding 而删除合同硬节点，',
+    '不得抹平作者样本中的辨识度表达；无法同时满足约束时返回失败，不要扩大修改范围。',
+    '',
+  ]
+}
+
+function neighbourParagraphs(
+  paragraphs: DraftParagraph[],
+  targetIds: Set<string>,
+  radius: number,
+): Array<{ paragraphId: string; text: string; role: 'before' | 'target' | 'after' }> {
+  const keep = new Set<number>()
+  paragraphs.forEach((paragraph, index) => {
+    if (!targetIds.has(paragraph.paragraphId)) return
+    for (let offset = -radius; offset <= radius; offset += 1) {
+      const position = index + offset
+      if (position >= 0 && position < paragraphs.length) keep.add(position)
+    }
+  })
+  return [...keep]
+    .sort((a, b) => a - b)
+    .map(index => {
+      const paragraph = paragraphs[index]!
+      const role = targetIds.has(paragraph.paragraphId)
+        ? 'target'
+        : index < paragraphs.findIndex(item => targetIds.has(item.paragraphId)) ? 'before' : 'after'
+      return { paragraphId: paragraph.paragraphId, text: paragraph.text, role }
+    })
 }
 
 export async function reviseChapter(
@@ -83,8 +157,14 @@ export async function reviseChapter(
   }
   const targetIds = new Set(instructions.flatMap(item => item.paragraphIds))
   const targetParagraphs = paragraphs.filter(paragraph => targetIds.has(paragraph.paragraphId))
+  const contextMode = process.env.WEAVE_REVISION_CONTEXT === 'legacy' ? 'legacy' : 'enriched'
+  const contract = await loadContract(root, chapter)
+  const context = contextMode === 'enriched'
+    ? await revisionContext(root, chapter, contract, paragraphs, targetIds)
+    : []
   const prompt = [
     `第 ${chapter} 章修稿。`,
+    ...context,
     '待处理 finding：',
     JSON.stringify(selected.map(finding => ({
       findingId: finding.findingId,
@@ -152,6 +232,7 @@ export async function reviseChapter(
     raw: result.text,
     findings: selected.map(finding => finding.findingId),
     instructions,
+    contextMode,
     baseParagraphs: paragraphs,
     paragraphs: changed,
     rejected,

@@ -190,6 +190,7 @@ export interface RevisionCandidate {
   raw?: string
   findings: string[]
   instructions: RevisionInstruction[]
+  contextMode?: 'legacy' | 'enriched'
   baseParagraphs: DraftParagraph[]
   paragraphs: DraftParagraph[]
   rejected: Array<{ paragraphId?: string; reason: string }>

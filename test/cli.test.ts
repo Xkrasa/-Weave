@@ -2609,3 +2609,69 @@ test('retrieval feeds finalized evidence into the prompt and filters other POVs'
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('revision prompt carries contract, neighbours, style and constraints', async () => {
+  const revision = JSON.stringify({
+    paragraphs: [{
+      paragraphId: 'p002',
+      text: '她发现缺页上留着港务局的印，决定追查下去。',
+      findingIds: ['f1'],
+    }],
+  })
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload(true), revision])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await contract1(dir)
+    await setContract(dir, 1, { goal: '找出账本缺页的因果链' })
+    assert.equal((await checkContract(dir, 1)).code, 0)
+    assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 7)
+    const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
+    assert.equal(revised.code, 0, revised.stderr)
+    const payload = parseJson<{ candidate: { contextMode: string } }>(revised.stdout)
+    assert.equal(payload.candidate.contextMode, 'enriched')
+
+    const body = JSON.stringify(model.requests[4])
+    assert.ok(body.includes('本章合同'))
+    assert.ok(body.includes('前后文'))
+    assert.ok(body.includes('不可改变'))
+    assert.ok(body.includes('林岚在码头翻开账本'), 'neighbour paragraph must be included')
+    assert.ok(body.includes('structure-causality'), 'routed method should reach the revision prompt')
+    assert.ok(body.includes('风格宪法'))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('legacy revision mode keeps the prompt minimal for A/B comparison', async () => {
+  const revision = JSON.stringify({
+    paragraphs: [{
+      paragraphId: 'p002',
+      text: '她发现缺页上留着港务局的印，决定追查下去。',
+      findingIds: ['f1'],
+    }],
+  })
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), coveragePayload(), reviewPayload(true), revision])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 7)
+    const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'], { WEAVE_REVISION_CONTEXT: 'legacy' })
+    assert.equal(revised.code, 0, revised.stderr)
+    const payload = parseJson<{ candidate: { contextMode: string } }>(revised.stdout)
+    assert.equal(payload.candidate.contextMode, 'legacy')
+    const body = JSON.stringify(model.requests[4])
+    assert.equal(body.includes('本章合同'), false)
+    assert.equal(body.includes('前后文'), false)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
