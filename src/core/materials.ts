@@ -10,6 +10,7 @@ import { loadMethods, methodText, selectMethods } from './methods.ts'
 import { loadStyleConstitution, loadAuthorSamples, styleText } from './style.ts'
 import { conflictError } from './errors.ts'
 import { rebuildSearchIndex, searchBook, searchIndexHealth } from './search.ts'
+import { listPlans, readApprovedPlan, type CharacterArc, type RollingPlan, type StoryPromise, type VolumeArc } from './planning.ts'
 
 interface ReferenceManifestEntry {
   id: string
@@ -186,6 +187,7 @@ export async function collectMaterials(root: string, contract: ChapterContract):
     )
   }
 
+  materials.push(...(await collectPlanningMaterials(root, contract)))
   materials.push(...(await collectRetrievedEvidence(root, contract)))
 
   const manifest = await readJsonIfExists<ReferenceManifest>(path.join(paths.references, 'manifest.json'))
@@ -484,6 +486,78 @@ async function povAllowsEvidence(
     if (proposition.length >= 4 && squashed.includes(proposition)) return false
   }
   return true
+}
+
+
+/**
+ * Only approved planning reaches generation. A file edited after approval reports `modified`
+ * and stops being authoritative until the author approves the new hash.
+ */
+async function collectPlanningMaterials(root: string, contract: ChapterContract): Promise<Material[]> {
+  const materials: Material[] = []
+  const story = await readApprovedPlan<StoryPromise>(root, 'story')
+  if (story) {
+    materials.push(material(
+      'plan:story-promise',
+      'author',
+      'author',
+      true,
+      '已批准的故事承诺',
+      JSON.stringify(story, null, 2),
+    ))
+  }
+
+  const arcs = await readApprovedPlan<{ characters: CharacterArc[] }>(root, 'character-arcs')
+  const relevantArcs = arcs?.characters.filter(arc => contract.characters.includes(arc.name)) ?? []
+  if (relevantArcs.length > 0) {
+    materials.push({
+      ...material(
+        'plan:character-arcs',
+        'author',
+        'author',
+        false,
+        '已批准的人物弧（不是当前状态）',
+        JSON.stringify({ characters: relevantArcs }, null, 2),
+      ),
+      priority: 5,
+    })
+  }
+
+  const volumes = (await listPlans(root)).filter(entry => entry.kind === 'volume' && entry.status === 'approved')
+  const current = volumes
+    .map(entry => entry.content as VolumeArc)
+    .filter(volume => Number.isSafeInteger(volume.volume))
+    .sort((a, b) => b.volume - a.volume)[0]
+  if (current) {
+    materials.push({
+      ...material(
+        'plan:volume',
+        'future-plan',
+        'author',
+        false,
+        '已批准的当前卷弧（不是既成事实）',
+        JSON.stringify(current, null, 2),
+      ),
+      priority: 6,
+    })
+  }
+
+  const rolling = await readApprovedPlan<RollingPlan>(root, 'rolling')
+  const upcoming = rolling?.chapters.filter(item => item.chapter >= contract.chapter && item.chapter <= contract.chapter + 3) ?? []
+  if (upcoming.length > 0) {
+    materials.push({
+      ...material(
+        'plan:rolling',
+        'future-plan',
+        'author',
+        false,
+        '已批准的滚动章纲（未来计划）',
+        JSON.stringify({ chapters: upcoming }, null, 2),
+      ),
+      priority: 3,
+    })
+  }
+  return materials
 }
 
 function material(

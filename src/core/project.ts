@@ -27,6 +27,7 @@ export interface ProjectPaths {
   mainline: string
   exports: string
   references: string
+  plans: string
 }
 
 export function projectPaths(root: string): ProjectPaths {
@@ -56,6 +57,7 @@ export function projectPaths(root: string): ProjectPaths {
     mainline: path.join(ledger, 'mainline.jsonl'),
     exports: path.join(root, 'exports'),
     references: path.join(root, 'references'),
+    plans: path.join(root, 'plans'),
   }
 }
 
@@ -153,6 +155,8 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
     paths.impacts,
     paths.exports,
     paths.references,
+    paths.plans,
+    path.join(paths.plans, 'volumes'),
   ]) {
     await ensureDir(dirPath)
   }

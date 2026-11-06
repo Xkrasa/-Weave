@@ -57,6 +57,7 @@ import {
 } from './core/search.ts'
 import { deconstructFile } from './core/deconstruct.ts'
 import { startUiServer } from './core/ui-server.ts'
+import { approvePlan, listPlans, parsePlanKind } from './core/planning.ts'
 import { atomicWriteJson, ensureDir } from './core/io.ts'
 import {
   checkKnowledge,
@@ -122,6 +123,8 @@ async function main(): Promise<number> {
       return commandIndex(root, parsed, json)
     case 'deconstruct':
       return commandDeconstruct(root, parsed, json)
+    case 'plan':
+      return commandPlan(root, parsed, json)
     case 'ui':
       return commandUi(root, parsed, json)
     case 'rewrite':
@@ -406,6 +409,29 @@ async function commandIndex(root: string, parsed: Parsed, json: boolean): Promis
   if (json) outputJson({ ok: true, ...result })
   else console.log(`索引已重建：${result.chunks} 个段落，${result.terms} 个词项`)
   return 0
+}
+
+async function commandPlan(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0] ?? 'status'
+  if (action === 'status') {
+    const entries = await listPlans(root)
+    if (json) outputJson({ plans: entries })
+    else {
+      for (const entry of entries) {
+        console.log(`${entry.kind}\t${entry.status}\t${entry.path}${entry.approvedAt ? `\t${entry.approvedAt}` : ''}`)
+      }
+    }
+    return 0
+  }
+  if (action === 'approve') {
+    const kind = parsePlanKind(parsed.positionals[1])
+    const volume = optionalNumber(parsed, 'volume')
+    const entry = await approvePlan(root, kind, volume)
+    if (json) outputJson(entry)
+    else console.log(`已批准 ${entry.kind} 规划：${entry.path}`)
+    return 0
+  }
+  throw usageError('用法：weave plan status|approve <story|volume|character-arcs|rolling> [--volume <n>]')
 }
 
 async function commandUi(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -1193,6 +1219,7 @@ function printHelp(): void {
   weave knowledge <characterId> [--chapter <n>]
   weave knowledge check <chapter>
   weave rewrite <chapter> --paragraph <id> --goal <text>
+  weave plan status|approve <story|volume|character-arcs|rolling> [--volume <n>]
   weave method list|show <id>|route <chapter> [--platform long-form|short-form|generic|qidian|fanqie] [--max-tokens <n>]
   weave method history <chapter>
   weave style check <chapter>|samples
