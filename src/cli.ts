@@ -231,6 +231,7 @@ async function commandStatus(root: string, json: boolean): Promise<number> {
     console.log(`账本投影：${status.ledgerProjection ? `${status.ledgerProjection.status} @ ${status.ledgerProjection.appliedThrough}` : '未建立'}`)
     console.log(`未处理影响：${status.pendingImpacts}`)
     console.log(`检索索引：${status.searchIndex.status} @ ${status.searchIndex.mainlineRevision ?? '无'}`)
+    console.log(`长期记忆：${status.memory.current ? 'current' : 'stale'} @ 第 ${status.memory.throughChapter} 章`)
   }
   return 0
 }
@@ -1071,6 +1072,7 @@ async function commandFinalize(root: string, parsed: Parsed, json: boolean): Pro
       projectionFailed: result.projectionFailed,
       ledgerProjectionFailed: result.ledgerProjectionFailed,
       searchIndexFailed: result.searchIndexFailed,
+      memoryFailed: result.memoryFailed,
       impact: result.impact,
       draftEdited: result.draftEdited,
     })
@@ -1081,6 +1083,7 @@ async function commandFinalize(root: string, parsed: Parsed, json: boolean): Pro
     if (result.projectionFailed) console.error('警告：投影更新失败，请执行 weave rebuild')
     if (result.ledgerProjectionFailed) console.error('警告：账本投影更新失败，请执行 weave rebuild --projection ledger')
     if (result.searchIndexFailed) console.error('警告：检索索引同步失败，请执行 weave rebuild --projection search')
+    if (result.memoryFailed) console.error('警告：长期记忆摘要更新失败；下次写作会按主线重新生成')
     if (result.impact) {
       console.log(`影响面：${result.impact.items.length} 个后续章节待复查`)
       for (const item of result.impact.items) {

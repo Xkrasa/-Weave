@@ -2760,3 +2760,151 @@ test('effect review lints overdue loops from the real ledger', async () => {
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('long-form memory stays bounded, POV-scoped and refreshes after an amend', async () => {
+  const model = new FakeModel(['第四章草稿', '第四章草稿二'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await setCharacters(dir, [{ name: '林岚', status: 'alive', introducedIn: 1 }])
+    for (const chapter of [1, 2, 3]) {
+      await setContract(dir, chapter, { title: chapter === 1 ? '缺页' : `第${chapter}章` })
+      assert.equal((await checkContract(dir, chapter)).code, 0)
+      await writeFile(
+        path.join(dir, 'chapters', 'drafts', `${String(chapter).padStart(3, '0')}.md`),
+        `第${chapter}章正文。\n\n林岚把第${chapter}份记录收进铁盒。\n`,
+      )
+      assert.equal((await runCli(dir, ['finalize', String(chapter), '--json'])).code, 0)
+    }
+
+    const status = parseJson<{ memory: { current: boolean; throughChapter: number } }>(
+      (await runCli(dir, ['status', '--json'])).stdout,
+    )
+    assert.equal(status.memory.current, true)
+    assert.equal(status.memory.throughChapter, 3)
+
+    const memory = JSON.parse(await readFile(path.join(dir, '.weave', 'memory.json'), 'utf8')) as {
+      storySoFar: string
+      pov: Record<string, string>
+    }
+    assert.match(memory.storySoFar, /缺页/)
+    assert.match(memory.pov['林岚'] ?? '', /第1章/)
+
+    await setContract(dir, 4, { characters: ['林岚'], pov: '林岚' })
+    assert.equal((await checkContract(dir, 4)).code, 0)
+    const written = await runCli(dir, ['write', '4', '--json'])
+    assert.equal(written.code, 0, written.stderr)
+    const included = parseJson<{ included: string[] }>(written.stdout).included
+    assert.ok(included.includes('memory:pov:林岚'))
+    assert.equal(included.includes('memory:story-so-far'), false, 'limited POV must not receive the author summary')
+    assert.ok(JSON.stringify(model.requests[0]).includes('第1章'))
+
+    await setContract(dir, 1, { title: '缺页（改）' })
+    assert.equal((await checkContract(dir, 1)).code, 0)
+    assert.equal((await runCli(dir, ['amend', '1', '--json'])).code, 0)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), '改过的第一章。\n\n林岚重新数了一遍缺页。\n')
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+
+    const refreshed = JSON.parse(await readFile(path.join(dir, '.weave', 'memory.json'), 'utf8')) as {
+      mainlineRevision: number
+      storySoFar: string
+    }
+    assert.equal(refreshed.mainlineRevision, 4)
+    assert.match(refreshed.storySoFar, /缺页（改）/)
+
+    const second = await runCli(dir, ['write', '4', '--json'])
+    assert.equal(second.code, 0, second.stderr)
+    assert.ok(JSON.stringify(model.requests[1]).includes('缺页（改）'))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('POV knowledge splits critical scene state from compressible background', async () => {
+  const facts = [
+    {
+      factId: 'fact-location',
+      subject: '林岚',
+      predicate: 'location',
+      object: '三号泊位',
+      validFromChapter: 1,
+      validToChapter: null,
+      sourceRecordId: 'r1',
+      origin: 'derived',
+      supersedes: null,
+      confidence: 0.9,
+      evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+    },
+    ...Array.from({ length: 12 }, (_, index) => ({
+      factId: `fact-habit-${index}`,
+      subject: '林岚',
+      predicate: `habit_${index}`,
+      object: `旧习惯 ${index}`,
+      validFromChapter: 1,
+      validToChapter: null,
+      sourceRecordId: 'r1',
+      origin: 'derived',
+      supersedes: null,
+      confidence: 0.5,
+      evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+    })),
+  ]
+  const beliefs = [
+    {
+      beliefId: 'belief-mis',
+      characterId: '林岚',
+      proposition: '周砚出卖了父亲',
+      attitude: 'misbelieves',
+      sourceRecordId: 'r1',
+      learnedAtChapter: 1,
+      confidence: 0.7,
+      validFromChapter: 1,
+      validToChapter: null,
+      evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+    },
+    ...Array.from({ length: 8 }, (_, index) => ({
+      beliefId: `belief-bg-${index}`,
+      characterId: '林岚',
+      proposition: `旧传闻 ${index}`,
+      attitude: 'believes',
+      sourceRecordId: 'r1',
+      learnedAtChapter: 1,
+      confidence: 0.4,
+      validFromChapter: 1,
+      validToChapter: null,
+      evidence: [{ quote: '她发现缺页上留着港务局的印。', occurrence: 1 }],
+    })),
+  ]
+  const model = new FakeModel([
+    P05_DRAFT,
+    ledgerExtractionPayload(facts, beliefs),
+    coveragePayload(),
+    warningReviewFor('她发现缺页上留着港务局的印。'),
+    '第二章正文。',
+  ])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+
+    await setContract(dir, 2, { characters: ['林岚'], pov: '林岚' })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    const written = await runCli(dir, ['write', '2', '--json'])
+    assert.equal(written.code, 0, written.stderr)
+    const included = parseJson<{ included: string[] }>(written.stdout).included
+    assert.ok(included.includes('pov:knowledge:critical'))
+    assert.ok(included.includes('pov:knowledge:background'))
+
+    const body = JSON.stringify(model.requests[4])
+    assert.ok(body.includes('三号泊位'), 'current scene state must stay')
+    assert.ok(body.includes('周砚出卖了父亲'), 'motivating misbelief must stay')
+    assert.ok(body.includes('旧传闻 0'), 'long-tail background is still available')
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

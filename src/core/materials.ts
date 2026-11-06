@@ -1,5 +1,5 @@
 import path from 'node:path'
-import type { ChapterContract, Material, MaterialCategory, MaterialProvenance } from './types.ts'
+import type { ChapterContract, LedgerBelief, LedgerFact, Material, MaterialCategory, MaterialProvenance } from './types.ts'
 import { hashText } from './hash.ts'
 import { listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
 import { loadCharacters, loadContract } from './contract.ts'
@@ -11,6 +11,7 @@ import { loadStyleConstitution, loadAuthorSamples, styleText } from './style.ts'
 import { conflictError } from './errors.ts'
 import { rebuildSearchIndex, searchBook, searchIndexHealth } from './search.ts'
 import { listPlans, readApprovedPlan, type CharacterArc, type RollingPlan, type StoryPromise, type VolumeArc } from './planning.ts'
+import { ensureStoryMemory, povMemory } from './memory.ts'
 
 interface ReferenceManifestEntry {
   id: string
@@ -65,17 +66,70 @@ export async function collectMaterials(root: string, contract: ChapterContract):
   const povFacts = effectiveFacts(ledger.facts, priorChapter)
     .filter(fact => fact.subject === contract.pov)
   const povBeliefs = effectiveBeliefs(ledger.beliefs, contract.pov, priorChapter)
-  if (povFacts.length > 0 || povBeliefs.length > 0) {
-    materials.push(
-      material(
-        'pov:knowledge',
+  const split = splitPovKnowledge(contract, povFacts, povBeliefs)
+  if (split.criticalFacts.length > 0 || split.criticalBeliefs.length > 0) {
+    materials.push({
+      ...material(
+        'pov:knowledge:critical',
         'derived-locator',
         'derived',
         true,
-        `视角人物当前状态（${contract.pov}）`,
-        JSON.stringify({ facts: povFacts, beliefs: povBeliefs }, null, 2),
+        `视角人物当前关键状态（${contract.pov}）`,
+        JSON.stringify({ facts: split.criticalFacts, beliefs: split.criticalBeliefs }, null, 2),
       ),
-    )
+      priority: 0,
+    })
+  }
+  if (split.backgroundFacts.length > 0 || split.backgroundBeliefs.length > 0) {
+    materials.push({
+      ...material(
+        'pov:knowledge:background',
+        'derived-locator',
+        'derived',
+        false,
+        `视角人物背景认知（${contract.pov}，可压缩）`,
+        JSON.stringify({ facts: split.backgroundFacts, beliefs: split.backgroundBeliefs }, null, 2),
+      ),
+      priority: 20,
+    })
+  }
+
+  const memory = await ensureStoryMemory(root).catch(() => null)
+  if (memory) {
+    if (contract.narrativeMode === 'omniscient') {
+      if (memory.storySoFar) {
+        materials.push({
+          ...material('memory:story-so-far', 'derived-locator', 'derived', false, '全书进展摘要（派生定位，不是原文）', JSON.stringify({
+            throughChapter: memory.throughChapter,
+            text: memory.storySoFar,
+          }, null, 2)),
+          priority: 9,
+        })
+      }
+      if (memory.volume) {
+        materials.push({
+          ...material('memory:volume', 'derived-locator', 'derived', false, '当前卷进展摘要（派生定位）', JSON.stringify({
+            throughChapter: memory.throughChapter,
+            text: memory.volume,
+          }, null, 2)),
+          priority: 8,
+        })
+      }
+    }
+    const scoped = povMemory(memory, contract.pov)
+    if (scoped) {
+      materials.push({
+        ...material(
+          `memory:pov:${contract.pov}`,
+          'derived-locator',
+          'derived',
+          false,
+          `视角人物经历摘要（${contract.pov}，POV 安全）`,
+          JSON.stringify({ throughChapter: memory.throughChapter, text: scoped }, null, 2),
+        ),
+        priority: 6,
+      })
+    }
   }
 
   if (contract.chapter > 1) {
@@ -558,6 +612,40 @@ async function collectPlanningMaterials(root: string, contract: ChapterContract)
     })
   }
   return materials
+}
+
+
+const CRITICAL_PREDICATES = new Set([
+  'location', 'status', 'condition', 'injury', 'health', 'possession', 'goal', 'alive', 'dead',
+])
+
+/**
+ * Required knowledge stays bounded: current scene state, explicit contract knowledge and
+ * motivating misbeliefs are never trimmed. Long-tail history becomes compressible background.
+ */
+function splitPovKnowledge(
+  contract: ChapterContract,
+  facts: LedgerFact[],
+  beliefs: LedgerBelief[],
+): {
+  criticalFacts: LedgerFact[]
+  criticalBeliefs: LedgerBelief[]
+  backgroundFacts: LedgerFact[]
+  backgroundBeliefs: LedgerBelief[]
+} {
+  const explicit = new Set(
+    (contract.knowledge ?? [])
+      .filter(item => item.character === contract.pov)
+      .map(item => item.fact.replace(/\s+/g, '')),
+  )
+  const criticalFacts = facts.filter(fact => CRITICAL_PREDICATES.has(fact.predicate))
+  const backgroundFacts = facts.filter(fact => !CRITICAL_PREDICATES.has(fact.predicate))
+  const criticalBeliefs = beliefs.filter(belief =>
+    belief.attitude === 'misbelieves'
+    || explicit.has(belief.proposition.replace(/\s+/g, '')),
+  )
+  const backgroundBeliefs = beliefs.filter(belief => !criticalBeliefs.includes(belief))
+  return { criticalFacts, criticalBeliefs, backgroundFacts, backgroundBeliefs }
 }
 
 function material(

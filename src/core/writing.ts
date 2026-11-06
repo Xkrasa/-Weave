@@ -57,6 +57,7 @@ import { conflictError, modelError, reviewBlockedError, validationError, WeaveEr
 import { loadStage, requireStage } from './stages.ts'
 import { applyFinalizedChapter, markSearchIndexFailed } from './search.ts'
 import { assertOutlineApproved } from './outline.ts'
+import { ensureStoryMemory } from './memory.ts'
 import type {
   ContentCheckReport,
   CoverageAudit,
@@ -234,6 +235,7 @@ export interface FinalizeResult {
   projectionFailed: boolean
   ledgerProjectionFailed: boolean
   searchIndexFailed: boolean
+  memoryFailed: boolean
   impact: ImpactReport | null
   draftEdited: boolean
 }
@@ -371,6 +373,12 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     searchIndexFailed = true
     await markSearchIndexFailed(root, error instanceof Error ? error.message : String(error)).catch(() => {})
   }
+  let memoryFailed = false
+  try {
+    await ensureStoryMemory(root)
+  } catch {
+    memoryFailed = true
+  }
   let ledgerProjectionFailed = false
   if (commit.schemaVersion === 3) {
     try {
@@ -402,6 +410,7 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     projectionFailed,
     ledgerProjectionFailed,
     searchIndexFailed,
+    memoryFailed,
     impact,
     draftEdited,
   }

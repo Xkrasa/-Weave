@@ -27,6 +27,7 @@ import {
 } from './ledger-projection.ts'
 import { conflictError } from './errors.ts'
 import { rebuildSearchIndex, searchIndexHealth, type SearchIndexState } from './search.ts'
+import { loadStoryMemory, memoryIsCurrent } from './memory.ts'
 
 export interface ChapterStatus {
   chapter: number
@@ -52,6 +53,7 @@ export interface ProjectStatus {
   impacts: Array<{ chapter: number; pending: number; targets: number[] }>
   pendingImpacts: number
   searchIndex: Awaited<ReturnType<typeof searchIndexHealth>>
+  memory: { current: boolean; throughChapter: number; mainlineRevision: number | null }
 }
 
 export async function projectStatus(root: string): Promise<ProjectStatus> {
@@ -99,6 +101,7 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
     impacts,
     pendingImpacts: impacts.reduce((sum, item) => sum + item.pending, 0),
     searchIndex: await searchIndexHealth(root),
+    memory: await memoryStatus(root),
   }
 }
 
@@ -107,6 +110,20 @@ export interface DoctorResult {
   errors: string[]
   warnings: string[]
   checkedCommits: number
+}
+
+async function memoryStatus(root: string): Promise<{
+  current: boolean
+  throughChapter: number
+  mainlineRevision: number | null
+}> {
+  const head = await readMainline(root)
+  const memory = await loadStoryMemory(root)
+  return {
+    current: memoryIsCurrent(memory, head.mainlineRevision),
+    throughChapter: memory?.throughChapter ?? 0,
+    mainlineRevision: memory?.mainlineRevision ?? null,
+  }
 }
 
 function sanitize(name: string): string {
