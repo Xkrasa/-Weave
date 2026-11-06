@@ -21,6 +21,9 @@ import {
   mergeRevision,
   recheckChapter,
   reviseChapter,
+  reviseSelection,
+  discardSelectionRevision,
+  type SelectionOperation,
 } from './revisions.ts'
 import { amendChapter, finalizeChapter, writeChapter } from './writing.ts'
 import { doctor, exportBook, projectStatus } from './services.ts'
@@ -293,6 +296,34 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
       sendJson(response, 200, await savePreferences(root, body))
       return
     }
+  }
+  if (chapter && request.method === 'POST' && parts[3] === 'selection-revisions') {
+    const body = await readJsonBody<{
+      baseDraftHash?: string
+      selectedText?: string
+      occurrence?: number
+      operation?: SelectionOperation
+      instruction?: string
+    }>(request)
+    if (!body.baseDraftHash || typeof body.selectedText !== 'string' || !body.operation) {
+      throw usageError('缺少 baseDraftHash、selectedText 或 operation')
+    }
+    const config = await loadModelConfig(root)
+    const candidate = await reviseSelection(root, chapter, {
+      baseDraftHash: body.baseDraftHash,
+      selectedText: body.selectedText,
+      occurrence: body.occurrence,
+      operation: body.operation,
+      instruction: body.instruction,
+    }, config, new AbortController().signal)
+    sendJson(response, 200, { candidate })
+    return
+  }
+  if (chapter && request.method === 'POST' && parts[3] === 'selection-discard') {
+    const body = await readJsonBody<{ revisionId?: string }>(request)
+    if (!body.revisionId) throw usageError('缺少 revisionId')
+    sendJson(response, 200, await discardSelectionRevision(root, chapter, body.revisionId))
+    return
   }
   if (chapter && request.method === 'POST' && parts[3] === 'revise') {
     const body = await readJsonBody<{ findings?: string[] }>(request)

@@ -10,6 +10,7 @@ const state = {
   waivers: [],
   preferences: {},
   writeController: null,
+  selectionBusy: false,
   eval: null,
 };
 
@@ -97,6 +98,7 @@ async function openChapter(chapter, silent = false) {
   $('#chapter-eyebrow').textContent = `第 ${chapter} 章 · ${detail.stages.review?.passed ? '审查通过' : detail.stages.review ? '存在意见' : '未审查'}`;
   $('#chapter-title').textContent = contract?.title || `第 ${chapter} 章`;
   $('#draft').value = detail.draft || '';
+  updateSelectionTools();
   $('#draft-hash').textContent = detail.hash ? detail.hash.slice(0, 18) : '';
   clearTimeout(state.saveTimer);
   state.dirty = false;
@@ -206,7 +208,7 @@ async function renderInspector() {
         <div class="finding ${finding.severity}">
           <div class="finding-head"><span>${escapeHtml(finding.dimension)} · ${escapeHtml(finding.severity)}</span><span>${escapeHtml(finding.status)}</span></div>
           <p>${escapeHtml(finding.description)}</p>
-          ${finding.quote ? `<div class="quote">“${escapeHtml(finding.quote)}”</div>` : ''}
+          ${finding.quote ? `<div class="quote">"${escapeHtml(finding.quote)}"</div>` : ''}
           ${finding.waiveReason ? `<p class="small">豁免：${escapeHtml(finding.waiveReason)}</p>` : ''}
           <div class="finding-actions">
             ${finding.quote ? `<button data-locate="${escapeHtml(finding.quote)}">定位</button>` : ''}
@@ -287,7 +289,7 @@ async function renderInspector() {
             <div class="finding ${escapeHtml(finding.severity)}">
               <div class="finding-head"><span>${escapeHtml(finding.dimension)}</span><span>${escapeHtml(finding.severity)}</span></div>
               <p>${escapeHtml(finding.description)}</p>
-              ${finding.quote ? `<div class="quote">“${escapeHtml(finding.quote)}”</div>` : ''}
+              ${finding.quote ? `<div class="quote">"${escapeHtml(finding.quote)}"</div>` : ''}
             </div>`).join('')}`
         : '<div class="empty">还没有运行效果审查。</div>'}
       <button id="btn-effect-run">运行效果审查</button>`;
@@ -327,7 +329,7 @@ async function renderInspector() {
           </div>
         </div>
       `).join('')
-      : '<div class="empty">还没有修订候选。blocking finding 可以在“意见”里发起修订。</div>';
+      : '<div class="empty">还没有修订候选。blocking finding 可以在"意见"里发起修订。</div>';
     $$('#inspector-body [data-merge]').forEach(node => node.addEventListener('click', () => mergeRevision(node.dataset.merge)));
     $$('#inspector-body [data-diff]').forEach(node => node.addEventListener('click', () => showDiff(node.dataset.diff)));
   } else if (state.tab === 'waivers') {
@@ -637,6 +639,102 @@ async function showExport() {
   } catch (error) { toast(error.message, true); }
 }
 
+// ---- Selection revisions ----------------------------------------------------
+
+function updateSelectionTools() {
+  const editor = $('#draft');
+  const selected = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+  $('#selection-tools').classList.toggle('hidden', !selected.trim());
+}
+
+function selectedOccurrence(editor, selected) {
+  const before = editor.value.slice(0, editor.selectionStart);
+  let occurrence = 0;
+  let index = before.indexOf(selected);
+  while (index >= 0) {
+    occurrence += 1;
+    index = before.indexOf(selected, index + selected.length);
+  }
+  return occurrence + 1;
+}
+
+async function createSelectionRevision(operation) {
+  if (state.selectionBusy || !state.current) return;
+  const editor = $('#draft');
+  const selectedText = editor.value.slice(editor.selectionStart, editor.selectionEnd);
+  if (!selectedText.trim()) return;
+  const occurrence = selectedOccurrence(editor, selectedText);
+  const instruction = operation === 'custom' ? prompt('输入这段文字的修改要求') : undefined;
+  if (operation === 'custom' && !instruction?.trim()) return;
+  state.selectionBusy = true;
+  updateSave('生成划词候选…');
+  try {
+    await saveDraft();
+    const payload = await api(`/api/chapters/${state.current}/selection-revisions`, {
+      method: 'POST',
+      body: {
+        baseDraftHash: state.detail.hash,
+        selectedText,
+        occurrence,
+        operation,
+        ...(instruction ? { instruction } : {}),
+      },
+    });
+    const candidate = payload.candidate;
+    state.detail.revisions.unshift(candidate);
+    showSelectionCandidate(candidate);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    state.selectionBusy = false;
+    updateSave('已保存');
+  }
+}
+
+function showSelectionCandidate(candidate) {
+  const selection = candidate.selection;
+  const body = `
+    <p class="muted small">${escapeHtml(selection.operation)} · 仅替换选区，不自动定稿</p>
+    <div class="selection-diff">
+      <section><div class="section-label">原文</div><pre>${escapeHtml(selection.selectedText)}</pre></section>
+      <section><div class="section-label">候选</div><pre>${escapeHtml(selection.replacement)}</pre></section>
+    </div>`;
+  showModal('划词候选', body, [
+    { label: '采纳', action: () => mergeSelectionCandidate(candidate.revisionId) },
+    { label: '废弃', action: () => discardSelectionCandidate(candidate.revisionId) },
+    { label: '关闭', action: closeModal },
+  ]);
+}
+
+async function mergeSelectionCandidate(revisionId) {
+  try {
+    const report = await api(`/api/chapters/${state.current}/merge`, {
+      method: 'POST',
+      body: { revisionId },
+    });
+    if (report.status !== 'merged') {
+      toast('草稿已变化，旧候选不能覆盖新内容；请重新划词生成。', true);
+      return;
+    }
+    closeModal();
+    await openChapter(state.current, true);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function discardSelectionCandidate(revisionId) {
+  try {
+    await api(`/api/chapters/${state.current}/selection-discard`, {
+      method: 'POST',
+      body: { revisionId },
+    });
+    closeModal();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
 // ---- Blind pairwise reading -------------------------------------------------
 // The page never receives which strategy produced a side; the server keeps mapping sealed.
 
@@ -692,7 +790,7 @@ async function loadNextPair() {
   $$('#eval-view [data-eval-winner], #eval-view [data-eval-stop]').forEach(node => { node.disabled = done; });
   if (done) {
     $('#eval-left').innerHTML = '<p class="muted">这一组已经全部评完。</p>';
-    $('#eval-right').innerHTML = '<p class="muted">点“查看结果”解封胜率。</p>';
+    $('#eval-right').innerHTML = '<p class="muted">点"查看结果"解封胜率。</p>';
     return;
   }
   $('#eval-left').innerHTML = proseHtml(payload.pair.left);
@@ -748,6 +846,11 @@ async function showEvalReport(force = false) {
 }
 
 function bind() {
+  $('#draft').addEventListener('select', updateSelectionTools);
+  $('#draft').addEventListener('keyup', updateSelectionTools);
+  $('#draft').addEventListener('mouseup', updateSelectionTools);
+  $('#draft').addEventListener('input', () => $('#selection-tools').classList.add('hidden'));
+  $$('[data-selection-op]').forEach(node => node.addEventListener('click', () => createSelectionRevision(node.dataset.selectionOp)));
   $('#draft').addEventListener('input', () => {
     state.dirty = true;
     updateWords();

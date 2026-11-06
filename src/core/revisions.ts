@@ -17,11 +17,11 @@ import { resolveTaskConfig } from './model-policy.ts'
 import { appendUsage } from './usage.ts'
 import { recordMergeAccepted, recordPreferenceSignal } from './preferences.ts'
 import { draftHash, loadStage, readDraft, resolveEvidence, saveStage } from './stages.ts'
-import { atomicWrite, atomicWriteJson, ensureDir, readJsonIfExists } from './io.ts'
+import { atomicWrite, atomicWriteJson, ensureDir, normalizeText, readJsonIfExists } from './io.ts'
 import { objectHash, hashText } from './hash.ts'
 import { projectPaths } from './project.ts'
 import { draftPath } from './ledger.ts'
-import { chapterFileStem, loadContract } from './contract.ts'
+import { chapterFileStem, loadContract, requirePassingContractCheck } from './contract.ts'
 import { conflictError, validationError } from './errors.ts'
 import { applyWaivers } from './waivers.ts'
 import { loadMethods, methodText, selectMethods } from './methods.ts'
@@ -367,14 +367,221 @@ export async function rewriteParagraph(
   return candidate
 }
 
+export type SelectionOperation = 'polish' | 'expand' | 'correct' | 'custom'
+
+export interface SelectionRevisionCandidate extends RevisionCandidate {
+  selection: {
+    selectedText: string
+    replacement: string
+    occurrence: number
+    operation: SelectionOperation
+    instruction?: string
+    targetParagraphIds: string[]
+  }
+}
+
+export interface SelectionMergeReport extends MergeReport {
+  durationMs: number
+}
+
+export async function reviseSelection(
+  root: string,
+  chapter: number,
+  input: {
+    baseDraftHash: string
+    selectedText: string
+    occurrence?: number
+    operation: SelectionOperation
+    instruction?: string
+  },
+  config: ModelConfig,
+  signal: AbortSignal,
+): Promise<SelectionRevisionCandidate> {
+  const draft = await readDraft(root, chapter)
+  if (draftHash(draft) !== input.baseDraftHash) throw conflictError('草稿在划词后已变化，请重新选择')
+  const selectedText = normalizeText(input.selectedText)
+  if (!selectedText.trim()) throw validationError('划词内容不能为空')
+  if (!['polish', 'expand', 'correct', 'custom'].includes(input.operation)) throw validationError('未知的划词操作')
+  if (input.operation === 'custom' && !input.instruction?.trim()) throw validationError('自定义划词操作需要填写修改要求')
+  const occurrences = textOccurrences(draft, selectedText)
+  if (occurrences.length === 0) throw validationError('选文不在当前草稿中')
+  if (input.occurrence === undefined && occurrences.length > 1) throw validationError('选文重复出现，请提供 occurrence')
+  const occurrence = input.occurrence ?? 1
+  if (!Number.isSafeInteger(occurrence) || occurrence < 1 || occurrence > occurrences.length) {
+    throw validationError(`选文出现 ${occurrences.length} 次，occurrence 无法定位`)
+  }
+
+  const paragraphs = paragraphsOf(draft)
+  const targetIds = new Set(paragraphs.filter(paragraph =>
+    paragraph.text.includes(selectedText) || selectedText.includes(paragraph.text),
+  ).map(paragraph => paragraph.paragraphId))
+  if (targetIds.size === 0) throw validationError('无法确定选区所属段落')
+  const contract = await loadContract(root, chapter)
+  await requirePassingContractCheck(root, contract)
+  const context = await revisionContext(root, chapter, contract, paragraphs, targetIds)
+  const goal = input.operation === 'polish'
+    ? '润色选区，保留原意、事实和人物声音'
+    : input.operation === 'expand'
+      ? '仅基于已有事实扩写选区，不新增关键设定、人物认知或合同外剧情'
+      : input.operation === 'correct'
+        ? '纠正选区中的错别字、语病和不连贯表达，不改变剧情'
+        : input.instruction!.trim()
+  const prompt = [
+    `第 ${chapter} 章划词修稿。只允许返回授权选区的替换文字。`,
+    `操作目标：${goal}`,
+    '不得修改选区外的任何文字，不得改变事实、POV、合同硬节点或人物声音。',
+    '如果无法在不越界的前提下修改，请返回空字符串，不要返回整章或整段原文。',
+    '',
+    ...context,
+    '',
+    '授权选区原文：',
+    selectedText,
+    '',
+    '只输出：',
+    JSON.stringify({ text: '替换后的选区文字' }, null, 2),
+  ].join('\n')
+  const taskConfig = resolveTaskConfig(config, 'revision')
+  const model = taskConfig.model
+  const result = await completeJsonObject({
+    config: { ...taskConfig, model },
+    system: REVISION_SYSTEM,
+    user: prompt,
+    signal,
+  })
+  await appendUsage(root, { task: 'revision', model, usage: result.usage })
+  const replacement = typeof result.raw.text === 'string'
+    ? result.raw.text.trim()
+    : Array.isArray(result.raw.paragraphs)
+      ? String((result.raw.paragraphs[0] as Record<string, unknown> | undefined)?.text ?? '').trim()
+      : ''
+  if (!replacement) throw validationError('划词修稿没有返回可用替换文字')
+  if (replacement === selectedText) throw validationError('划词修稿没有改变选区内容')
+  if (!selectedText.includes('\n\n') && /\n\s*\n/.test(replacement)) {
+    throw validationError('划词修稿返回了超出授权选区的多段文字')
+  }
+  const revisedDraft = replaceTextOccurrence(draft, selectedText, replacement, occurrence)
+  const revision: SelectionRevisionCandidate = {
+    schemaVersion: 1,
+    revisionId: `rev-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    chapter,
+    baseDraftHash: input.baseDraftHash,
+    createdAt: new Date().toISOString(),
+    model,
+    usage: result.usage,
+    raw: result.text,
+    findings: [`selection-${input.operation}`],
+    instructions: [{ findingId: `selection-${input.operation}`, paragraphIds: [...targetIds], goal }],
+    contextMode: 'enriched',
+    baseParagraphs: paragraphs,
+    paragraphs: paragraphsOf(revisedDraft).filter(paragraph => targetIds.has(paragraph.paragraphId)),
+    rejected: [],
+    selection: {
+      selectedText,
+      replacement,
+      occurrence,
+      operation: input.operation,
+      ...(input.instruction?.trim() ? { instruction: input.instruction.trim() } : {}),
+      targetParagraphIds: [...targetIds],
+    },
+  }
+  await ensureDir(revisionDir(root, chapter))
+  await atomicWriteJson(candidatePath(root, chapter, revision.revisionId), revision)
+  return revision
+}
+
+export async function discardSelectionRevision(
+  root: string,
+  chapter: number,
+  revisionId: string,
+): Promise<{ status: 'discarded'; revisionId: string }> {
+  const candidate = await loadRevision(root, chapter, revisionId)
+  if (!('selection' in candidate)) throw validationError('该修订不是划词候选')
+  await recordPreferenceSignal(root, {
+    kind: 'rejected',
+    source: 'ignore',
+    chapter,
+    dimension: `快速编辑:${candidate.selection.operation}`,
+    revisionId,
+  })
+  return { status: 'discarded', revisionId }
+}
+
 export async function loadRevision(
   root: string,
   chapter: number,
   revisionId: string,
-): Promise<RevisionCandidate> {
+): Promise<RevisionCandidate | SelectionRevisionCandidate> {
   const candidate = await readJsonIfExists<RevisionCandidate>(candidatePath(root, chapter, revisionId))
   if (!candidate) throw validationError(`未找到修订候选：${revisionId}`)
   return candidate
+}
+
+async function mergeSelectionRevision(
+  root: string,
+  chapter: number,
+  candidate: SelectionRevisionCandidate,
+): Promise<SelectionMergeReport> {
+  const draft = await readDraft(root, chapter)
+  const selection = candidate.selection
+  const hunks: MergeHunk[] = [{
+    paragraphId: 'selection',
+    base: selection.selectedText,
+    revision: selection.replacement,
+    manual: selection.selectedText,
+    status: 'revision-only',
+    findingIds: candidate.findings,
+  }]
+  if (draftHash(draft) !== candidate.baseDraftHash) {
+    const report: SelectionMergeReport = {
+      schemaVersion: 1,
+      chapter,
+      revisionId: candidate.revisionId,
+      createdAt: new Date().toISOString(),
+      status: 'conflict',
+      baseDraftHash: candidate.baseDraftHash,
+      mergedDraftHash: null,
+      hunks: [{ ...hunks[0]!, status: 'conflict' }],
+      durationMs: Math.max(0, Date.now() - Date.parse(candidate.createdAt)),
+    }
+    await ensureDir(revisionDir(root, chapter))
+    await atomicWriteJson(mergePath(root, chapter, candidate.revisionId), report)
+    return report
+  }
+  const occurrences = textOccurrences(draft, selection.selectedText)
+  const start = occurrences[selection.occurrence - 1]
+  if (start === undefined) {
+    const report: SelectionMergeReport = {
+      schemaVersion: 1,
+      chapter,
+      revisionId: candidate.revisionId,
+      createdAt: new Date().toISOString(),
+      status: 'conflict',
+      baseDraftHash: candidate.baseDraftHash,
+      mergedDraftHash: null,
+      hunks: [{ ...hunks[0]!, status: 'conflict' }],
+      durationMs: Math.max(0, Date.now() - Date.parse(candidate.createdAt)),
+    }
+    await ensureDir(revisionDir(root, chapter))
+    await atomicWriteJson(mergePath(root, chapter, candidate.revisionId), report)
+    return report
+  }
+  const text = replaceTextOccurrence(draft, selection.selectedText, selection.replacement, selection.occurrence)
+  await atomicWrite(draftPath(root, chapter), text)
+  await recordMergeAccepted(root, chapter, candidate.revisionId, [`快速编辑:${selection.operation}`]).catch(() => {})
+  const report: SelectionMergeReport = {
+    schemaVersion: 1,
+    chapter,
+    revisionId: candidate.revisionId,
+    createdAt: new Date().toISOString(),
+    status: 'merged',
+    baseDraftHash: candidate.baseDraftHash,
+    mergedDraftHash: draftHash(text),
+    hunks,
+    durationMs: Math.max(0, Date.now() - Date.parse(candidate.createdAt)),
+  }
+  await ensureDir(revisionDir(root, chapter))
+  await atomicWriteJson(mergePath(root, chapter, candidate.revisionId), report)
+  return report
 }
 
 export async function mergeRevision(
@@ -382,8 +589,9 @@ export async function mergeRevision(
   chapter: number,
   revisionId: string,
   choices: Record<string, 'base' | 'revision' | 'manual'> = {},
-): Promise<MergeReport> {
+): Promise<MergeReport | SelectionMergeReport> {
   const candidate = await loadRevision(root, chapter, revisionId)
+  if ('selection' in candidate) return mergeSelectionRevision(root, chapter, candidate)
   const manualDraft = await readDraft(root, chapter)
   const base = mapParagraphs(candidate.baseParagraphs)
   const revision = mapParagraphs(candidate.paragraphs)
@@ -687,6 +895,22 @@ export async function ignoreFinding(
 
 function revisionDir(root: string, chapter: number): string {
   return path.join(projectPaths(root).revisions, chapterFileStem(chapter))
+}
+
+function textOccurrences(text: string, quote: string): number[] {
+  const positions: number[] = []
+  let index = text.indexOf(quote)
+  while (index >= 0) {
+    positions.push(index)
+    index = text.indexOf(quote, index + quote.length)
+  }
+  return positions
+}
+
+function replaceTextOccurrence(text: string, quote: string, replacement: string, occurrence: number): string {
+  const start = textOccurrences(text, quote)[occurrence - 1]
+  if (start === undefined) return text
+  return `${text.slice(0, start)}${replacement}${text.slice(start + quote.length)}`
 }
 
 function candidatePath(root: string, chapter: number, revisionId: string): string {
