@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weave · 写作工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand"><span class="mark">W</span><span>Weave</span></div>
+      <div class="project-meta">
+        <strong id="project-title">加载中</strong>
+        <span id="project-subtitle" class="muted"></span>
+      </div>
+      <div class="top-actions">
+        <button class="ghost" id="btn-search">搜索</button>
+        <button class="ghost" id="btn-deconstruct">拆书</button>
+        <button class="ghost" id="btn-doctor">体检</button>
+        <button class="ghost" id="btn-export">导出</button>
+        <button class="ghost" id="btn-refresh">刷新</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar">
+        <div class="sidebar-head">
+          <span>章节</span>
+          <span id="chapter-count" class="pill"></span>
+        </div>
+        <div id="chapter-list" class="chapter-list"></div>
+        <div class="sidebar-foot">
+          <div class="legend"><i class="dot finalized"></i>定稿 <i class="dot draft"></i>草稿 <i class="dot blocking"></i>阻断</div>
+          <div id="project-flags" class="muted small"></div>
+        </div>
+      </aside>
+
+      <section class="editor-panel">
+        <div class="editor-head">
+          <div>
+            <div class="eyebrow" id="chapter-eyebrow">选择章节</div>
+            <h1 id="chapter-title">开始写作</h1>
+          </div>
+          <div class="save-state" id="save-state">未打开</div>
+        </div>
+
+        <div class="stagebar" id="stagebar">
+          <button data-stage="contract-check">合同检查</button>
+          <button data-stage="check">内容检查</button>
+          <button data-stage="extract">抽取</button>
+          <button data-stage="audit">审计</button>
+          <button data-stage="review">审查</button>
+          <button data-stage="recheck">复检</button>
+          <button data-stage="write" class="accent">生成</button>
+          <button data-stage="amend">重开</button>
+          <button data-stage="finalize" class="danger">定稿</button>
+        </div>
+
+        <div class="editor-wrap">
+          <textarea id="draft" spellcheck="false" placeholder="选择章节后开始写作，或使用“生成”创建草稿。"></textarea>
+          <div class="editor-foot">
+            <span id="word-count">0 字</span>
+            <span id="draft-hash" class="muted"></span>
+          </div>
+        </div>
+
+        <div class="contract-strip" id="contract-strip">
+          <span class="muted">本章合同会显示在这里。</span>
+        </div>
+      </section>
+
+      <aside class="inspector">
+        <div class="tabs" id="tabs">
+          <button data-tab="findings" class="active">意见</button>
+          <button data-tab="revisions">修订</button>
+          <button data-tab="waivers">豁免</button>
+          <button data-tab="methods">方法</button>
+          <button data-tab="style">风格</button>
+        </div>
+        <div id="inspector-body" class="inspector-body">
+          <div class="empty">选择章节查看审查结果。</div>
+        </div>
+      </aside>
+    </main>
+
+    <div id="drawer" class="drawer hidden">
+      <div class="drawer-card">
+        <div class="drawer-head">
+          <strong>全文搜索</strong>
+          <button class="icon" id="drawer-close">×</button>
+        </div>
+        <form id="search-form" class="search-form">
+          <input id="search-q" placeholder="输入中文短词，例如：账本" autocomplete="off">
+          <button class="accent">搜索</button>
+        </form>
+        <div class="search-filters">
+          <input id="search-entity" placeholder="人物">
+          <input id="search-location" placeholder="地点">
+          <input id="search-storyline" placeholder="故事线">
+          <input id="search-time" placeholder="时间">
+        </div>
+        <div id="search-results" class="results"></div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <div id="modal" class="modal hidden">
+      <div class="modal-card">
+        <div class="modal-head"><strong id="modal-title"></strong><button class="icon" id="modal-close">×</button></div>
+        <div id="modal-body"></div>
+        <div id="modal-actions" class="modal-actions"></div>
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

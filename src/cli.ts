@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from 'node:path'
 import { readFile, readdir } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
 import {
   findProjectRoot,
   initProject,
@@ -53,6 +54,7 @@ import {
   type VectorFixture,
 } from './core/search.ts'
 import { deconstructFile } from './core/deconstruct.ts'
+import { startUiServer } from './core/ui-server.ts'
 import { atomicWriteJson, ensureDir } from './core/io.ts'
 import {
   checkKnowledge,
@@ -80,7 +82,7 @@ interface Parsed {
   flags: Record<string, string | true>
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank', 'open'])
 let eventStreamStarted = false
 
 async function main(): Promise<number> {
@@ -118,6 +120,8 @@ async function main(): Promise<number> {
       return commandIndex(root, parsed, json)
     case 'deconstruct':
       return commandDeconstruct(root, parsed, json)
+    case 'ui':
+      return commandUi(root, parsed, json)
     case 'rewrite':
       return commandRewrite(root, parsed, json)
     case 'method':
@@ -397,6 +401,37 @@ async function commandIndex(root: string, parsed: Parsed, json: boolean): Promis
   if (json) outputJson({ ok: true, ...result })
   else console.log(`索引已重建：${result.chunks} 个段落，${result.terms} 个词项`)
   return 0
+}
+
+async function commandUi(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const port = optionalNumber(parsed, 'port') ?? 0
+  if (port < 0 || port > 65535) throw usageError('--port 必须在 0–65535 之间')
+  const ui = await startUiServer(root, { port })
+  if (json) outputJson({ ok: true, url: ui.url, port: ui.port })
+  else {
+    console.log(`Weave 工作台已启动：${ui.url}`)
+    console.log('按 Ctrl+C 停止。')
+  }
+  if (parsed.flags.open === true) openBrowser(ui.url)
+  await new Promise<void>((resolve, reject) => {
+    const stop = () => {
+      ui.close().then(resolve).catch(reject)
+    }
+    process.once('SIGINT', stop)
+    process.once('SIGTERM', stop)
+    ui.server.once('close', resolve)
+  })
+  return 0
+}
+
+function openBrowser(url: string): void {
+  const command = process.platform === 'win32'
+    ? ['cmd', ['/c', 'start', '', url]]
+    : process.platform === 'darwin'
+      ? ['open', [url]]
+      : ['xdg-open', [url]]
+  const child = spawn(command[0] as string, command[1] as string[], { detached: true, stdio: 'ignore' })
+  child.unref()
 }
 
 async function commandDeconstruct(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -1125,6 +1160,7 @@ function printHelp(): void {
   weave chunk <chunkId>
   weave index rebuild|status
   weave deconstruct <file> [--split-pattern <regex>] [--save]
+  weave ui [--port <n>] [--open]
   weave loops list|show <loopId>
   weave timeline series
   weave check <chapter>
