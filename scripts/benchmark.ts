@@ -1,0 +1,791 @@
+#!/usr/bin/env node
+/**
+ * Offline-capable effect benchmark harness.
+ *
+ * Two modes:
+ *   --fake  deterministic scaffold prose from a local OpenAI-compatible server.
+ *           Measures plumbing (materials, budgets, retrieval, latency), never literary quality.
+ *   --real  runs the same pipeline against the configured model. Required for any
+ *           claim about how a chapter reads.
+ *
+ * Usage:
+ *   node scripts/benchmark.ts run --suite craft|longitudinal|all [--seed <id>] [--config baseline]
+ *                                 [--ablation retrieval=off] [--mode fake|real]
+ *                                 [--base-url <url>] [--model <id>] [--out <dir>]
+ *   node scripts/benchmark.ts pairs --a <runDir> --b <runDir> [--out <dir>]
+ *   node scripts/benchmark.ts score --pairs <pairs.json> --scores <scores.jsonl>
+ */
+import { createServer, type Server, type ServerResponse } from 'node:http'
+import { spawn } from 'node:child_process'
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { randomInt } from 'node:crypto'
+
+const REPO_ROOT = path.resolve(import.meta.dirname, '..')
+const CLI = path.join(REPO_ROOT, 'src', 'cli.ts')
+const SEED_DIR = path.join(REPO_ROOT, 'bench', 'seeds')
+
+interface SeedCharacter {
+  name: string
+  status?: 'alive' | 'dead'
+  introducedIn?: number
+  deathChapter?: number
+}
+
+interface SeedChapter {
+  chapter: number
+  title: string
+  pov: string
+  time: string
+  location: string
+  openingState: string
+  endingState: string
+  goal: string
+  obstacle: string
+  mustHappen: string[]
+  mayHappen?: string[]
+  mustNotHappen?: string[]
+  characters: string[]
+  threads: string[]
+  targetWords: number
+  previousLink: string
+  nextLink: string
+}
+
+interface Seed {
+  id: string
+  kind: 'craft' | 'longitudinal'
+  title: string
+  genre: string
+  audience: string
+  promise: string
+  premise: string
+  world: string
+  style: string
+  prohibitions?: string[]
+  characters: SeedCharacter[]
+  chapters: SeedChapter[]
+  /** Synthesized chapters before the measured ones (longitudinal only). */
+  priorChapters?: number
+  priorBeats?: string[]
+  /** Evidence a retrieval-aware chapter should be able to recall. */
+  recallExpectations?: Array<{ chapter: number; terms: string[]; why: string }>
+}
+
+interface CliResult {
+  code: number
+  stdout: string
+  stderr: string
+  elapsedMs: number
+}
+
+function parseFlags(argv: string[]): { positionals: string[]; flags: Record<string, string | true> } {
+  const positionals: string[] = []
+  const flags: Record<string, string | true> = {}
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]!
+    if (!token.startsWith('--')) {
+      positionals.push(token)
+      continue
+    }
+    const [key, inline] = token.slice(2).split('=', 2)
+    if (!key) continue
+    if (inline !== undefined) {
+      flags[key] = inline
+      continue
+    }
+    const next = argv[index + 1]
+    if (next !== undefined && !next.startsWith('--')) {
+      flags[key] = next
+      index += 1
+    } else {
+      flags[key] = true
+    }
+  }
+  return { positionals, flags }
+}
+
+function flagString(flags: Record<string, string | true>, key: string): string | undefined {
+  const value = flags[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+function runCli(cwd: string, args: string[], env: Record<string, string> = {}): Promise<CliResult> {
+  const startedAt = Date.now()
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CLI, ...args], {
+      cwd,
+      env: { ...process.env, ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.on('error', reject)
+    child.on('close', code => resolve({ code: code ?? -1, stdout, stderr, elapsedMs: Date.now() - startedAt }))
+  })
+}
+
+function parseJson<T>(stdout: string): T {
+  const start = stdout.indexOf('{')
+  const end = stdout.lastIndexOf('}')
+  if (start < 0 || end <= start) throw new Error(`no JSON in output: ${stdout.slice(0, 400)}`)
+  return JSON.parse(stdout.slice(start, end + 1)) as T
+}
+
+/** Deterministic scaffold prose: exercises the pipeline, never claims to read well. */
+function scaffoldProse(seed: Seed, chapter: SeedChapter, salt: string): string {
+  const beats = [
+    chapter.openingState,
+    chapter.goal ? `她只想要一件事：${chapter.goal}。` : '',
+    chapter.obstacle ? `阻挡她的是${chapter.obstacle}。` : '',
+    ...chapter.mustHappen.map(item => `然后，${item}。`),
+    chapter.mayHappen?.[0] ? `中途${chapter.mayHappen[0]}。` : '',
+    chapter.endingState,
+  ].filter(Boolean)
+  const lines = [`第${chapter.chapter}章 ${chapter.title}`, '', ...beats.map(line => `${line}\n`)]
+  const filler = [
+    `港口的雾压得很低，${salt}把远处的灯拉成一条细线。`,
+    `她没有立刻回答，只把手里的东西按在桌沿，指节发白。`,
+    `对方看着她，像在等一个更省事的答案。`,
+    `风从门缝里钻进来，纸页翻了一下，又停住。`,
+  ]
+  let characters = [...lines.join('\n')].length
+  let index = 0
+  while (characters < Math.max(1200, Math.floor(chapter.targetWords * 0.8))) {
+    const sentence = `${filler[index % filler.length]}\n\n`
+    lines.push(sentence)
+    characters += [...sentence].length
+    index += 1
+  }
+  return `${lines.join('\n').trim()}\n`
+}
+
+class FakeModel {
+  private readonly server: Server
+  private readonly seed: Seed
+  private readonly salt: string
+  private readonly requests: Array<Record<string, unknown>> = []
+  baseUrl = ''
+
+  constructor(seed: Seed, salt: string) {
+    this.seed = seed
+    this.salt = salt
+    this.server = createServer((request, response) => { void this.handle(request, response) })
+  }
+
+  async start(): Promise<void> {
+    await new Promise<void>(resolve => this.server.listen(0, '127.0.0.1', resolve))
+    const address = this.server.address()
+    if (!address || typeof address === 'string') throw new Error('fake model failed to bind')
+    this.baseUrl = `http://127.0.0.1:${address.port}/v1`
+  }
+
+  async stop(): Promise<void> {
+    await new Promise<void>(resolve => this.server.close(() => resolve()))
+  }
+
+  private async handle(request: import('node:http').IncomingMessage, response: ServerResponse): Promise<void> {
+    const chunks: Buffer[] = []
+    for await (const chunk of request) chunks.push(Buffer.from(chunk))
+    let body: Record<string, unknown> = {}
+    try {
+      body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
+    } catch {
+      body = {}
+    }
+    this.requests.push(body)
+    const messages = Array.isArray(body.messages) ? body.messages as Array<Record<string, unknown>> : []
+    const user = String(messages.find(message => message.role === 'user')?.content ?? '')
+    const chapter = this.chapterFromPrompt(user)
+    const prose = scaffoldProse(this.seed, chapter, this.salt)
+    response.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+    })
+    const pieces = splitForStream(prose)
+    for (const piece of pieces) {
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: piece } }] })}\n\n`)
+    }
+    response.write(`data: ${JSON.stringify({
+      choices: [{ delta: {} }],
+      usage: {
+        prompt_tokens: Math.ceil(user.length / 1.6),
+        completion_tokens: Math.ceil(prose.length / 1.6),
+        total_tokens: Math.ceil((user.length + prose.length) / 1.6),
+      },
+    })}\n\n`)
+    response.write('data: [DONE]\n\n')
+    response.end()
+  }
+
+  private chapterFromPrompt(prompt: string): SeedChapter {
+    for (const chapter of this.seed.chapters) {
+      if (prompt.includes(`"chapter": ${chapter.chapter}`)) return chapter
+    }
+    return this.seed.chapters[this.seed.chapters.length - 1]!
+  }
+}
+
+function splitForStream(text: string): string[] {
+  const pieces: string[] = []
+  const size = 240
+  const characters = [...text]
+  for (let index = 0; index < characters.length; index += size) {
+    pieces.push(characters.slice(index, index + size).join(''))
+  }
+  return pieces
+}
+
+async function loadSeeds(suite: string): Promise<Seed[]> {
+  const seeds: Seed[] = []
+  for (const name of await readdir(SEED_DIR).catch(() => [] as string[])) {
+    if (!name.endsWith('.json')) continue
+    const seed = JSON.parse(await readFile(path.join(SEED_DIR, name), 'utf8')) as Seed
+    if (suite === 'all' || seed.kind === suite) seeds.push(seed)
+  }
+  return seeds.sort((a, b) => a.id.localeCompare(b.id))
+}
+
+function canonMarkdown(seed: Seed): { premise: string; world: string; style: string; prohibitions: string } {
+  const cast = seed.characters
+    .map(character => `- ${character.name}（第 ${character.introducedIn ?? 1} 章登场）`)
+    .join('\n')
+  return {
+    premise: [
+      `# ${seed.title}`,
+      '',
+      `题材：${seed.genre}；目标读者：${seed.audience}`,
+      '',
+      `核心承诺：${seed.promise}`,
+      '',
+      seed.premise,
+      '',
+      '## 人物',
+      cast,
+    ].join('\n'),
+    world: seed.world,
+    style: seed.style,
+    prohibitions: (seed.prohibitions ?? []).join('\n'),
+  }
+}
+
+function contractJson(chapter: SeedChapter): Record<string, unknown> {
+  return {
+    chapter: chapter.chapter,
+    title: chapter.title,
+    pov: chapter.pov,
+    time: chapter.time,
+    location: chapter.location,
+    openingState: chapter.openingState,
+    endingState: chapter.endingState,
+    goal: chapter.goal,
+    obstacle: chapter.obstacle,
+    mustHappen: chapter.mustHappen,
+    mayHappen: chapter.mayHappen ?? [],
+    mustNotHappen: chapter.mustNotHappen ?? [],
+    characters: chapter.characters,
+    threads: chapter.threads,
+    targetWords: chapter.targetWords,
+    previousLink: chapter.previousLink,
+    nextLink: chapter.nextLink,
+  }
+}
+
+interface ChapterRecord {
+  chapter: number
+  mode: 'generated' | 'synthesized'
+  draftPath: string
+  characters: number
+  estimatedTokens?: number
+  included?: string[]
+  omitted?: Array<{ sourceId: string; reason: string }>
+  usage?: Record<string, number>
+  elapsedMs: number
+  exitCode: number
+}
+
+interface SeedRun {
+  seed: string
+  kind: Seed['kind']
+  config: string
+  ablations: Record<string, string>
+  mode: 'fake' | 'real'
+  model: string
+  projectDir: string
+  chapters: ChapterRecord[]
+  recall?: Array<{
+    chapter: number
+    terms: string[]
+    why: string
+    matched: string[]
+    missed: string[]
+  }>
+  durations: { writeMs: number; totalMs: number }
+  errors: string[]
+}
+
+async function writeCanon(dir: string, seed: Seed): Promise<void> {
+  const canon = canonMarkdown(seed)
+  await writeFile(path.join(dir, 'canon', 'premise.md'), `${canon.premise}\n`)
+  await writeFile(path.join(dir, 'canon', 'world.md'), `${canon.world}\n`)
+  await writeFile(path.join(dir, 'canon', 'style.md'), `${canon.style}\n`)
+  await writeFile(path.join(dir, 'canon', 'prohibitions.md'), `${canon.prohibitions}\n`)
+  await writeFile(
+    path.join(dir, 'canon', 'characters.json'),
+    `${JSON.stringify({
+      characters: seed.characters.map(character => ({
+        name: character.name,
+        status: character.status ?? 'alive',
+        introducedIn: character.introducedIn ?? 1,
+        ...(character.deathChapter === undefined ? {} : { deathChapter: character.deathChapter }),
+      })),
+    }, null, 2)}\n`,
+  )
+}
+
+async function writeContract(dir: string, chapter: SeedChapter): Promise<void> {
+  await writeFile(
+    path.join(dir, 'outlines', 'chapters', `${String(chapter.chapter).padStart(3, '0')}.json`),
+    `${JSON.stringify(contractJson(chapter), null, 2)}\n`,
+  )
+}
+
+/** Long-form seeds always exercise the same pipeline; scaffolding keeps runs offline and fast. */
+function synthesizedPrior(seed: Seed, chapter: number): string {
+  const beats = seed.priorBeats ?? [seed.promise]
+  const beat = beats[(chapter - 1) % Math.max(1, beats.length)]
+  const lines = [`第${chapter}章 前情${chapter}`, '', `${beat}`]
+  let characters = [...lines.join('\n')].length
+  let index = 0
+  const filler = [
+    `她把当天的记录折好，塞回铁盒。`,
+    `街上的灯一盏一盏亮起来，潮气贴着墙根走。`,
+    `有人敲门，又走了。`,
+  ]
+  while (characters < 1400) {
+    const sentence = `${filler[index % filler.length]}\n\n`
+    lines.push(sentence)
+    characters += [...sentence].length
+    index += 1
+  }
+  return `${lines.join('\n').trim()}\n`
+}
+
+function priorContract(seed: Seed, chapter: number): Record<string, unknown> {
+  const character = seed.characters[0]!
+  return {
+    chapter,
+    title: `前情${chapter}`,
+    pov: character.name,
+    time: `第 ${chapter} 天`,
+    location: '旧城',
+    openingState: '天色将晚',
+    endingState: '她把记录收起',
+    goal: '记录当天发生的事',
+    obstacle: '线索零散',
+    mustHappen: ['她把当天的记录写下来'],
+    mayHappen: [],
+    mustNotHappen: [],
+    characters: [character.name],
+    threads: ['主线'],
+    targetWords: 1400,
+    previousLink: chapter === 1 ? '开篇' : '承接前章',
+    nextLink: '继续',
+  }
+}
+
+async function runSeed(
+  seed: Seed,
+  options: {
+    outDir: string
+    config: string
+    ablations: Record<string, string>
+    mode: 'fake' | 'real'
+    baseUrl: string
+    model: string
+    apiKey: string
+  },
+): Promise<SeedRun> {
+  const startedAt = Date.now()
+  const projectDir = path.join(options.outDir, seed.id)
+  await mkdir(projectDir, { recursive: true })
+  const errors: string[] = []
+  const record: SeedRun = {
+    seed: seed.id,
+    kind: seed.kind,
+    config: options.config,
+    ablations: options.ablations,
+    mode: options.mode,
+    model: options.model,
+    projectDir,
+    chapters: [],
+    durations: { writeMs: 0, totalMs: 0 },
+    errors,
+  }
+
+  const init = await runCli(projectDir, [
+    'init', '.', '--title', seed.title, '--model', options.model,
+    '--base-url', options.baseUrl, '--workflow', 'p0',
+  ])
+  if (init.code !== 0) {
+    errors.push(`init: ${init.stderr || init.stdout}`)
+    record.durations.totalMs = Date.now() - startedAt
+    return record
+  }
+  await writeCanon(projectDir, seed)
+  await mkdir(path.join(projectDir, 'outlines', 'chapters'), { recursive: true })
+  await writeFile(
+    path.join(projectDir, '.weave', 'bench-config.json'),
+    `${JSON.stringify({ config: options.config, ablations: options.ablations }, null, 2)}\n`,
+  )
+
+  const priorChapters = seed.kind === 'longitudinal' ? seed.priorChapters ?? 0 : 0
+  for (let chapter = 1; chapter <= priorChapters; chapter += 1) {
+    await writeFile(
+      path.join(projectDir, 'outlines', 'chapters', `${String(chapter).padStart(3, '0')}.json`),
+      `${JSON.stringify(priorContract(seed, chapter), null, 2)}\n`,
+    )
+    const check = await runCli(projectDir, ['contract', 'check', String(chapter), '--json'])
+    if (check.code !== 0) errors.push(`prior contract ${chapter}: ${check.stdout}${check.stderr}`)
+    await writeFile(
+      path.join(projectDir, 'chapters', 'drafts', `${String(chapter).padStart(3, '0')}.md`),
+      synthesizedPrior(seed, chapter),
+    )
+    const finalized = await runCli(projectDir, ['finalize', String(chapter), '--json'])
+    if (finalized.code !== 0) errors.push(`prior finalize ${chapter}: ${finalized.stdout}${finalized.stderr}`)
+  }
+
+  const env: Record<string, string> = options.apiKey ? { WEAVE_API_KEY: options.apiKey } : {}
+  for (const chapter of seed.chapters) {
+    await writeContract(projectDir, chapter)
+    const check = await runCli(projectDir, ['contract', 'check', String(chapter.chapter), '--json'])
+    if (check.code !== 0) {
+      errors.push(`contract ${chapter.chapter}: ${check.stdout}${check.stderr}`)
+      record.chapters.push({
+        chapter: chapter.chapter, mode: 'generated', draftPath: '', characters: 0,
+        elapsedMs: check.elapsedMs, exitCode: check.code,
+      })
+      continue
+    }
+    const write = await runCli(projectDir, ['write', String(chapter.chapter), '--json'], env)
+    record.durations.writeMs += write.elapsedMs
+    if (write.code !== 0) {
+      errors.push(`write ${chapter.chapter}: ${write.stderr || write.stdout}`)
+      record.chapters.push({
+        chapter: chapter.chapter, mode: 'generated', draftPath: '', characters: 0,
+        elapsedMs: write.elapsedMs, exitCode: write.code,
+      })
+      continue
+    }
+    let payload: Record<string, unknown> = {}
+    try {
+      payload = parseJson<Record<string, unknown>>(write.stdout)
+    } catch (error) {
+      errors.push(`write ${chapter.chapter} json: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    const draftPath = path.join(projectDir, 'chapters', 'drafts', `${String(chapter.chapter).padStart(3, '0')}.md`)
+    const draft = await readFile(draftPath, 'utf8').catch(() => '')
+    const included = Array.isArray(payload.included) ? payload.included as string[] : undefined
+    const omitted = Array.isArray(payload.omitted)
+      ? payload.omitted as Array<{ sourceId: string; reason: string }>
+      : undefined
+    record.chapters.push({
+      chapter: chapter.chapter,
+      mode: 'generated',
+      draftPath: path.relative(options.outDir, draftPath).split(path.sep).join('/'),
+      characters: [...draft.replace(/\s/g, '')].length,
+      estimatedTokens: typeof payload.estimatedTokens === 'number' ? payload.estimatedTokens : undefined,
+      included,
+      omitted,
+      usage: (payload.usage && typeof payload.usage === 'object') ? payload.usage as Record<string, number> : undefined,
+      elapsedMs: write.elapsedMs,
+      exitCode: write.code,
+    })
+    if (included) {
+      for (const expectation of seed.recallExpectations ?? []) {
+        if (expectation.chapter !== chapter.chapter) continue
+        const matched = expectation.terms.filter(term => included.some(source => source.includes(term)))
+        const missed = expectation.terms.filter(term => !matched.includes(term))
+        record.recall ??= []
+        record.recall.push({ ...expectation, matched, missed })
+      }
+    }
+    const finalized = await runCli(projectDir, ['finalize', String(chapter.chapter), '--json'])
+    if (finalized.code !== 0) errors.push(`finalize ${chapter.chapter}: ${finalized.stdout}${finalized.stderr}`)
+  }
+
+  record.durations.totalMs = Date.now() - startedAt
+  return record
+}
+
+async function commandRun(flags: Record<string, string | true>): Promise<number> {
+  const suite = flagString(flags, 'suite') ?? 'craft'
+  const seedFilter = flagString(flags, 'seed')
+  const config = flagString(flags, 'config') ?? 'baseline'
+  const mode = (flagString(flags, 'mode') ?? 'fake') as 'fake' | 'real'
+  const model = flagString(flags, 'model') ?? (mode === 'fake' ? 'fake-bench' : 'gpt-4o-mini')
+  const ablations: Record<string, string> = {}
+  for (const [key, value] of Object.entries(flags)) {
+    if (!key.startsWith('ablation.')) continue
+    ablations[key.slice('ablation.'.length)] = String(value)
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  const outDir = path.resolve(flagString(flags, 'out') ?? path.join(REPO_ROOT, 'bench', 'runs', `${stamp}-${config}`))
+  await mkdir(outDir, { recursive: true })
+
+  let seeds = await loadSeeds(suite)
+  if (seedFilter) seeds = seeds.filter(seed => seed.id === seedFilter)
+  if (seeds.length === 0) throw new Error(`no seeds matched suite=${suite}${seedFilter ? ` seed=${seedFilter}` : ''}`)
+
+  const fakeModels = new Map<string, FakeModel>()
+  let baseUrl = flagString(flags, 'base-url') ?? ''
+  const apiKey = process.env.WEAVE_API_KEY ?? ''
+  if (mode === 'fake') {
+    for (const seed of seeds) {
+      const fake = new FakeModel(seed, config)
+      await fake.start()
+      fakeModels.set(seed.id, fake)
+      if (!baseUrl) baseUrl = fake.baseUrl
+    }
+  }
+  if (!baseUrl) throw new Error('real mode requires --base-url or WEAVE_API_KEY + configured endpoint')
+
+  const runs: SeedRun[] = []
+  try {
+    for (const seed of seeds) {
+      const seedBase = mode === 'fake' ? fakeModels.get(seed.id)!.baseUrl : baseUrl
+      const run = await runSeed(seed, { outDir, config, ablations, mode, baseUrl: seedBase, model, apiKey })
+      runs.push(run)
+      await writeFile(path.join(outDir, `${seed.id}.run.json`), `${JSON.stringify(run, null, 2)}\n`)
+    }
+  } finally {
+    for (const fake of fakeModels.values()) await fake.stop()
+  }
+
+  const report = buildReport(runs, { suite, config, ablations, mode, model })
+  await writeFile(path.join(outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
+  await writeFile(path.join(outDir, 'report.md'), renderReport(report))
+  console.log(JSON.stringify({
+    ok: report.ok,
+    mode,
+    suite,
+    seeds: runs.length,
+    chapters: runs.reduce((sum, run) => sum + run.chapters.length, 0),
+    outDir,
+    note: mode === 'fake' ? 'fake mode measures plumbing only; it cannot support literary claims' : 'real mode: retain raw outputs before judging',
+  }, null, 2))
+  return report.ok ? 0 : 1
+}
+
+interface BenchReport {
+  ok: boolean
+  suite: string
+  config: string
+  ablations: Record<string, string>
+  mode: 'fake' | 'real'
+  model: string
+  createdAt: string
+  note: string
+  totals: { seeds: number; chapters: number; writeMs: number; totalMs: number; characters: number }
+  recall: { expectations: number; matchedTerms: number; missedTerms: number }
+  seeds: Array<{
+    seed: string
+    kind: Seed['kind']
+    chapters: number
+    writeMs: number
+    totalMs: number
+    characters: number
+    estimatedTokens: number
+    omitted: number
+    errors: number
+    recallMissed: string[]
+  }>
+  errors: Array<{ seed: string; error: string }>
+}
+
+function buildReport(
+  runs: SeedRun[],
+  meta: { suite: string; config: string; ablations: Record<string, string>; mode: 'fake' | 'real'; model: string },
+): BenchReport {
+  const errors = runs.flatMap(run => run.errors.map(error => ({ seed: run.seed, error })))
+  const recall = runs.flatMap(run => run.recall ?? [])
+  const expectations = recall.length
+  const matchedTerms = recall.reduce((sum, item) => sum + item.matched.length, 0)
+  const missedTerms = recall.reduce((sum, item) => sum + item.missed.length, 0)
+  return {
+    ok: errors.length === 0,
+    suite: meta.suite,
+    config: meta.config,
+    ablations: meta.ablations,
+    mode: meta.mode,
+    model: meta.model,
+    createdAt: new Date().toISOString(),
+    note: meta.mode === 'fake'
+      ? 'Fake mode: deterministic scaffold prose. Measures plumbing only, never literary quality.'
+      : 'Real mode: compare anonymized pairs; do not accept LLM self-scores as the only evidence.',
+    totals: {
+      seeds: runs.length,
+      chapters: runs.reduce((sum, run) => sum + run.chapters.length, 0),
+      writeMs: runs.reduce((sum, run) => sum + run.durations.writeMs, 0),
+      totalMs: runs.reduce((sum, run) => sum + run.durations.totalMs, 0),
+      characters: runs.reduce((sum, run) => sum + run.chapters.reduce((inner, item) => inner + item.characters, 0), 0),
+    },
+    recall: { expectations, matchedTerms, missedTerms },
+    seeds: runs.map(run => ({
+      seed: run.seed,
+      kind: run.kind,
+      chapters: run.chapters.length,
+      writeMs: run.durations.writeMs,
+      totalMs: run.durations.totalMs,
+      characters: run.chapters.reduce((sum, item) => sum + item.characters, 0),
+      estimatedTokens: run.chapters.reduce((sum, item) => sum + (item.estimatedTokens ?? 0), 0),
+      omitted: run.chapters.reduce((sum, item) => sum + (item.omitted?.length ?? 0), 0),
+      errors: run.errors.length,
+      recallMissed: (run.recall ?? []).flatMap(item => item.missed),
+    })),
+    errors,
+  }
+}
+
+function renderReport(report: BenchReport): string {
+  const lines = [
+    `# Weave benchmark — ${report.suite} / ${report.config}`,
+    '',
+    `- mode: **${report.mode}** · model: \`${report.model}\``,
+    `- ablations: ${Object.keys(report.ablations).length === 0 ? 'none' : JSON.stringify(report.ablations)}`,
+    `- created: ${report.createdAt}`,
+    `- note: ${report.note}`,
+    '',
+    '## Totals',
+    '',
+    `- seeds: ${report.totals.seeds} · chapters: ${report.totals.chapters}`,
+    `- generated characters: ${report.totals.characters}`,
+    `- write time: ${report.totals.writeMs} ms · total: ${report.totals.totalMs} ms`,
+    `- recall terms matched/missed: ${report.recall.matchedTerms}/${report.recall.missedTerms}`,
+    '',
+    '## Seeds',
+    '',
+    '| seed | kind | chapters | chars | tokens | write ms | errors |',
+    '| --- | --- | --- | --- | --- | --- | --- |',
+    ...report.seeds.map(seed => `| ${seed.seed} | ${seed.kind} | ${seed.chapters} | ${seed.characters} | ${seed.estimatedTokens} | ${seed.writeMs} | ${seed.errors} |`),
+    '',
+  ]
+  if (report.errors.length > 0) {
+    lines.push('## Errors', '', ...report.errors.map(error => `- ${error.seed}: ${error.error}`), '')
+  }
+  lines.push('## Next', '',
+    report.mode === 'fake'
+      ? '- Run `--mode real` with a configured model, then build pairs and collect blind scores.'
+      : '- Build anonymized pairs (`benchmark pairs`), collect blind scores (`--scores`), then report win rate.',
+    '',
+  )
+  return `${lines.join('\n')}\n`
+}
+
+async function commandPairs(flags: Record<string, string | true>): Promise<number> {
+  const a = flagString(flags, 'a')
+  const b = flagString(flags, 'b')
+  if (!a || !b) throw new Error('usage: benchmark pairs --a <runDir> --b <runDir> [--out <dir>]')
+  const outDir = path.resolve(flagString(flags, 'out') ?? path.join(path.dirname(path.resolve(a)), 'pairs'))
+  await mkdir(outDir, { recursive: true })
+  const seeds = await readdir(a)
+  const pairs: Array<Record<string, unknown>> = []
+  const mapping: Array<Record<string, unknown>> = []
+  for (const name of seeds) {
+    if (!name.endsWith('.run.json')) continue
+    const runA = JSON.parse(await readFile(path.join(a, name), 'utf8')) as SeedRun
+    const runB = await readFile(path.join(b, name), 'utf8')
+      .then(text => JSON.parse(text) as SeedRun)
+      .catch(() => null)
+    if (!runB) continue
+    for (const chapterA of runA.chapters) {
+      const chapterB = runB.chapters.find(item => item.chapter === chapterA.chapter)
+      if (!chapterB) continue
+      const swapped = randomInt(2) === 1
+      const left = swapped ? chapterB : chapterA
+      const right = swapped ? chapterA : chapterB
+      const pairId = `${runA.seed}-ch${chapterA.chapter}`
+      pairs.push({
+        pairId,
+        seed: runA.seed,
+        chapter: chapterA.chapter,
+        left: (await readFile(path.join(a, left.draftPath), 'utf8').catch(() => '')),
+        right: (await readFile(path.join(a, right.draftPath), 'utf8').catch(() => '')),
+      })
+      mapping.push({ pairId, left: swapped ? 'b' : 'a', right: swapped ? 'a' : 'b' })
+    }
+  }
+  await writeFile(path.join(outDir, 'pairs.json'), `${JSON.stringify(pairs, null, 2)}\n`)
+  await writeFile(path.join(outDir, 'mapping.json'), `${JSON.stringify({ a, b, entries: mapping }, null, 2)}\n`)
+  console.log(JSON.stringify({ ok: true, pairs: pairs.length, outDir, note: 'mapping stays sealed until scores are collected' }, null, 2))
+  return 0
+}
+
+async function commandScore(flags: Record<string, string | true>): Promise<number> {
+  const pairsFile = flagString(flags, 'pairs')
+  const scoresFile = flagString(flags, 'scores')
+  if (!pairsFile || !scoresFile) throw new Error('usage: benchmark score --pairs <pairs.json> --scores <scores.jsonl>')
+  const dir = path.dirname(path.resolve(pairsFile))
+  const mapping = JSON.parse(await readFile(path.join(dir, 'mapping.json'), 'utf8')) as {
+    entries: Array<{ pairId: string; left: string; right: string }>
+  }
+  const raw = await readFile(path.resolve(scoresFile), 'utf8')
+  const scores = raw.split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line) as {
+    pairId: string
+    winner: 'left' | 'right' | 'tie'
+    reader?: string
+    note?: string
+  })
+  const byId = new Map(mapping.entries.map(entry => [entry.pairId, entry]))
+  const tally = { a: 0, b: 0, tie: 0, unknown: 0 }
+  for (const score of scores) {
+    const entry = byId.get(score.pairId)
+    if (!entry) { tally.unknown += 1; continue }
+    if (score.winner === 'tie') { tally.tie += 1; continue }
+    const side = score.winner === 'left' ? entry.left : entry.right
+    if (side === 'a') tally.a += 1
+    else tally.b += 1
+  }
+  const decided = tally.a + tally.b
+  const result = {
+    ok: decided > 0 || tally.tie > 0,
+    pairsScored: scores.length,
+    configA: mapping.entries.length > 0 ? 'a' : 'unknown',
+    wins: tally,
+    winRateA: decided === 0 ? null : Number((tally.a / decided).toFixed(3)),
+    note: decided === 0 ? 'no decisive pairs; run more comparisons before concluding' : 'keep holdout pairs out of tuning',
+  }
+  console.log(JSON.stringify(result, null, 2))
+  return result.ok ? 0 : 1
+}
+
+async function main(): Promise<void> {
+  const [command = 'run', ...rest] = process.argv.slice(2)
+  const { flags } = parseFlags(rest)
+  if (command === 'run') {
+    process.exitCode = await commandRun(flags)
+    return
+  }
+  if (command === 'pairs') {
+    process.exitCode = await commandPairs(flags)
+    return
+  }
+  if (command === 'score') {
+    process.exitCode = await commandScore(flags)
+    return
+  }
+  throw new Error(`unknown command: ${command}`)
+}
+
+main().catch(error => {
+  console.error(error instanceof Error ? error.stack ?? error.message : String(error))
+  process.exitCode = 1
+})
+
+export {}

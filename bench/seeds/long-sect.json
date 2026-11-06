@@ -1,0 +1,89 @@
+{
+  "id": "long-sect",
+  "kind": "longitudinal",
+  "title": "山门旧账",
+  "genre": "仙侠 / 长篇群像",
+  "audience": "追更型读者",
+  "promise": "一个被逐出山门的记账弟子，靠一本没人愿意看的旧账，把整座山门的秘密一笔一笔翻出来。",
+  "premise": "谢临被逐出山门时只带走一本旧账，账上记着山门三十年来每一笔不该记的开销。",
+  "world": "山门以功过簿分配丹药与洞府，功过簿由内门执事保管，外门弟子只能看抄本。旧账存放在藏经阁最下层，按年份装订。",
+  "style": "以账目和物件推进；人物关系靠交易与让步体现；不写空泛的境界描写。",
+  "prohibitions": ["不要用境界压制解决冲突"],
+  "characters": [
+    { "name": "谢临", "introducedIn": 1 },
+    { "name": "卓执事", "introducedIn": 2 },
+    { "name": "阿禾", "introducedIn": 9 }
+  ],
+  "priorChapters": 40,
+  "priorBeats": [
+    "谢临在藏经阁抄第一本旧账",
+    "卓执事用一炉丹药换走了三页抄本",
+    "阿禾把外门的抄本藏进药篓",
+    "旧账里出现一笔没有名字的开销",
+    "谢临发现功过簿和旧账对不上"
+  ],
+  "chapters": [
+    {
+      "chapter": 41,
+      "title": "第三笔",
+      "pov": "谢临",
+      "time": "第四十一天",
+      "location": "藏经阁下层",
+      "openingState": "谢临把旧账翻到第三笔无主开销",
+      "endingState": "谢临确认三笔无主开销都发生在同一月",
+      "goal": "查清无主开销的用途",
+      "obstacle": "旧账的年份装订被人换过顺序",
+      "mustHappen": ["谢临比对三笔无主开销", "他发现三笔都发生在同一月"],
+      "mayHappen": ["阿禾在楼下替他望风"],
+      "mustNotHappen": ["谢临拿到全部旧账"],
+      "characters": ["谢临", "阿禾"],
+      "threads": ["无主开销", "被换过的装订"],
+      "targetWords": 1800,
+      "previousLink": "承接第四十章的功过簿差额",
+      "nextLink": "那一月正是卓执事接管功过簿的月份"
+    },
+    {
+      "chapter": 42,
+      "title": "同月",
+      "pov": "谢临",
+      "time": "第四十二天",
+      "location": "外门药庐",
+      "openingState": "谢临把三笔开销抄在一张纸上",
+      "endingState": "卓执事承认那个月换过装订，但说是因为受潮",
+      "goal": "让卓执事解释那一月的装订顺序",
+      "obstacle": "卓执事只肯在药庐里说话",
+      "mustHappen": ["卓执事承认换过装订", "他给出的理由是受潮"],
+      "mayHappen": ["阿禾把药篓放在门口"],
+      "mustNotHappen": ["卓执事交出原始装订"],
+      "characters": ["谢临", "卓执事", "阿禾"],
+      "threads": ["被换过的装订", "卓执事的解释"],
+      "targetWords": 1800,
+      "previousLink": "承接三笔开销",
+      "nextLink": "受潮的账页不会只有那一本"
+    },
+    {
+      "chapter": 43,
+      "title": "受潮",
+      "pov": "谢临",
+      "time": "第四十三天",
+      "location": "藏经阁库房",
+      "openingState": "谢临把整排账本搬到窗下",
+      "endingState": "谢临发现只有那一本有受潮痕迹，而且是被泼上去的",
+      "goal": "验证卓执事关于受潮的说法",
+      "obstacle": "库房只许在午后开窗",
+      "mustHappen": ["谢临逐本检查受潮痕迹", "他确认只有那一本被人泼过水"],
+      "mayHappen": ["阿禾在库房外被人叫走"],
+      "mustNotHappen": ["谢临当面揭穿卓执事"],
+      "characters": ["谢临", "阿禾"],
+      "threads": ["被换过的装订", "泼水的痕迹"],
+      "targetWords": 1800,
+      "previousLink": "承接受潮的解释",
+      "nextLink": "泼水的人当时就在库房值班"
+    }
+  ],
+  "recallExpectations": [
+    { "chapter": 41, "terms": ["009", "022"], "why": "阿禾首次替谢临藏抄本，旧账首次出现无主开销" },
+    { "chapter": 42, "terms": ["015"], "why": "卓执事接管功过簿与第 15 章的丹药交易" },
+    { "chapter": 43, "terms": ["031"], "why": "藏经阁库房值班记录首次出现" }
+  ]
+}

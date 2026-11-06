@@ -1,0 +1,135 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
+const REPO_ROOT = path.resolve(import.meta.dirname, '..')
+const SCRIPT = path.join(REPO_ROOT, 'scripts', 'benchmark.ts')
+
+interface Result { code: number; stdout: string; stderr: string }
+
+function run(args: string[]): Promise<Result> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [SCRIPT, ...args], {
+      cwd: REPO_ROOT,
+      env: process.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', chunk => { stdout += chunk })
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.on('error', reject)
+    child.on('close', code => resolve({ code: code ?? -1, stdout, stderr }))
+  })
+}
+
+async function tempDir(): Promise<string> {
+  return mkdtemp(path.join(os.tmpdir(), 'weave-bench-'))
+}
+
+test('benchmark fake mode records craft and longitudinal runs without a real model', async () => {
+  const out = await tempDir()
+  try {
+    const craft = await run(['run', '--suite', 'craft', '--seed', 'harbor-ledger', '--out', out])
+    assert.equal(craft.code, 0, craft.stderr)
+    const craftPayload = JSON.parse(craft.stdout.trim()) as { ok: boolean; mode: string; chapters: number }
+    assert.equal(craftPayload.ok, true)
+    assert.equal(craftPayload.mode, 'fake')
+    assert.equal(craftPayload.chapters, 4)
+
+    const report = JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8')) as {
+      ok: boolean
+      mode: string
+      note: string
+      totals: { seeds: number; chapters: number }
+      seeds: Array<{ seed: string; estimatedTokens: number; characters: number }>
+    }
+    assert.equal(report.ok, true)
+    assert.equal(report.mode, 'fake')
+    assert.match(report.note, /plumbing only/)
+    assert.equal(report.totals.chapters, 4)
+    assert.equal(report.seeds[0]?.seed, 'harbor-ledger')
+    assert.ok((report.seeds[0]?.characters ?? 0) > 0)
+    assert.ok((report.seeds[0]?.estimatedTokens ?? 0) > 0)
+
+    const runFile = JSON.parse(await readFile(path.join(out, 'harbor-ledger.run.json'), 'utf8')) as {
+      chapters: Array<{ included?: string[]; exitCode: number; omitted?: unknown[] }>
+    }
+    assert.ok(runFile.chapters.every(chapter => chapter.exitCode === 0))
+    assert.ok(runFile.chapters.every(chapter => Array.isArray(chapter.included)))
+  } finally {
+    await rm(out, { recursive: true, force: true })
+  }
+})
+
+test('benchmark longitudinal mode synthesizes prior chapters, then measures continuations', async () => {
+  const out = await tempDir()
+  try {
+    const result = await run(['run', '--suite', 'longitudinal', '--seed', 'long-harbor', '--out', out])
+    assert.equal(result.code, 0, result.stderr)
+    const report = JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8')) as {
+      ok: boolean
+      totals: { chapters: number }
+      recall: { expectations: number; matchedTerms: number; missedTerms: number }
+    }
+    assert.equal(report.ok, true)
+    assert.equal(report.totals.chapters, 3)
+    // The baseline has no retrieval wiring yet; the harness must record the gap instead of hiding it.
+    assert.equal(report.recall.expectations, 3)
+    assert.equal(report.recall.matchedTerms, 0)
+    assert.ok(report.recall.missedTerms > 0)
+
+    const mainline = await readFile(path.join(out, 'long-harbor', 'ledger', 'mainline.jsonl'), 'utf8')
+    const lines = mainline.split(/\r?\n/).filter(Boolean)
+    const head = JSON.parse(lines[lines.length - 1]!) as { mainlineRevision: number }
+    assert.equal(head.mainlineRevision, 33)
+    const finals = await readdir(path.join(out, 'long-harbor', 'chapters', 'final'))
+    assert.equal(finals.filter(name => name.endsWith('.md')).length, 33)
+  } finally {
+    await rm(out, { recursive: true, force: true })
+  }
+})
+
+test('benchmark pairs anonymizes order and score recovers the configured winner', async () => {
+  const root = await tempDir()
+  try {
+    const a = path.join(root, 'run-a')
+    const b = path.join(root, 'run-b')
+    const first = await run(['run', '--suite', 'craft', '--seed', 'harbor-ledger', '--out', a])
+    assert.equal(first.code, 0, first.stderr)
+    const second = await run(['run', '--suite', 'craft', '--seed', 'harbor-ledger', '--out', b])
+    assert.equal(second.code, 0, second.stderr)
+
+    const pairsDir = path.join(root, 'pairs')
+    const pairs = await run(['pairs', '--a', a, '--b', b, '--out', pairsDir])
+    assert.equal(pairs.code, 0, pairs.stderr)
+    const built = JSON.parse(pairs.stdout.trim()) as { pairs: number }
+    assert.equal(built.pairs, 4)
+
+    const pairFile = path.join(pairsDir, 'pairs.json')
+    const mapping = JSON.parse(await readFile(path.join(pairsDir, 'mapping.json'), 'utf8')) as {
+      entries: Array<{ pairId: string; left: string; right: string }>
+    }
+    const scores = mapping.entries.map(entry => JSON.stringify({ pairId: entry.pairId, winner: 'left' })).join('\n')
+    const scoresFile = path.join(root, 'scores.jsonl')
+    await writeFile(scoresFile, `${scores}\n`)
+
+    const scored = await run(['score', '--pairs', pairFile, '--scores', scoresFile])
+    assert.equal(scored.code, 0, scored.stderr)
+    const result = JSON.parse(scored.stdout.trim()) as {
+      winRateA: number | null
+      wins: { a: number; b: number; tie: number }
+    }
+    assert.equal(result.wins.tie, 0)
+    assert.equal(result.wins.a + result.wins.b, 4)
+    assert.ok(result.winRateA !== null)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

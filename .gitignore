@@ -3,3 +3,4 @@ repos/
 *.log
 *.tsbuildinfo
 .DS_Store
+bench/runs/

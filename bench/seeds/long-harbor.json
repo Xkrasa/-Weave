@@ -1,0 +1,89 @@
+{
+  "id": "long-harbor",
+  "kind": "longitudinal",
+  "title": "潮水之上",
+  "genre": "悬疑 / 长篇连载",
+  "audience": "追更型读者",
+  "promise": "港口的每一次涨潮都会带回一件旧物，而每一件旧物都指向同一个失踪的人。",
+  "premise": "港务记录员沈停发现，父亲失踪那年之后，每年涨潮都会有人在堤岸捡到一件属于他的东西。",
+  "world": "海港城按潮汐分区管理，旧堤岸每年只开放两次。港务档案按船次编号，跨年档案需要两名记录员签字才能调阅。",
+  "style": "克制、以物写人；每章推进一条具体线索；章末留下可执行的动作。",
+  "prohibitions": ["不要用巧合解决线索"],
+  "characters": [
+    { "name": "沈停", "introducedIn": 1 },
+    { "name": "陆伯", "introducedIn": 3 },
+    { "name": "何漾", "introducedIn": 12 }
+  ],
+  "priorChapters": 30,
+  "priorBeats": [
+    "沈停在旧堤岸捡到父亲留下的铜扣",
+    "陆伯说起那年封港的旧事",
+    "何漾带来一张被涂改的潮汐表",
+    "档案室的船次编号缺了一位",
+    "沈停第一次看见父亲的名字出现在报关单上"
+  ],
+  "chapters": [
+    {
+      "chapter": 31,
+      "title": "铜扣",
+      "pov": "沈停",
+      "time": "第三十一天",
+      "location": "旧堤岸",
+      "openingState": "沈停把第一枚铜扣放在掌心",
+      "endingState": "沈停认出铜扣和第三年前捡到的是同一副",
+      "goal": "确认这枚铜扣是不是父亲留下的",
+      "obstacle": "陆伯不肯再提封港那年的事",
+      "mustHappen": ["沈停比对两枚铜扣的磨损位置", "陆伯承认见过同样的一副"],
+      "mayHappen": ["何漾在堤岸另一头等她"],
+      "mustNotHappen": ["沈停当场找到父亲"],
+      "characters": ["沈停", "陆伯"],
+      "threads": ["铜扣", "封港旧事"],
+      "targetWords": 1800,
+      "previousLink": "承接第三十章的潮汐表",
+      "nextLink": "她要去档案室调第三年前的船次"
+    },
+    {
+      "chapter": 32,
+      "title": "补签",
+      "pov": "沈停",
+      "time": "第三十二天",
+      "location": "港务档案室",
+      "openingState": "沈停把调阅单推到何漾面前",
+      "endingState": "何漾签了字，但把同一页的另一个名字遮住了",
+      "goal": "拿到第三年前跨年档案的调阅许可",
+      "obstacle": "跨年档案需要两名记录员签字",
+      "mustHappen": ["沈停找到缺位的船次编号", "何漾签字时遮住另一个名字"],
+      "mayHappen": ["档案室管理员多看了她一眼"],
+      "mustNotHappen": ["沈停拿到完整档案"],
+      "characters": ["沈停", "何漾"],
+      "threads": ["船次编号", "何漾的隐瞒"],
+      "targetWords": 1800,
+      "previousLink": "承接铜扣",
+      "nextLink": "被遮住的名字属于第三十个船次"
+    },
+    {
+      "chapter": 33,
+      "title": "第三十船次",
+      "pov": "沈停",
+      "time": "第三十三天",
+      "location": "旧码头仓库",
+      "openingState": "沈停把船次编号写在仓库门上",
+      "endingState": "沈停发现第三十船次的货主登记的是陆伯",
+      "goal": "查清第三十船次装了什么",
+      "obstacle": "仓库记录只剩提货人签名",
+      "mustHappen": ["沈停找到第三十船次的提货记录", "记录上的名字是陆伯"],
+      "mayHappen": ["陆伯出现在仓库门口"],
+      "mustNotHappen": ["陆伯承认全部真相"],
+      "characters": ["沈停", "陆伯", "何漾"],
+      "threads": ["第三十船次", "陆伯的过去"],
+      "targetWords": 1800,
+      "previousLink": "承接被遮住的名字",
+      "nextLink": "陆伯必须解释这三十年的沉默"
+    }
+  ],
+  "recallExpectations": [
+    { "chapter": 31, "terms": ["003", "012"], "why": "铜扣首次出现与何漾第一次带来潮汐表" },
+    { "chapter": 32, "terms": ["018"], "why": "船次编号缺位首次被记录" },
+    { "chapter": 33, "terms": ["027"], "why": "第三十船次的报关单首次出现" }
+  ]
+}
