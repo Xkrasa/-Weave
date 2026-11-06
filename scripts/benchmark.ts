@@ -79,6 +79,7 @@ interface Seed {
   prohibitions?: string[]
   characters: SeedCharacter[]
   chapters: SeedChapter[]
+  authorSamples?: Array<{ fileName: string; frontmatter?: string; text: string }>
   /** Synthesized chapters before the measured ones (longitudinal only). */
   priorChapters?: number
   priorBeats?: string[]
@@ -385,6 +386,11 @@ async function writeCanon(dir: string, seed: Seed): Promise<void> {
       })),
     }, null, 2)}\n`,
   )
+  for (const sample of seed.authorSamples ?? []) {
+    const target = path.join(dir, 'canon', 'samples', sample.fileName)
+    await mkdir(path.dirname(target), { recursive: true })
+    await writeFile(target, `${sample.frontmatter ? `---\n${sample.frontmatter}\n---\n` : ''}${sample.text}\n`)
+  }
 }
 
 async function writeContract(dir: string, chapter: SeedChapter, options: { readerIntentOff?: boolean } = {}): Promise<void> {
@@ -544,6 +550,7 @@ async function runSeed(
       }
     }
     const writeArgs = ['write', String(chapter.chapter), '--json', '--strategy', options.draftingStrategy]
+    if (options.ablations.authorSamples) writeArgs.push('--author-samples', options.ablations.authorSamples)
     let write = await runCli(projectDir, writeArgs, env)
     record.durations.writeMs += write.elapsedMs
     let retried = false
@@ -632,6 +639,9 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
   }
   if (ablations.readerIntent && ablations.readerIntent !== 'off') {
     throw new Error('--ablation.readerIntent only supports off')
+  }
+  if (ablations.authorSamples && !['scene', 'legacy', 'off'].includes(ablations.authorSamples)) {
+    throw new Error('--ablation.authorSamples must be scene, legacy or off')
   }
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const outDir = path.resolve(flagString(flags, 'out') ?? path.join(REPO_ROOT, 'bench', 'runs', `${stamp}-${config}`))

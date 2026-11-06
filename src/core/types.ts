@@ -352,6 +352,13 @@ export interface RunRecord {
   materialSourceIds: string[]
   draftingStrategy?: 'prose-first' | 'beat-first'
   beatContentHash?: string
+  sampleSelection?: {
+    samples: Array<{ id: string }>
+    selected: Array<{ id: string; score: number; reasons: string[] }>
+    reasons: string[]
+    estimatedTokens: number
+    fallback: boolean
+  }
   methodSelection?: {
     modules: Array<{ id: string; version: number; reason: string }>
     reasons: string[]

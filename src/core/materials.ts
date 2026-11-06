@@ -7,7 +7,7 @@ import { projectPaths } from './project.ts'
 import { currentCommit, finalPath, readMainline } from './ledger.ts'
 import { collectLedger, collectLoopState, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
 import { loadMethods, methodText, selectMethods } from './methods.ts'
-import { loadStyleConstitution, loadAuthorSamples, styleText } from './style.ts'
+import { loadStyleConstitution, selectAuthorSamples, styleText } from './style.ts'
 import { conflictError } from './errors.ts'
 import { rebuildSearchIndex, searchBook, searchIndexHealth } from './search.ts'
 import { listPlans, readApprovedPlan, type CharacterArc, type RollingPlan, type StoryPromise, type VolumeArc } from './planning.ts'
@@ -26,7 +26,11 @@ interface ReferenceManifest {
   references?: ReferenceManifestEntry[]
 }
 
-export async function collectMaterials(root: string, contract: ChapterContract): Promise<Material[]> {
+export async function collectMaterials(
+  root: string,
+  contract: ChapterContract,
+  options: { authorSamples?: 'scene' | 'legacy' | 'off' } = {},
+): Promise<Material[]> {
   const paths = projectPaths(root)
   const materials: Material[] = []
 
@@ -222,7 +226,7 @@ export async function collectMaterials(root: string, contract: ChapterContract):
       ),
     )
   }
-  const samples = await loadAuthorSamples(root)
+  const { samples } = await selectAuthorSamples(root, contract, { strategy: options.authorSamples ?? 'scene' })
   if (samples.length > 0) {
     materials.push(
       material(

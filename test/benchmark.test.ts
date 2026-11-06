@@ -225,3 +225,41 @@ test('benchmark beat-first records benchmark-approved planning and one prose run
     await rm(out, { recursive: true, force: true })
   }
 })
+
+test('benchmark authorSamples supports independent scene, legacy and off ablations', async () => {
+  const root = await tempDir()
+  try {
+    async function runStrategy(strategy: string): Promise<{ sampleId: string | null; included: string[] }> {
+      const dir = path.join(root, strategy)
+      const result = await run([
+        'run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes',
+        '--ablation.authorSamples', strategy, '--out', dir,
+      ])
+      assert.equal(result.code, 0, result.stdout + result.stderr)
+      const runsDir = path.join(dir, 'fanqie-rewind-ten-minutes', '.weave', 'runs')
+      const runs = await Promise.all((await readdir(runsDir)).map(async name =>
+        JSON.parse(await readFile(path.join(runsDir, name), 'utf8')) as {
+          task: string
+          sampleSelection?: { samples: Array<{ id: string }> }
+        }))
+      const writing = runs.find(run => run.task === 'writing')
+      const runFile = JSON.parse(await readFile(path.join(dir, 'fanqie-rewind-ten-minutes.run.json'), 'utf8')) as {
+        chapters: Array<{ included?: string[] }>
+      }
+      return {
+        sampleId: writing?.sampleSelection?.samples[0]?.id ?? null,
+        included: runFile.chapters[0]?.included ?? [],
+      }
+    }
+
+    const scene = await runStrategy('scene')
+    assert.equal(scene.sampleId, 'b-release')
+    const legacy = await runStrategy('legacy')
+    assert.equal(legacy.sampleId, 'a-daily')
+    const off = await runStrategy('off')
+    assert.equal(off.sampleId, null)
+    assert.equal(off.included.includes('style:author-samples'), false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

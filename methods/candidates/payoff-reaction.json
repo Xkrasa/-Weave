@@ -1,0 +1,21 @@
+{
+  "id": "payoff-reaction",
+  "status": "draft",
+  "createdAt": "2026-11-06T00:00:00.000Z",
+  "source": "原创方法候选；机制参考 bestseller-webnovel-craft [S3]（A 级作者访谈），示例原创",
+  "method": {
+    "id": "payoff-reaction",
+    "version": 1,
+    "tags": ["release", "payoff", "confrontation", "兑现", "反应"],
+    "scope": "long-form chapter",
+    "platforms": ["long-form", "fanqie"],
+    "notFor": "tragedy-with-delayed-catharsis",
+    "signal": "释放章只写主角赢了，冲突在翻盘瞬间结束，读者看不到对手如何失去原有优势。",
+    "diagnosis": "先找对手此前凭什么占优，再找他的判断、选择或立场在哪一刻失效；不要用震惊人数代替兑现。",
+    "process": "写出旧优势的来源 → 让对手看见它失效的具体证据 → 用与旧处境对照的动作、决定或失算收束反应。",
+    "output": "兑现处出现与旧因果相连的对手或旁观者反应；反应服务于局势变化，不设震惊配额。",
+    "positive": "邱岳看清顾客端的原始时间，手指离开那张认责单，先把前两笔扣款退了回去。",
+    "negative": "许舟赢了，所有人都震惊了。",
+    "selfCheck": "读者是否看见对方怎样失去优势，而不是只被告知主角赢了？"
+  }
+}

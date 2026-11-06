@@ -62,7 +62,7 @@ import {
   listMethodCandidates,
   saveMethodCandidates,
 } from './core/method-candidates.ts'
-import { loadAuthorSamples } from './core/style.ts'
+import { loadAuthorSamples, selectAuthorSamples } from './core/style.ts'
 import {
   rebuildSearchIndex,
   readSearchChunk,
@@ -820,6 +820,17 @@ async function commandMethod(root: string, parsed: Parsed, json: boolean): Promi
 async function commandStyle(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const action = parsed.positionals[0]
   if (action === 'samples') {
+    const chapter = optionalNumber(parsed, 'chapter')
+    if (chapter !== undefined) {
+      const contract = await loadContract(root, chapter)
+      const selection = await selectAuthorSamples(root, contract)
+      if (json) outputJson({ selection })
+      else {
+        for (const sample of selection.samples) console.log(`${sample.id}\t${sample.source}`)
+        for (const reason of selection.reasons) console.log(reason)
+      }
+      return 0
+    }
     const samples = await loadAuthorSamples(root)
     if (json) outputJson({ samples })
     else for (const sample of samples) console.log(`${sample.id}\t${sample.source}`)
@@ -1200,6 +1211,9 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
   const strategy = String(parsed.flags.strategy ?? 'prose-first')
   if (strategy !== 'prose-first' && strategy !== 'beat-first') throw usageError('--strategy 只能是 prose-first 或 beat-first')
   const draftingStrategy = strategy as DraftingStrategy
+  const authorSamplesValue = String(parsed.flags['author-samples'] ?? 'scene')
+  if (!['scene', 'legacy', 'off'].includes(authorSamplesValue)) throw usageError('--author-samples 只能是 scene、legacy 或 off')
+  const authorSamples = authorSamplesValue as 'scene' | 'legacy' | 'off'
   const resumeFromRunId = await resolveResumeRun(root, chapter, parsed)
   if (events && json) throw usageError('--events 与 --json 不能同时使用')
   const controller = new AbortController()
@@ -1215,6 +1229,7 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
       signal: controller.signal,
       resumeFromRunId,
       draftingStrategy,
+      authorSamples,
       key: parsed.flags.key === true,
       onDelta: json || events ? undefined : text => process.stdout.write(text),
       onEvent: events
@@ -1236,6 +1251,7 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
         renderer: result.renderer,
         draftingStrategy: result.draftingStrategy,
         beatContentHash: result.beatContentHash,
+        sampleSelection: result.sampleSelection,
         estimatedTokens: result.estimatedTokens,
         included: result.included,
         omitted: result.omitted,
@@ -1631,7 +1647,7 @@ function printHelp(): void {
   weave waivers list|revoke <waiverId>
   weave timeline <chapter>
   weave beats generate|set|show|approve|skip <chapter> [--file <path>] [--benchmark]
-  weave write <chapter> [--json|--events] [--key] [--strategy prose-first|beat-first] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
+  weave write <chapter> [--json|--events] [--key] [--strategy prose-first|beat-first] [--author-samples scene|legacy|off] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
   weave amend <chapter> [--force]
   weave finalize <chapter>
   weave impact <chapter>

@@ -13,7 +13,9 @@ import { assertNoPendingImpacts, createImpactReport } from './impact.ts'
 import { loadCharacters, loadContract, contractHash, requirePassingContractCheck } from './contract.ts'
 import { collectMaterials } from './materials.ts'
 import { selectMethods } from './methods.ts'
+import { selectAuthorSamples } from './style.ts'
 import { formatBeats, requireApprovedBeats, type DraftingStrategy } from './beats.ts'
+import type { AuthorSampleSelection } from './style.ts'
 import { assembleContext } from './context.ts'
 import { streamChapter } from './model.ts'
 import { loadModelConfig, loadProject } from './project.ts'
@@ -85,6 +87,7 @@ export interface WriteResult {
   renderer: string
   draftingStrategy: DraftingStrategy
   beatContentHash?: string
+  sampleSelection: AuthorSampleSelection
   estimatedTokens: number
   keyCandidates: KeyCandidateGroup[]
   included: string[]
@@ -104,6 +107,8 @@ export async function writeChapter(
     key?: boolean
     /** Optional experiment; defaults to the existing single-pass prose path. */
     draftingStrategy?: DraftingStrategy
+    /** Independent author-sample ablation; defaults to scene-aware selection. */
+    authorSamples?: 'scene' | 'legacy' | 'off'
   },
 ): Promise<WriteResult> {
   await assertOutlineApproved(root, chapter)
@@ -133,7 +138,8 @@ export async function writeChapter(
   const beatCandidate = draftingStrategy === 'beat-first'
     ? await requireApprovedBeats(root, chapter)
     : null
-  const materials = await collectMaterials(root, contract)
+  const sampleSelection = await selectAuthorSamples(root, contract, { strategy: options.authorSamples ?? 'scene' })
+  const materials = await collectMaterials(root, contract, { authorSamples: options.authorSamples })
   const methodSelection = await selectMethods(root, contract.chapter)
   const assembled = assembleContext(contract, materials, modelConfig, {
     ...(beatCandidate ? { beatText: formatBeats(beatCandidate) } : {}),
@@ -159,6 +165,7 @@ export async function writeChapter(
     materialSourceIds: context.included.map(item => item.sourceId),
     draftingStrategy,
     ...(beatCandidate ? { beatContentHash: beatCandidate.contentHash } : {}),
+    sampleSelection,
     methodSelection,
     ...(recovery ? { recovery } : {}),
   }
@@ -212,6 +219,7 @@ export async function writeChapter(
       renderer: context.renderer,
       draftingStrategy,
       ...(beatCandidate ? { beatContentHash: beatCandidate.contentHash } : {}),
+      sampleSelection,
       estimatedTokens: context.estimatedTokens,
       included: context.included.map(item => item.sourceId),
       omitted: context.omitted,

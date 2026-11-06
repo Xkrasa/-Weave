@@ -1,0 +1,21 @@
+{
+  "id": "progressive-reveal",
+  "status": "draft",
+  "createdAt": "2026-11-06T00:00:00.000Z",
+  "source": "原创方法候选；机制参考 webnovel-shuangwen-vs-quality-craft 的章内模板（C 级经验，作为待验证假设），示例原创",
+  "method": {
+    "id": "progressive-reveal",
+    "version": 1,
+    "tags": ["reveal", "mystery", "archive", "揭秘", "信息释放"],
+    "scope": "long-form chapter",
+    "platforms": ["long-form", "fanqie", "qidian"],
+    "notFor": "action-without-investigation",
+    "signal": "揭秘章把答案一次说完，或反复解释同一结论，读者没有参与判断的空间。",
+    "diagnosis": "检查读者先看到什么现象、暂时会得出什么结论、哪个旧线索足以推翻它；推翻不能靠新增外挂。",
+    "process": "先呈现可观察现象 → 给一个暂时解释 → 用已经出现的反证推翻 → 让更大的具体问题浮出。",
+    "output": "每次信息变化都有前文证据，读者能回看并修正判断；结尾留下新的具体问题而非通用悬念。",
+    "positive": "林岚先按编号认定底单是真的，随后发现旧照片里的同一编号属于另一页，她只得重新检查收货人。",
+    "negative": "林岚看完账本，突然明白一切都是局长设的局，背后还有更大的阴谋。",
+    "selfCheck": "结论被推翻的证据是否早已出现？新秘密是否比旧答案更具体，而不是只更夸张？"
+  }
+}

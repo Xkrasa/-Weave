@@ -25,7 +25,7 @@ import { chapterFileStem, loadContract } from './contract.ts'
 import { conflictError, validationError } from './errors.ts'
 import { applyWaivers } from './waivers.ts'
 import { loadMethods, methodText, selectMethods } from './methods.ts'
-import { loadStyleConstitution, loadAuthorSamples, styleText } from './style.ts'
+import { loadStyleConstitution, selectAuthorSamples, styleText } from './style.ts'
 import { collectLedger, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
 import type { EffectFinding, EffectReviewReport } from './effect-review.ts'
 
@@ -66,7 +66,8 @@ async function revisionContext(
     .filter(fact => fact.subject === contract.pov)
   const povBeliefs = effectiveBeliefs(prior.beliefs, contract.pov, Math.max(0, chapter - 1))
   const style = await loadStyleConstitution(root)
-  const samples = (await loadAuthorSamples(root, 1)).map(sample => sample.text.slice(0, 800))
+  const { samples: selectedSamples } = await selectAuthorSamples(root, contract, { limit: 1, maxTokens: 800 })
+  const samples = selectedSamples.map(sample => sample.text.slice(0, 800))
   const selection = await selectMethods(root, chapter, { purpose: 'rewrite' })
   const library = await loadMethods(root)
   const methods = library.filter(module => selection.modules.some(item => item.id === module.id))
@@ -310,7 +311,7 @@ export async function rewriteParagraph(
     .filter(fact => fact.subject === contract.pov)
   const povBeliefs = effectiveBeliefs(prior.beliefs, contract.pov, Math.max(0, chapter - 1))
   const style = await loadStyleConstitution(root)
-  const samples = await loadAuthorSamples(root)
+  const { samples } = await selectAuthorSamples(root, contract)
   const prompt = [
     `第 ${chapter} 章局部改写。目标：${goal}`,
     `只改写 ${paragraphId}，其他段落保持不变。`,

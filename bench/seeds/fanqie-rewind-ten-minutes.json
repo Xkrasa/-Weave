@@ -19,6 +19,18 @@
     "materialPolicy": "只使用种子内原创设定、人物、合同和风格，不注入任何参考作品原文；真实旧稿须另行记录来源与授权。",
     "holdout": true
   },
+  "authorSamples": [
+    {
+      "fileName": "a-daily.md",
+      "frontmatter": "sceneTypes: daily\ncharacters: 唐姨\npov: 唐姨\nstyleTags: quiet",
+      "text": "唐姨把药盒按日期重新排好，只说了一句，先吃饭。"
+    },
+    {
+      "fileName": "b-release.md",
+      "frontmatter": "sceneTypes: confrontation\ncharacters: 许舟, 小罗\npov: 许舟\nstyleTags: direct",
+      "text": "许舟把两份时间线推到邱岳面前，小罗先拿回被扣的钱。"
+    }
+  ],
   "characters": [
     { "name": "许舟", "introducedIn": 1 },
     { "name": "唐姨", "introducedIn": 1 },
@@ -50,7 +62,8 @@
         "payoff": "读者看到许舟用新证据撤销罚单，并发现更大的异常退单",
         "intensity": "strong",
         "hook": "另外六笔异常退款属于谁"
-      }
+      },
+      "sceneTypes": ["confrontation"]
     },
     {
       "chapter": 2,

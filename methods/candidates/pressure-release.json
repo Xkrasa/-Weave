@@ -1,0 +1,21 @@
+{
+  "id": "pressure-release",
+  "status": "draft",
+  "createdAt": "2026-11-06T00:00:00.000Z",
+  "source": "原创方法候选；机制参考 webnovel-shuangwen-vs-quality-craft（C 级经验，作为待验证假设），示例原创",
+  "method": {
+    "id": "pressure-release",
+    "version": 1,
+    "tags": ["pressure", "release", "蓄压", "释放", "兑现"],
+    "scope": "long-form chapter",
+    "platforms": ["long-form", "fanqie"],
+    "notFor": "quiet-continuous-dread",
+    "signal": "主角连续受压却只有委屈累积，没有新信息、关系变化、代价或可用筹码，释放时又一笔带过。",
+    "diagnosis": "区分有功能的蓄压和单纯虐主；检查每次受压是否改变读者所知、人物筹码或后续选择。",
+    "process": "为蓄压补上新的信息或筹码 → 让主角作出带代价的选择 → 在合适章节兑现具体变化，不套用固定过夜期限。",
+    "output": "蓄压留下可用变化，释放落实为具体结果；长期压抑与立即兑现都服从本书节奏。",
+    "positive": "许舟没有继续解释自己多委屈，而是把两份时间线摊在邱岳面前，让小罗先拿回被扣的钱。",
+    "negative": "许舟又挨了一顿骂，他握紧拳头，觉得自己太惨了。",
+    "selfCheck": "这次受压新增了什么筹码或认知？释放是否改变了实际处境，而不是只换一句胜利判词？"
+  }
+}

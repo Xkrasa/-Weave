@@ -131,15 +131,23 @@ export async function selectMethods(
     if (purpose !== 'rewrite' && module.notFor && /revision/i.test(module.notFor)) return false
     return true
   })
+  const readerPurpose = contract.readerIntent?.purpose
+  const sceneTypes = contract.sceneTypes ?? []
   const text = [
     contract.goal,
     contract.obstacle ?? '',
     ...contract.mustHappen,
+    readerPurpose ?? '',
+    ...sceneTypes,
+    contract.pov,
     ...(review?.findings.map(finding => `${finding.dimension} ${finding.description}`) ?? []),
   ].join(' ')
   const scores = candidateModules.map(module => {
     let score = 0
     if (module.tags.some(tag => text.includes(tag))) score += 2
+    if (readerPurpose && module.tags.includes(readerPurpose)) score += 3
+    if (sceneTypes.some(type => module.tags.includes(type))) score += 2
+    if (module.tags.includes(contract.pov)) score += 2
     if (text.includes(module.id)) score += 2
     if (module.id === 'structure-causality' && /因果|目标|阻力|结构|动机/.test(text)) score += 2
     if (module.id === 'character-motivation' && /人物|动机|视角|误判/.test(text)) score += 2
@@ -156,7 +164,7 @@ export async function selectMethods(
           : 4
     return { module, score, tier }
   }).filter(item => item.score > 0)
-    .sort((a, b) => a.tier - b.tier || b.score - a.score || a.module.id.localeCompare(b.module.id))
+    .sort((a, b) => b.score - a.score || a.tier - b.tier || a.module.id.localeCompare(b.module.id))
     .slice(0, 3)
   const maxTokens = options.maxTokens ?? 1200
   while (scores.length > 1) {
@@ -292,7 +300,7 @@ function parseMethodMarkdown(id: string, text: string): MethodModule | null {
     tags,
     scope,
     platforms: platforms.length > 0 ? platforms : undefined,
-    notFor: sections.get('not for') ?? sections.get('不适用') ?? undefined,
+    notFor: sections.get('not for')?.trim() ?? sections.get('不适用')?.trim() ?? undefined,
     signal,
     diagnosis: sections.get('diagnosis') ?? '',
     process,
