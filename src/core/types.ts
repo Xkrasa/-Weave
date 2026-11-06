@@ -50,6 +50,10 @@ export interface CharacterRecord {
   introducedIn: number
   deathChapter?: number
   birthDate?: string
+  role?: string
+  traits?: string[]
+  voice?: string
+  desire?: string
   knows?: KnowledgeFact[]
 }
 

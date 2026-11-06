@@ -15,7 +15,10 @@ export interface EffectFinding {
   quote?: string
   evidence?: EvidenceSpan
   source: 'model' | 'lint'
-  status: 'open'
+  status: 'open' | 'planned' | 'applied' | 'verified' | 'ignored' | 'waived'
+  revisionId?: string
+  paragraphIds?: string[]
+  ignoreReason?: string
 }
 
 export interface EffectReviewReport {
@@ -52,7 +55,7 @@ export async function runEffectReview(
 ): Promise<EffectReviewReport> {
   const taskConfig = resolveTaskConfig(config, 'effectReview')
   const model = taskConfig.model
-  const lint = await lintFindings(root, chapter, draft)
+  const lint = await lintFindings(root, chapter, contract, draft)
   const prompt = [
     `第 ${chapter} 章合同：`,
     JSON.stringify(contract, null, 2),
@@ -128,16 +131,26 @@ export async function runEffectReview(
   return report
 }
 
+const ENV_DUMP_WORDS = [
+  '海风', '潮水', '雾气', '天空', '天色', '云层', '月光', '灯光', '路灯',
+  '夜色', '黄昏', '清晨', '铁锈', '海面', '阴影', '细雨', '寒风', '水汽',
+]
+
 /**
- * Only checks the data model can actually support: overdue loops and an explicit summary ending.
- * It never infers "satisfaction density" from loop counts.
+ * Only checks the data model can actually support: overdue loops, mid-chapter environment blocks,
+ * and an explicit summary ending. It never infers "satisfaction density" from loop counts.
  */
-async function lintFindings(root: string, chapter: number, draft: string): Promise<EffectFinding[]> {
+async function lintFindings(
+  root: string,
+  chapter: number,
+  contract: ChapterContract,
+  draft: string,
+): Promise<EffectFinding[]> {
   const findings: EffectFinding[] = []
   const tail = [...draft.trim()].slice(-160).join('')
   const summaryMatch = /总之[，,]|终于明白|意识到人生|感慨万千|这一切都值得/.exec(tail)
   if (summaryMatch) {
-    findings.push({
+    const finding: EffectFinding = {
       findingId: `e-lint-${findings.length + 1}`,
       dimension: '章末追读',
       severity: 'warning',
@@ -145,7 +158,39 @@ async function lintFindings(root: string, chapter: number, draft: string): Promi
       quote: summaryMatch[0],
       source: 'lint',
       status: 'open',
-    })
+    }
+    try {
+      finding.evidence = resolveEvidence(draft, chapter, summaryMatch[0])
+    } catch {
+      // ignore if unresolvable
+    }
+    findings.push(finding)
+  }
+
+  const paragraphs = draft.split(/\n{2,}/).map(part => part.trim()).filter(Boolean)
+  for (let index = 1; index < paragraphs.length; index += 1) {
+    const paragraph = paragraphs[index]!
+    if ([...paragraph].length < 45) continue
+    if (/[“"「『]/.test(paragraph)) continue
+    if (contract.characters.some(name => name && paragraph.includes(name))) continue
+    const envHits = ENV_DUMP_WORDS.filter(word => paragraph.includes(word)).length
+    if (envHits >= 4) {
+      const finding: EffectFinding = {
+        findingId: `e-lint-${findings.length + 1}`,
+        dimension: '环境与描写',
+        severity: 'warning',
+        description: `第 ${index + 1} 段连续铺陈环境意象而无人物动作或对话推进，建议压缩或融入人物行动`,
+        quote: paragraph,
+        source: 'lint',
+        status: 'open',
+      }
+      try {
+        finding.evidence = resolveEvidence(draft, chapter, paragraph)
+      } catch {
+        // ignore
+      }
+      findings.push(finding)
+    }
   }
 
   const loops = await collectLoopState(root, chapter).catch(() => null)

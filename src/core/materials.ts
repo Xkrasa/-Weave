@@ -5,7 +5,7 @@ import { listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
 import { loadCharacters, loadContract } from './contract.ts'
 import { projectPaths } from './project.ts'
 import { currentCommit, finalPath, readMainline } from './ledger.ts'
-import { collectLedger, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
+import { collectLedger, collectLoopState, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
 import { loadMethods, methodText, selectMethods } from './methods.ts'
 import { loadStyleConstitution, loadAuthorSamples, styleText } from './style.ts'
 import { conflictError } from './errors.ts'
@@ -48,6 +48,10 @@ export async function collectMaterials(root: string, contract: ChapterContract):
       status: character.status,
       introducedIn: character.introducedIn,
       ...(character.deathChapter !== undefined ? { deathChapter: character.deathChapter } : {}),
+      ...(character.role ? { role: character.role } : {}),
+      ...(character.traits?.length ? { traits: character.traits } : {}),
+      ...(character.voice ? { voice: character.voice } : {}),
+      ...(character.desire ? { desire: character.desire } : {}),
     }))
   if (relevant.length > 0) {
     materials.push(
@@ -76,7 +80,10 @@ export async function collectMaterials(root: string, contract: ChapterContract):
         'derived',
         true,
         `视角人物当前关键状态（${contract.pov}）`,
-        JSON.stringify({ facts: split.criticalFacts, beliefs: split.criticalBeliefs }, null, 2),
+        JSON.stringify({
+          facts: split.criticalFacts.map(formatFactForPrompt),
+          beliefs: split.criticalBeliefs.map(formatBeliefForPrompt),
+        }, null, 2),
       ),
       priority: 0,
     })
@@ -89,7 +96,10 @@ export async function collectMaterials(root: string, contract: ChapterContract):
         'derived',
         false,
         `视角人物背景认知（${contract.pov}，可压缩）`,
-        JSON.stringify({ facts: split.backgroundFacts, beliefs: split.backgroundBeliefs }, null, 2),
+        JSON.stringify({
+          facts: split.backgroundFacts.map(formatFactForPrompt),
+          beliefs: split.backgroundBeliefs.map(formatBeliefForPrompt),
+        }, null, 2),
       ),
       priority: 20,
     })
@@ -144,8 +154,8 @@ export async function collectMaterials(root: string, contract: ChapterContract):
       contract,
       previousContract,
       previousCommit,
-      povFacts,
-      povBeliefs,
+      povFacts.map(formatFactForPrompt),
+      povBeliefs.map(formatBeliefForPrompt),
     )
     materials.push(
       material(
@@ -309,7 +319,7 @@ async function buildContinuation(
   const chapter = contract.chapter - 1
   const samePov = previousContract.pov === contract.pov
   const continuity: ContinuationPayload['visibility']['continuity'] =
-    previousContract.location === contract.location
+    previousContract.location === contract.location || sharesLocationToken(previousContract.location, contract.location)
       ? 'same-location'
       : previousContract.time === contract.time ? 'same-time' : 'unknown'
   const actualEnding = actualEndingOf(previousCommit)
@@ -350,7 +360,8 @@ async function buildContinuation(
     return { ...summary, payload }
   }
   const excerpt = tailExcerpt(prose, 800, 300)
-  const paragraphs = paragraphSpans(excerpt.text)
+  const baseByte = Buffer.byteLength(prose.slice(0, excerpt.offset), 'utf8')
+  const paragraphs = paragraphSpans(excerpt.text, baseByte)
   const covered = paragraphs.filter(paragraph =>
     visible.some(span => span.byteStart < paragraph.end && paragraph.start < span.byteEnd),
   )
@@ -424,11 +435,11 @@ function tailExcerpt(text: string, max: number, min: number): { text: string; of
     if (characters >= min) break
   }
   const joined = kept.join('\n\n')
-  const offset = Math.max(0, text.indexOf(joined))
+  const offset = Math.max(0, text.lastIndexOf(joined))
   return { text: joined, offset }
 }
 
-function paragraphSpans(text: string): Array<{ start: number; end: number }> {
+function paragraphSpans(text: string, baseByte = 0): Array<{ start: number; end: number }> {
   const spans: Array<{ start: number; end: number }> = []
   let cursor = 0
   for (const part of text.split(/\n{2,}/)) {
@@ -437,12 +448,23 @@ function paragraphSpans(text: string): Array<{ start: number; end: number }> {
     const index = text.indexOf(trimmed, cursor)
     if (index < 0) continue
     spans.push({
-      start: Buffer.byteLength(text.slice(0, index), 'utf8'),
-      end: Buffer.byteLength(text.slice(0, index + trimmed.length), 'utf8'),
+      start: baseByte + Buffer.byteLength(text.slice(0, index), 'utf8'),
+      end: baseByte + Buffer.byteLength(text.slice(0, index + trimmed.length), 'utf8'),
     })
     cursor = index + trimmed.length
   }
   return spans
+}
+
+function sharesLocationToken(left: string, right: string): boolean {
+  const cleanLeft = left.replace(/\s+/g, '')
+  const cleanRight = right.replace(/\s+/g, '')
+  if (cleanLeft.length < 2 || cleanRight.length < 2) return false
+  for (let index = 0; index + 2 <= cleanLeft.length; index += 1) {
+    const token = cleanLeft.slice(index, index + 2)
+    if (cleanRight.includes(token)) return true
+  }
+  return false
 }
 
 
@@ -471,7 +493,14 @@ async function collectRetrievedEvidence(root: string, contract: ChapterContract)
     throw conflictError('检索索引不可用或落后于主线；请执行 weave rebuild --projection search')
   }
 
-  const queries = retrievalQueries(contract)
+  const loops = await collectLoopState(root, Math.max(0, contract.chapter - 1)).catch(() => null)
+  const openLoopQueries = (loops?.loops ?? [])
+    .filter(loop => loop.status !== 'paid_off' && loop.status !== 'abandoned')
+    .filter(loop => loop.relatedEntities.includes(contract.pov) || loop.relatedEntities.length === 0)
+    .slice(0, 2)
+    .map(loop => loop.summary.trim().slice(0, 60))
+    .filter(Boolean)
+  const queries = [...new Set([...retrievalQueries(contract), ...openLoopQueries])]
   const candidates = new Map<string, { score: number; chapter: number; paragraph: number; text: string; sourceCommit: string }>()
   for (const [queryIndex, query] of queries.entries()) {
     const result = await searchBook(root, query, { limit: 5 })
@@ -658,6 +687,34 @@ function splitPovKnowledge(
   )
   const backgroundBeliefs = beliefs.filter(belief => !criticalBeliefs.includes(belief))
   return { criticalFacts, criticalBeliefs, backgroundFacts, backgroundBeliefs }
+}
+
+function formatFactForPrompt(fact: LedgerFact): {
+  subject: string
+  predicate: string
+  object: string
+  fromChapter: number
+} {
+  return {
+    subject: fact.subject,
+    predicate: fact.predicate,
+    object: fact.object,
+    fromChapter: fact.validFromChapter,
+  }
+}
+
+function formatBeliefForPrompt(belief: LedgerBelief): {
+  character: string
+  attitude: LedgerBelief['attitude']
+  proposition: string
+  fromChapter: number
+} {
+  return {
+    character: belief.characterId,
+    attitude: belief.attitude,
+    proposition: belief.proposition,
+    fromChapter: belief.learnedAtChapter,
+  }
 }
 
 

@@ -52,6 +52,7 @@ export async function buildStoryMemory(root: string): Promise<StoryMemory> {
     chapter: number
     title: string
     pov: string
+    narrativeMode: 'limited' | 'omniscient'
     summaries: string[]
     participants: Set<string>
   }> = []
@@ -65,6 +66,7 @@ export async function buildStoryMemory(root: string): Promise<StoryMemory> {
       chapter,
       title: contract?.title ?? '',
       pov: contract?.pov ?? '',
+      narrativeMode: contract?.narrativeMode ?? 'limited',
       summaries: events.slice(-2).map(event => event.summary),
       participants: new Set(events.flatMap(event => event.participants)),
     })
@@ -84,10 +86,22 @@ export async function buildStoryMemory(root: string): Promise<StoryMemory> {
     const relevant = rows
       .filter(row => row.pov === character || row.participants.has(character))
       .slice(-RECENT_POV_CHAPTERS)
-    const text = relevant
-      .map(row => `第${row.chapter}章：${row.summaries.join('；') || row.title}`)
-      .join('\n')
-    pov[character] = cap(text, POV_CAP)
+    // Limited POV may only see the planted prose it actually narrated. Loop summaries are
+    // model-authored and can assert facts the POV never observed, so they stay out of pov memory.
+    const observedLoops = openLoops
+      .map(loop => ({ loop, row: rows.find(item => item.chapter === loop.plantedChapter) }))
+      .filter(item => item.row
+        && item.row.pov === character
+        && item.row.narrativeMode !== 'omniscient'
+        && item.loop.evidence.length > 0)
+    const lines = [
+      ...relevant.map(row => `第${row.chapter}章：${row.summaries.join('；') || row.title}`),
+      ...(observedLoops.length > 0
+        ? ['未解线索（原文）：', ...observedLoops.map(item =>
+            `- 第${item.loop.plantedChapter}章：${(item.loop.evidence[0]?.quote ?? '').slice(0, 80)}（${item.loop.status}）`)]
+        : []),
+    ]
+    pov[character] = cap(lines.join('\n'), POV_CAP)
   }
 
   return {

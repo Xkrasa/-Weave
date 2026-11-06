@@ -280,7 +280,8 @@ export async function searchBook(
       && (!filterStoryline || String(row.storyline).split(',').includes(filterStoryline))
       && (!options.time || String(row.time_label).includes(options.time))
       && (!options.location || String(row.location).includes(options.location))
-    const queryTerms = tokenize(query)
+    const rawQueryTerms = tokenize(query)
+    const queryTerms = filterQueryTerms(rawQueryTerms)
     const fallback = query.length <= 1 || queryTerms.length === 0
     if (!fallback) {
       const rows = db.prepare('SELECT * FROM search_chunks').all() as Array<Record<string, unknown>>
@@ -294,15 +295,25 @@ export async function searchBook(
       const avgLength = filtered.length === 0
         ? 0
         : filtered.reduce((sum, row) => sum + Number(row.length), 0) / filtered.length
+      const hasMultiCharTerm = queryTerms.some(term => [...term].length >= 2)
       const scored = filtered.map(row => {
         let score = 0
+        let matchedMulti = 0
+        let matchedSingle = 0
         for (const term of queryTerms) {
           const tfRow = db.prepare('SELECT tf FROM search_terms WHERE term = ? AND chunk_id = ?')
             .get(term, String(row.chunk_id)) as Record<string, unknown> | undefined
           const tf = Number(tfRow?.tf ?? 0)
           if (tf === 0) continue
+          const isMulti = [...term].length >= 2
+          if (isMulti) matchedMulti += 1
+          else matchedSingle += 1
+          const weight = isMulti ? 2.2 : 0.35
           const idf = Math.log(1 + (totalDocs - (df.get(term) ?? 0) + 0.5) / ((df.get(term) ?? 0) + 0.5))
-          score += idf * ((tf * 2.5) / (tf + 1.5 * (0.25 + 0.75 * Number(row.length) / (avgLength || 1))))
+          score += weight * idf * ((tf * 2.5) / (tf + 1.5 * (0.25 + 0.75 * Number(row.length) / (avgLength || 1))))
+        }
+        if (hasMultiCharTerm && matchedMulti === 0 && matchedSingle < 2) {
+          return { row, score: 0 }
         }
         return { row, score }
       }).filter(item => item.score > 0)
@@ -347,11 +358,14 @@ export async function searchBook(
 }
 
 export function rerankResults(results: SearchResult[], query: string): SearchResult[] {
-  const terms = [...new Set(tokenize(query))]
+  const terms = filterQueryTerms(tokenize(query))
   return [...results]
     .map(result => {
       const text = result.text.toLowerCase()
-      const coverage = terms.filter(term => text.includes(term.toLowerCase())).length
+      const coverage = terms.reduce(
+        (sum, term) => sum + (text.includes(term.toLowerCase()) ? ([...term].length >= 2 ? 2 : 1) : 0),
+        0,
+      )
       return { result, coverage }
     })
     .sort((a, b) => b.coverage - a.coverage || a.result.chunkId.localeCompare(b.result.chunkId))
@@ -482,6 +496,20 @@ function toResult(row: Record<string, unknown>): SearchResult {
       quote: text,
     },
   }
+}
+
+const STOP_CHARS = new Set([
+  '的', '了', '在', '是', '我', '有', '和', '就', '不', '都', '一', '上', '下', '也', '很', '到',
+  '说', '要', '去', '你', '会', '着', '看', '好', '这', '那', '来', '里', '后', '前', '时', '把',
+  '被', '让', '给', '从', '向', '往', '对', '于', '与', '及', '或', '而', '却', '但', '又', '还',
+  '才', '只', '已', '正', '可', '能', '将', '由', '为', '以', '之', '么', '呢', '吗', '吧', '啊',
+  '呀', '她', '他', '它', '们', '个', '中', '人', '出', '过', '得', '地',
+])
+
+function filterQueryTerms(terms: string[]): string[] {
+  const unique = [...new Set(terms)]
+  const filtered = unique.filter(term => [...term].length > 1 || !STOP_CHARS.has(term))
+  return filtered.length > 0 ? filtered : unique
 }
 
 function tokenize(text: string): string[] {

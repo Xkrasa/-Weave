@@ -27,6 +27,7 @@ import { applyWaivers } from './waivers.ts'
 import { loadMethods, methodText, selectMethods } from './methods.ts'
 import { loadStyleConstitution, loadAuthorSamples, styleText } from './style.ts'
 import { collectLedger, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
+import type { EffectFinding, EffectReviewReport } from './effect-review.ts'
 
 const REVISION_SYSTEM = [
   '你是小说修稿器。只修改请求中列出的段落，不重写整章。',
@@ -130,14 +131,36 @@ export async function reviseChapter(
   signal: AbortSignal,
 ): Promise<{ candidate: RevisionCandidate; plan: RevisionPlanView }> {
   const draft = await readDraft(root, chapter)
+  const currentHash = draftHash(draft)
   const loaded = await loadStage<ReviewReport>(root, 'review', chapter)
-  if (!loaded) throw validationError(`第 ${chapter} 章没有审查报告`)
-  const report = await applyWaivers(root, chapter, loaded)
-  if (report.draftHash !== draftHash(draft)) {
+  const effectReport = await loadStage<EffectReviewReport>(root, 'effect-review', chapter)
+  if (!loaded && !effectReport) throw validationError(`第 ${chapter} 章没有审查报告`)
+  const report = loaded ? await applyWaivers(root, chapter, loaded) : null
+  if (findingIds.length === 0) throw validationError('请指定要处理的 finding，例如 --findings f1,f2')
+
+  const reviewSelected = report
+    ? report.findings.filter(finding => findingIds.includes(finding.findingId))
+    : []
+  const effectSelected = effectReport
+    ? effectReport.findings.filter(finding => findingIds.includes(finding.findingId))
+    : []
+
+  if (reviewSelected.length > 0 && report && report.draftHash !== currentHash) {
     throw conflictError('草稿在审查后已修改；请重新审查后再修稿')
   }
-  if (findingIds.length === 0) throw validationError('请指定要处理的 finding，例如 --findings f1,f2')
-  const selected = report.findings.filter(finding => findingIds.includes(finding.findingId))
+  if (effectSelected.length > 0 && effectReport && effectReport.draftHash !== currentHash) {
+    throw conflictError('草稿在效果审查后已修改；请重新执行效果审查后再修稿')
+  }
+  if (reviewSelected.length === 0 && effectSelected.length === 0) {
+    if (report && report.draftHash !== currentHash) {
+      throw conflictError('草稿在审查后已修改；请重新审查后再修稿')
+    }
+    if (effectReport && effectReport.draftHash !== currentHash) {
+      throw conflictError('草稿在效果审查后已修改；请重新执行效果审查后再修稿')
+    }
+  }
+
+  const selected: Array<ReviewFinding | EffectFinding> = [...reviewSelected, ...effectSelected]
   if (selected.length !== findingIds.length) throw validationError('部分 finding 不存在')
   if (selected.some(finding => finding.status === 'waived' || finding.status === 'verified')) {
     throw validationError('waived 或 verified finding 不进入修稿计划')
@@ -147,12 +170,13 @@ export async function reviseChapter(
   }
 
   for (const finding of selected) finding.status = 'planned'
-  await saveStage(root, 'review', chapter, report)
+  if (report && reviewSelected.length > 0) await saveStage(root, 'review', chapter, report)
+  if (effectReport && effectSelected.length > 0) await saveStage(root, 'effect-review', chapter, effectReport)
 
   const paragraphs = paragraphsOf(draft)
   const instructions: RevisionInstruction[] = selected.map(finding => ({
     findingId: finding.findingId,
-    paragraphIds: paragraphsForFinding(paragraphs, finding),
+    paragraphIds: paragraphsForFinding(paragraphs, finding as ReviewFinding),
     goal: finding.description,
   }))
   if (instructions.some(item => item.paragraphIds.length === 0)) {
@@ -250,14 +274,15 @@ export async function reviseChapter(
     finding.revisionId = revision.revisionId
     finding.paragraphIds = instructions.find(item => item.findingId === finding.findingId)?.paragraphIds
   }
-  await saveStage(root, 'review', chapter, report)
+  if (report && reviewSelected.length > 0) await saveStage(root, 'review', chapter, report)
+  if (effectReport && effectSelected.length > 0) await saveStage(root, 'effect-review', chapter, effectReport)
   return {
     candidate: revision,
     plan: {
       chapter,
       draftHash: revision.baseDraftHash,
       createdAt: revision.createdAt,
-      findings: selected,
+      findings: selected as ReviewFinding[],
       instructions,
     },
   }
@@ -599,8 +624,11 @@ export async function ignoreFinding(
   reason: string,
 ): Promise<ReviewFinding> {
   const report = await loadStage<ReviewReport>(root, 'review', chapter)
-  if (!report) throw validationError(`第 ${chapter} 章没有审查报告`)
-  const finding = report.findings.find(item => item.findingId === findingId)
+  const effectReport = await loadStage<EffectReviewReport>(root, 'effect-review', chapter)
+  if (!report && !effectReport) throw validationError(`第 ${chapter} 章没有审查报告`)
+  const reviewFinding = report?.findings.find(item => item.findingId === findingId)
+  const effectFinding = !reviewFinding ? effectReport?.findings.find(item => item.findingId === findingId) : undefined
+  const finding = reviewFinding ?? effectFinding
   if (!finding) throw validationError(`未找到 finding：${findingId}`)
   if (finding.severity === 'blocking') throw validationError('blocking finding 不能 ignore；请修复或显式豁免')
   if (finding.status === 'applied' || finding.status === 'verified') {
@@ -613,12 +641,16 @@ export async function ignoreFinding(
     kind: 'rejected', source: 'ignore', chapter, dimension: finding.dimension,
     reason: reason.trim(), findingId: finding.findingId,
   }).catch(() => {})
-  report.blockingCount = report.findings.filter(
-    item => item.severity === 'blocking' && item.status !== 'verified' && item.status !== 'waived',
-  ).length
-  report.passed = report.blockingCount === 0
-  await saveStage(root, 'review', chapter, report)
-  return finding
+  if (reviewFinding && report) {
+    report.blockingCount = report.findings.filter(
+      item => item.severity === 'blocking' && item.status !== 'verified' && item.status !== 'waived',
+    ).length
+    report.passed = report.blockingCount === 0
+    await saveStage(root, 'review', chapter, report)
+  } else if (effectFinding && effectReport) {
+    await saveStage(root, 'effect-review', chapter, effectReport)
+  }
+  return finding as ReviewFinding
 }
 
 function revisionDir(root: string, chapter: number): string {
