@@ -93,7 +93,9 @@ export function evaluateDimensions(
   expected: string[],
   extraction: ExtractionReport,
 ): { expected: string[]; covered: string[]; missed: string[] } {
-  if (extraction.noEventsReason) {
+  // "No events" may waive dimension checks only when there are truly no records;
+  // otherwise it would let a partially reported chapter bypass the whole gate.
+  if (extraction.noEventsReason && extraction.records.length === 0) {
     return { expected: [...expected], covered: [...expected], missed: [] }
   }
   const covered: string[] = []

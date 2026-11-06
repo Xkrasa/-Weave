@@ -477,7 +477,15 @@ test('coverage audit fails when an expected dimension from contract is omitted (
     missed: [],
   })
 
-  const model = new FakeModel([omittedPossessionExtraction, auditSecondPass])
+  const disguisedNoEvents = JSON.parse(omittedPossessionExtraction) as Record<string, unknown>
+  disguisedNoEvents.noEventsReason = '本章看起来没有状态变化'
+
+  const model = new FakeModel([
+    omittedPossessionExtraction,
+    auditSecondPass,
+    JSON.stringify(disguisedNoEvents),
+    auditSecondPass,
+  ])
   await model.start()
   const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-opt-dim-miss-'))
   try {
@@ -531,6 +539,12 @@ test('coverage audit fails when an expected dimension from contract is omitted (
     assert.ok(auditReport.dimensions?.expected.includes('possession'))
     assert.deepEqual(auditReport.dimensions?.missed, ['possession'])
     assert.ok(auditReport.warnings.some(item => item.includes('未交代必检维度：possession')))
+
+    // "noEventsReason" must not waive dimensions while records still exist.
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    const disguised = await runCli(dir, ['audit', '1', '--json'])
+    assert.equal(disguised.code, 3, 'noEventsReason with existing records must not bypass dimension coverage')
+    assert.deepEqual(parseJson<{ dimensions?: { missed: string[] } }>(disguised.stdout).dimensions?.missed, ['possession'])
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
