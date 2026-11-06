@@ -8,6 +8,8 @@ const state = {
   dirty: false,
   saveTimer: null,
   waivers: [],
+  preferences: {},
+  writeController: null,
 };
 
 const $ = selector => document.querySelector(selector);
@@ -73,7 +75,12 @@ async function refresh() {
   const [status, chapters] = await Promise.all([api('/api/status'), api('/api/chapters')]);
   state.status = status;
   state.chapters = chapters.chapters;
-  if (!state.current && state.chapters.length) state.current = state.chapters[0].chapter;
+  if (!state.current) {
+    const saved = Number(state.preferences.lastChapter);
+    state.current = state.chapters.some(item => item.chapter === saved)
+      ? saved
+      : state.chapters[0]?.chapter ?? null;
+  }
   renderShell();
   if (state.current) await openChapter(state.current, true);
 }
@@ -82,6 +89,8 @@ async function openChapter(chapter, silent = false) {
   if (!silent && state.dirty && !confirm('当前草稿还有未保存修改，切换章节会丢失。继续？')) return;
   state.current = chapter;
   state.detail = await api(`/api/chapters/${chapter}`);
+  state.preferences.lastChapter = chapter;
+  await persistPreferences();
   const detail = state.detail;
   const contract = detail.contract;
   $('#chapter-eyebrow').textContent = `第 ${chapter} 章 · ${detail.stages.review?.passed ? '审查通过' : detail.stages.review ? '存在意见' : '未审查'}`;
@@ -110,7 +119,32 @@ function renderContract(contract) {
     `地点：${escapeHtml(contract.location)}`,
     `字数：${escapeHtml(contract.targetWords)}`,
     `必须：${escapeHtml((contract.mustHappen || []).join('；') || '—')}`,
-  ].map(text => `<span>${text}</span>`).join('');
+    '<button id="btn-contract" class="ghost">编辑合同</button>',
+  ].map(text => text.startsWith('<button') ? text : `<span>${text}</span>`).join('');
+  $('#btn-contract').addEventListener('click', showContractEditor);
+}
+
+function showContractEditor() {
+  const contract = state.detail?.contract;
+  if (!contract) return;
+  showModal('编辑合同', `<textarea id="contract-json" spellcheck="false">${escapeHtml(JSON.stringify(contract, null, 2))}</textarea>`, [
+    { label: '取消', action: closeModal },
+    {
+      label: '保存',
+      action: async () => {
+        try {
+          const next = JSON.parse($('#contract-json').value);
+          const saved = await api(`/api/chapters/${state.current}/contract`, { method: 'PUT', body: next });
+          closeModal();
+          state.detail.contract = saved;
+          renderContract(saved);
+          toast('合同已保存；请重新运行合同检查');
+        } catch (error) {
+          toast(error.message, true);
+        }
+      },
+    },
+  ]);
 }
 
 function updateSave(text) {
@@ -174,6 +208,7 @@ async function renderInspector() {
           ${finding.quote ? `<div class="quote">“${escapeHtml(finding.quote)}”</div>` : ''}
           ${finding.waiveReason ? `<p class="small">豁免：${escapeHtml(finding.waiveReason)}</p>` : ''}
           <div class="finding-actions">
+            ${finding.quote ? `<button data-locate="${escapeHtml(finding.quote)}">定位</button>` : ''}
             ${finding.severity === 'warning' && finding.status !== 'waived' ? `<button data-waive="${escapeHtml(finding.findingId)}">豁免</button>` : ''}
             ${finding.severity === 'blocking' && ['open', 'planned'].includes(finding.status) ? `<button data-revise="${escapeHtml(finding.findingId)}">发起修订</button>` : ''}
             ${finding.severity !== 'blocking' ? `<button data-ignore="${escapeHtml(finding.findingId)}">忽略</button>` : ''}
@@ -181,9 +216,22 @@ async function renderInspector() {
         </div>
       `).join('')
       : `<div class="empty">${review ? '审查通过，没有 finding。' : '尚未运行审查。'}</div>`;
+    $$('#inspector-body [data-locate]').forEach(node => node.addEventListener('click', () => locateQuote(node.dataset.locate)));
     $$('#inspector-body [data-waive]').forEach(node => node.addEventListener('click', () => waiveFinding(node.dataset.waive)));
     $$('#inspector-body [data-revise]').forEach(node => node.addEventListener('click', () => reviseFinding(node.dataset.revise)));
     $$('#inspector-body [data-ignore]').forEach(node => node.addEventListener('click', () => ignoreFinding(node.dataset.ignore)));
+  } else if (state.tab === 'stages') {
+    const stages = detail.stages || {};
+    const block = (title, report, extra = '') => `
+      <div class="card"><h3>${title}</h3>
+        <p>${report ? `${extra}${report.passed ? '通过' : '未通过'}` : '缺失'}</p>
+        ${report ? `<pre>${escapeHtml(JSON.stringify(report, null, 2).slice(0, 9000))}</pre>` : ''}
+      </div>`;
+    $('#inspector-body').innerHTML = [
+      block('内容检查', stages.contentCheck, `${stages.contentCheck?.stats?.characters ?? 0} 字 · `),
+      block('证据抽取', stages.extraction, `${stages.extraction?.records?.length ?? 0} 条 · `),
+      block('覆盖审计', stages.audit, `${stages.audit?.contract?.covered?.length ?? 0} 项覆盖 · `),
+    ].join('');
   } else if (state.tab === 'revisions') {
     const revisions = detail.revisions || [];
     $('#inspector-body').innerHTML = revisions.length
@@ -227,12 +275,39 @@ async function renderInspector() {
       ${style.findings.length ? style.findings.map(item => `<div class="finding ${item.severity}"><div class="finding-head"><span>${escapeHtml(item.code)}</span><span>${escapeHtml(item.severity)}</span></div><p>${escapeHtml(item.message)}</p></div>`).join('') : '<div class="empty">没有风格偏差。</div>'}
       <div class="section-label">stats</div><pre>${escapeHtml(JSON.stringify(style.stats, null, 2))}</pre>
     `;
+  } else if (state.tab === 'history') {
+    const history = await api(`/api/chapters/${state.current}/history`);
+    $('#inspector-body').innerHTML = history.commits.length
+      ? history.commits.map(commit => `
+        <div class="card"><h3>r${commit.revision} · ${escapeHtml(commit.commitId.slice(0, 12))}</h3>
+          <p>${escapeHtml(commit.createdAt)} · ${commit.evidenceCount} 证据</p>
+          <p class="code">${escapeHtml(commit.contentHash.slice(0, 24))}</p>
+        </div>`).join('')
+      : '<div class="empty">本章还没有正式提交。</div>';
+  } else if (state.tab === 'contract') {
+    const contract = detail.contract;
+    $('#inspector-body').innerHTML = contract
+      ? `<div class="section-label">chapter contract</div><pre>${escapeHtml(JSON.stringify(contract, null, 2))}</pre><button id="inspector-contract-edit">编辑合同</button>`
+      : '<div class="empty">本章没有合同。请用 CLI 创建。</div>';
+    const button = $('#inspector-contract-edit');
+    if (button) button.addEventListener('click', showContractEditor);
   }
 }
 
-async function runStage(action) {
-  if (!state.current) return;
-  if (['amend', 'finalize', 'write'].includes(action) && !confirm(`确认执行 ${action}？`)) return;
+async function showGates() {
+  const result = await api(`/api/chapters/${state.current}/gates`);
+  if (!result.ready) {
+    showModal('定稿门禁未通过', result.gates.map(gate => `
+      <div class="finding ${gate.ok ? '' : 'blocking'}">
+        <div class="finding-head"><span>${escapeHtml(gate.label)}</span><span>${gate.ok ? '通过' : '阻断'}</span></div>
+        <p>${escapeHtml(gate.detail)}</p>
+      </div>
+    `).join(''), [{ label: '关闭', action: closeModal }]);
+  }
+  return result;
+}
+
+async function runWriteStream() {
   if (state.dirty) {
     try {
       await saveDraft();
@@ -240,6 +315,76 @@ async function runStage(action) {
       return;
     }
   }
+  const controller = new AbortController();
+  state.writeController = controller;
+  $('#btn-cancel').classList.remove('hidden');
+  updateSave('生成中…');
+  $('#draft').value = '';
+  try {
+    const response = await fetch(`/api/chapters/${state.current}/write/stream`, {
+      method: 'POST',
+      headers: { 'x-weave-token': state.token },
+      signal: controller.signal,
+    });
+    if (!response.ok || !response.body) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error?.message || `HTTP ${response.status}`);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let failed = null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const blocks = buffer.split('\n\n');
+      buffer = blocks.pop() || '';
+      for (const block of blocks) {
+        const line = block.split('\n').find(item => item.startsWith('data:'));
+        if (!line) continue;
+        const payload = JSON.parse(line.slice(5).trim());
+        if (payload.type === 'delta') {
+          $('#draft').value += payload.delta;
+          updateWords();
+          $('#draft').scrollTop = $('#draft').scrollHeight;
+        } else if (payload.type === 'error') {
+          failed = payload;
+        }
+      }
+    }
+    if (failed) throw new Error(failed.aborted ? '生成已取消' : failed.message);
+    toast('生成完成');
+    await openChapter(state.current, true);
+  } catch (error) {
+    if (error.name === 'AbortError') toast('生成已取消');
+    else toast(error.message, true);
+    if (state.current) await openChapter(state.current, true).catch(() => {});
+  } finally {
+    state.writeController = null;
+    $('#btn-cancel').classList.add('hidden');
+  }
+}
+
+async function runStage(action) {
+  if (!state.current) return;
+  if (action === 'write') {
+    await runWriteStream();
+    return;
+  }
+  if (state.dirty) {
+    try {
+      await saveDraft();
+    } catch {
+      return;
+    }
+  }
+  if (action === 'finalize') {
+    const gates = await showGates();
+    if (!gates.ready) return;
+    if (!confirm(`确认定稿第 ${state.current} 章？\n草稿 ${state.detail.hash.slice(0, 16)}`)) return;
+  }
+  if (action === 'amend' && !confirm('重开草稿会复制当前正式正文，并可能产生新的影响面。继续？')) return;
   const labels = {
     'contract-check': '合同检查', check: '内容检查', extract: '抽取', audit: '审计',
     review: '审查', recheck: '复检', amend: '重开草稿', finalize: '定稿', write: '生成',
@@ -248,9 +393,7 @@ async function runStage(action) {
   try {
     const path = action === 'contract-check'
       ? `/api/chapters/${state.current}/contract-check`
-      : action === 'write'
-        ? `/api/chapters/${state.current}/write`
-        : `/api/chapters/${state.current}/stage/${action}`;
+      : `/api/chapters/${state.current}/stage/${action}`;
     const result = await api(path, { method: 'POST' });
     if (result.exitCode && result.exitCode !== 0) toast(`${labels[action]} 返回 ${result.exitCode}`, true);
     else toast(`${labels[action]}完成`);
@@ -260,6 +403,19 @@ async function runStage(action) {
     toast(error.message, true);
     if (error.details) showModal('错误详情', `<pre>${escapeHtml(JSON.stringify(error.details, null, 2))}</pre>`, []);
   }
+}
+
+function locateQuote(quote) {
+  const editor = $('#draft');
+  const index = editor.value.indexOf(quote);
+  if (index < 0) {
+    toast('当前草稿中找不到该引文', true);
+    return;
+  }
+  editor.focus();
+  editor.setSelectionRange(index, index + quote.length);
+  const lineHeight = 30;
+  editor.scrollTop = Math.max(0, editor.value.slice(0, index).split('\n').length * lineHeight - 120);
 }
 
 async function waiveFinding(findingId) {
@@ -407,7 +563,8 @@ function bind() {
     clearTimeout(state.saveTimer);
     state.saveTimer = setTimeout(() => saveDraft(), 900);
   });
-  $$('#stagebar button').forEach(node => node.addEventListener('click', () => runStage(node.dataset.stage)));
+  $$('#stagebar button[data-stage]').forEach(node => node.addEventListener('click', () => runStage(node.dataset.stage)));
+  $('#btn-cancel').addEventListener('click', () => state.writeController?.abort());
   $('#btn-refresh').addEventListener('click', () => refresh().catch(error => toast(error.message, true)));
   $('#btn-deconstruct').addEventListener('click', showDeconstruct);
   $('#btn-doctor').addEventListener('click', showDoctor);
@@ -418,7 +575,9 @@ function bind() {
   $('#search-form').addEventListener('submit', event => { event.preventDefault(); runSearch().catch(error => toast(error.message, true)); });
   $$('#tabs button').forEach(node => node.addEventListener('click', () => {
     state.tab = node.dataset.tab;
+    state.preferences.tab = state.tab;
     $$('#tabs button').forEach(item => item.classList.toggle('active', item === node));
+    persistPreferences();
     renderInspector().catch(error => toast(error.message, true));
   }));
   document.addEventListener('keydown', event => {
@@ -434,10 +593,24 @@ function bind() {
   });
 }
 
+async function persistPreferences() {
+  try {
+    await api('/api/preferences', {
+      method: 'PUT',
+      body: { lastChapter: state.preferences.lastChapter, tab: state.tab, theme: 'dark' },
+    });
+  } catch {
+    // Preference persistence must never block editing.
+  }
+}
+
 async function boot() {
   const bootstrap = await api('/api/bootstrap');
   state.token = bootstrap.token;
   state.status = bootstrap.status;
+  state.preferences = bootstrap.preferences || {};
+  if (typeof state.preferences.tab === 'string') state.tab = state.preferences.tab;
+  $$('#tabs button').forEach(node => node.classList.toggle('active', node.dataset.tab === state.tab));
   bind();
   await refresh();
 }

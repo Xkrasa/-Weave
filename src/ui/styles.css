@@ -66,6 +66,7 @@ h1 { font-family: var(--serif); font-size: 26px; font-weight: 600; margin: 0; }
 .editor-wrap { flex: 1; min-height: 0; margin: 0 28px; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: #12151a; }
 #draft { flex: 1; width: 100%; resize: none; border: 0; outline: 0; background: transparent; color: var(--text); padding: 24px 28px; font-family: var(--serif); font-size: 17px; line-height: 1.9; }
 #draft::placeholder { color: #5c5a55; }
+#contract-json { width: 100%; min-height: 42vh; background: #101317; border: 1px solid var(--line); border-radius: 7px; padding: 12px; font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; line-height: 1.6; resize: vertical; }
 .editor-foot { border-top: 1px solid var(--line); padding: 8px 14px; display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
 .contract-strip { margin: 12px 28px 20px; padding: 10px 12px; border-left: 2px solid #5a452c; color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px 16px; }
 .inspector { border-left: 1px solid var(--line); display: flex; flex-direction: column; }

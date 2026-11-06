@@ -27,10 +27,14 @@ import { doctor, exportBook, projectStatus } from './services.ts'
 import { loadModelConfig, projectPaths } from './project.ts'
 import { draftHash, loadStage, readDraft, saveStage } from './stages.ts'
 import { saveDraft } from './runs.ts'
-import { listFiles, readJsonIfExists } from './io.ts'
+import { atomicWriteJson, ensureDir, listFiles, readJsonIfExists } from './io.ts'
 import { readSearchChunk, searchBook } from './search.ts'
 import { deconstructFile } from './deconstruct.ts'
 import { selectMethods, styleCheck } from './methods.ts'
+import { assertProjectionCurrent } from './projections.ts'
+import { assertNoPendingImpacts } from './impact.ts'
+import { assertLedgerProjectionCurrent } from './ledger-projection.ts'
+import { readCommit, readMainline } from './ledger.ts'
 import { WeaveError, conflictError, usageError, validationError } from './errors.ts'
 import type {
   ContentCheckReport,
@@ -104,6 +108,7 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
     sendJson(response, 200, {
       token,
       status: await projectStatus(root),
+      preferences: await loadPreferences(root),
     })
     return
   }
@@ -159,10 +164,33 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
     sendJson(response, 200, await runStage(root, chapter, parts[4]))
     return
   }
+  if (chapter && request.method === 'POST' && parts[3] === 'write' && parts[4] === 'stream') {
+    await streamWrite(root, chapter, request, response)
+    return
+  }
   if (chapter && request.method === 'POST' && parts[3] === 'write') {
     const result = await writeChapter(root, chapter, { signal: new AbortController().signal })
     sendJson(response, 200, result)
     return
+  }
+  if (chapter && request.method === 'GET' && parts[3] === 'gates') {
+    sendJson(response, 200, await chapterGates(root, chapter))
+    return
+  }
+  if (chapter && request.method === 'GET' && parts[3] === 'history') {
+    sendJson(response, 200, await chapterHistory(root, chapter))
+    return
+  }
+  if (url.pathname === '/api/preferences') {
+    if (request.method === 'GET') {
+      sendJson(response, 200, await loadPreferences(root))
+      return
+    }
+    if (request.method === 'PUT') {
+      const body = await readJsonBody<UiPreferences>(request)
+      sendJson(response, 200, await savePreferences(root, body))
+      return
+    }
   }
   if (chapter && request.method === 'POST' && parts[3] === 'revise') {
     const body = await readJsonBody<{ findings?: string[] }>(request)
@@ -428,6 +456,154 @@ async function runStage(root: string, chapter: number, action: string): Promise<
     return { meta: await amendChapter(root, chapter, false) }
   }
   throw usageError(`未知阶段：${action}`)
+}
+
+interface UiPreferences {
+  lastChapter?: number
+  tab?: string
+  theme?: 'dark' | 'light'
+}
+
+async function loadPreferences(root: string): Promise<UiPreferences> {
+  return (await readJsonIfExists<UiPreferences>(path.join(projectPaths(root).metadata, 'ui.json'))) ?? {}
+}
+
+async function savePreferences(root: string, input: UiPreferences): Promise<UiPreferences> {
+  const current = await loadPreferences(root)
+  const next: UiPreferences = {
+    ...current,
+    ...(Number.isSafeInteger(input.lastChapter) && Number(input.lastChapter) > 0
+      ? { lastChapter: Number(input.lastChapter) }
+      : {}),
+    ...(typeof input.tab === 'string' && /^[a-z-]{1,20}$/.test(input.tab) ? { tab: input.tab } : {}),
+    ...(input.theme === 'dark' || input.theme === 'light' ? { theme: input.theme } : {}),
+  }
+  await ensureDir(projectPaths(root).metadata)
+  await atomicWriteJson(path.join(projectPaths(root).metadata, 'ui.json'), next)
+  return next
+}
+
+async function chapterHistory(root: string, chapter: number): Promise<{
+  chapter: number
+  commits: Array<{
+    commitId: string
+    revision: number
+    createdAt: string
+    contentHash: string
+    supersedes: string | null
+    evidenceCount: number
+  }>
+}> {
+  const head = await readMainline(root)
+  let commitId: string | null = head.selectedCommitByChapter[String(chapter)] ?? null
+  const commits = []
+  const seen = new Set<string>()
+  while (commitId && !seen.has(commitId)) {
+    seen.add(commitId)
+    const commit = await readCommit(root, commitId)
+    if (!commit) break
+    commits.push({
+      commitId: commit.commitId,
+      revision: commit.revision,
+      createdAt: commit.createdAt,
+      contentHash: commit.contentHash,
+      supersedes: commit.supersedes,
+      evidenceCount: commit.evidence.length,
+    })
+    commitId = commit.supersedes
+  }
+  return { chapter, commits }
+}
+
+async function chapterGates(root: string, chapter: number): Promise<{
+  chapter: number
+  ready: boolean
+  gates: Array<{ id: string; label: string; ok: boolean; detail: string }>
+}> {
+  const gates: Array<{ id: string; label: string; ok: boolean; detail: string }> = []
+  const add = (id: string, label: string, ok: boolean, detail: string) => gates.push({ id, label, ok, detail })
+  const contract = await loadContract(root, chapter).catch(error => {
+    add('contract', '合同存在', false, error instanceof Error ? error.message : String(error))
+    return null
+  })
+  if (contract) add('contract', '合同存在', true, contract.title)
+  if (contract) {
+    try {
+      await requirePassingContractCheck(root, contract)
+      add('contract-check', '合同检查', true, '通过且未过期')
+    } catch (error) {
+      add('contract-check', '合同检查', false, error instanceof Error ? error.message : String(error))
+    }
+  }
+  const draft = await readDraft(root, chapter).catch(() => '')
+  const hash = draftHash(draft)
+  add('draft', '草稿存在', Boolean(draft.trim()), `${[...draft.replace(/\s/g, '')].length} 字`)
+  const [contentCheck, extraction, audit, review] = await Promise.all([
+    loadStage<ContentCheckReport>(root, 'content-check', chapter),
+    loadStage<ExtractionReport>(root, 'extraction', chapter),
+    loadStage<CoverageAudit>(root, 'audit', chapter),
+    loadStage<ReviewReport>(root, 'review', chapter),
+  ])
+  add('content-check', '内容检查', Boolean(contentCheck && contentCheck.draftHash === hash && contentCheck.passed), contentCheck ? `draft ${contentCheck.draftHash.slice(0, 8)}` : '缺失')
+  add('extraction', '证据抽取', Boolean(extraction && extraction.draftHash === hash && extraction.passed), extraction ? `${extraction.records.length} 条记录` : '缺失')
+  add('audit', '覆盖审计', Boolean(audit && audit.draftHash === hash && audit.passed), audit ? `覆盖 ${audit.contract.covered.length} 项` : '缺失')
+  add('review', '审查', Boolean(review && review.draftHash === hash && review.passed), review ? `${review.findings.length} 条意见` : '缺失')
+  try {
+    await assertNoPendingImpacts(root)
+    add('impact', '影响面', true, '没有未处理影响')
+  } catch (error) {
+    add('impact', '影响面', false, error instanceof Error ? error.message : String(error))
+  }
+  try {
+    await assertProjectionCurrent(root)
+    add('content-projection', '内容投影', true, 'current')
+  } catch (error) {
+    add('content-projection', '内容投影', false, error instanceof Error ? error.message : String(error))
+  }
+  try {
+    await assertLedgerProjectionCurrent(root)
+    add('ledger-projection', '账本投影', true, 'current')
+  } catch (error) {
+    add('ledger-projection', '账本投影', false, error instanceof Error ? error.message : String(error))
+  }
+  return { chapter, ready: gates.every(gate => gate.ok), gates }
+}
+
+async function streamWrite(
+  root: string,
+  chapter: number,
+  request: IncomingMessage,
+  response: ServerResponse,
+): Promise<void> {
+  response.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache, no-transform',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  })
+  const send = (payload: unknown): void => {
+    if (!response.writableEnded && !response.destroyed) response.write(`data: ${JSON.stringify(payload)}\n\n`)
+  }
+  const controller = new AbortController()
+  response.on('close', () => {
+    if (!response.writableEnded) controller.abort()
+  })
+  try {
+    const result = await writeChapter(root, chapter, {
+      signal: controller.signal,
+      onDelta: delta => send({ type: 'delta', delta }),
+      onEvent: event => send({ type: 'event', event }),
+    })
+    send({ type: 'done', result })
+  } catch (error) {
+    send({
+      type: 'error',
+      message: error instanceof Error ? error.message : String(error),
+      aborted: controller.signal.aborted,
+    })
+  } finally {
+    if (!response.writableEnded) response.end()
+  }
 }
 
 async function serveStatic(response: ServerResponse, pathname: string): Promise<void> {

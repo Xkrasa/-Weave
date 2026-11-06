@@ -53,6 +53,7 @@
           <button data-stage="review">审查</button>
           <button data-stage="recheck">复检</button>
           <button data-stage="write" class="accent">生成</button>
+          <button id="btn-cancel" class="hidden">取消生成</button>
           <button data-stage="amend">重开</button>
           <button data-stage="finalize" class="danger">定稿</button>
         </div>
@@ -67,16 +68,20 @@
 
         <div class="contract-strip" id="contract-strip">
           <span class="muted">本章合同会显示在这里。</span>
+          <button id="btn-contract" class="ghost">编辑合同</button>
         </div>
       </section>
 
       <aside class="inspector">
         <div class="tabs" id="tabs">
           <button data-tab="findings" class="active">意见</button>
+          <button data-tab="stages">阶段</button>
           <button data-tab="revisions">修订</button>
           <button data-tab="waivers">豁免</button>
           <button data-tab="methods">方法</button>
           <button data-tab="style">风格</button>
+          <button data-tab="history">历史</button>
+          <button data-tab="contract">合同</button>
         </div>
         <div id="inspector-body" class="inspector-body">
           <div class="empty">选择章节查看审查结果。</div>

@@ -123,6 +123,41 @@ test('P3 UI draft saves are token protected and use optimistic hashes', async ()
   }
 })
 
+test('P3 UI exposes gates, preferences and chapter history', async () => {
+  const app = await fixture()
+  try {
+    const gates = await request(app.base, '/api/chapters/1/gates')
+    assert.equal(gates.status, 200)
+    const gatePayload = await gates.json() as {
+      ready: boolean
+      gates: Array<{ id: string; ok: boolean }>
+    }
+    assert.equal(gatePayload.ready, false)
+    assert.ok(gatePayload.gates.some(item => item.id === 'contract'))
+    assert.ok(gatePayload.gates.some(item => item.id === 'draft' && item.ok))
+
+    const saved = await request(app.base, '/api/preferences', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'x-weave-token': app.token },
+      body: JSON.stringify({ lastChapter: 1, tab: 'stages' }),
+    })
+    assert.equal(saved.status, 200)
+    const prefs = await (await request(app.base, '/api/preferences')).json() as {
+      lastChapter: number
+      tab: string
+    }
+    assert.equal(prefs.lastChapter, 1)
+    assert.equal(prefs.tab, 'stages')
+
+    const history = await request(app.base, '/api/chapters/1/history')
+    assert.equal(history.status, 200)
+    assert.deepEqual((await history.json() as { commits: unknown[] }).commits, [])
+  } finally {
+    await app.close()
+    await rm(app.dir, { recursive: true, force: true })
+  }
+})
+
 test('P3 UI exposes methods and style without a model call', async () => {
   const app = await fixture()
   try {
