@@ -130,6 +130,16 @@ function runCli(cwd: string, args: string[], env: Record<string, string> = {}): 
   })
 }
 
+function errorText(result: CliResult): string {
+  try {
+    const payload = parseJson<{ error?: { message?: string } }>(result.stdout)
+    if (payload.error?.message) return payload.error.message
+  } catch {
+    // Fall through to raw output.
+  }
+  return (result.stderr || result.stdout).trim().slice(0, 500)
+}
+
 function parseJson<T>(stdout: string): T {
   const start = stdout.indexOf('{')
   const end = stdout.lastIndexOf('}')
@@ -308,6 +318,7 @@ interface ChapterRecord {
   usage?: Record<string, number>
   elapsedMs: number
   exitCode: number
+  retried?: boolean
 }
 
 interface SeedRun {
@@ -410,6 +421,8 @@ async function runSeed(
     baseUrl: string
     model: string
     apiKey: string
+    timeoutMs?: number
+    maxOutputTokens?: number
   },
 ): Promise<SeedRun> {
   const startedAt = Date.now()
@@ -437,6 +450,12 @@ async function runSeed(
     errors.push(`init: ${init.stderr || init.stdout}`)
     record.durations.totalMs = Date.now() - startedAt
     return record
+  }
+  if (options.timeoutMs) {
+    const configPath = path.join(projectDir, '.weave', 'config.json')
+    const config = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>
+    config.timeoutMs = options.timeoutMs
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`)
   }
   await writeCanon(projectDir, seed)
   await mkdir(path.join(projectDir, 'outlines', 'chapters'), { recursive: true })
@@ -473,13 +492,20 @@ async function runSeed(
       })
       continue
     }
-    const write = await runCli(projectDir, ['write', String(chapter.chapter), '--json'], env)
+    let write = await runCli(projectDir, ['write', String(chapter.chapter), '--json'], env)
     record.durations.writeMs += write.elapsedMs
+    let retried = false
+    if (write.code === 5 && options.mode === 'real') {
+      // A stalled stream is not transparently retried by the CLI; the harness retries as a fresh run.
+      retried = true
+      write = await runCli(projectDir, ['write', String(chapter.chapter), '--json'], env)
+      record.durations.writeMs += write.elapsedMs
+    }
     if (write.code !== 0) {
-      errors.push(`write ${chapter.chapter}: ${write.stderr || write.stdout}`)
+      errors.push(`write ${chapter.chapter}: ${errorText(write)}`)
       record.chapters.push({
         chapter: chapter.chapter, mode: 'generated', draftPath: '', characters: 0,
-        elapsedMs: write.elapsedMs, exitCode: write.code,
+        elapsedMs: write.elapsedMs, exitCode: write.code, ...(retried ? { retried } : {}),
       })
       continue
     }
@@ -506,6 +532,7 @@ async function runSeed(
       usage: (payload.usage && typeof payload.usage === 'object') ? payload.usage as Record<string, number> : undefined,
       elapsedMs: write.elapsedMs,
       exitCode: write.code,
+      ...(retried ? { retried } : {}),
     })
     if (included) {
       for (const expectation of seed.recallExpectations ?? []) {
@@ -529,6 +556,14 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
   const seedFilter = flagString(flags, 'seed')
   const config = flagString(flags, 'config') ?? 'baseline'
   const mode = (flagString(flags, 'mode') ?? 'fake') as 'fake' | 'real'
+  const timeoutMs = flagString(flags, 'timeout-ms') ? Number(flagString(flags, 'timeout-ms')) : undefined
+  if (timeoutMs !== undefined && (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000)) {
+    throw new Error('--timeout-ms must be an integer >= 1000')
+  }
+  const maxOutputTokens = flagString(flags, 'max-output') ? Number(flagString(flags, 'max-output')) : undefined
+  if (maxOutputTokens !== undefined && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 256)) {
+    throw new Error('--max-output must be an integer >= 256')
+  }
   const model = flagString(flags, 'model') ?? (mode === 'fake' ? 'fake-bench' : 'gpt-4o-mini')
   const ablations: Record<string, string> = {}
   for (const [key, value] of Object.entries(flags)) {
@@ -560,7 +595,9 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
   try {
     for (const seed of seeds) {
       const seedBase = mode === 'fake' ? fakeModels.get(seed.id)!.baseUrl : baseUrl
-      const run = await runSeed(seed, { outDir, config, ablations, mode, baseUrl: seedBase, model, apiKey })
+      const run = await runSeed(seed, {
+        outDir, config, ablations, mode, baseUrl: seedBase, model, apiKey, timeoutMs, maxOutputTokens,
+      })
       runs.push(run)
       await writeFile(path.join(outDir, `${seed.id}.run.json`), `${JSON.stringify(run, null, 2)}\n`)
     }
@@ -604,6 +641,7 @@ interface BenchReport {
     estimatedTokens: number
     omitted: number
     errors: number
+    retried: number
     recallMissed: string[]
   }>
   errors: Array<{ seed: string; error: string }>
@@ -647,6 +685,7 @@ function buildReport(
       estimatedTokens: run.chapters.reduce((sum, item) => sum + (item.estimatedTokens ?? 0), 0),
       omitted: run.chapters.reduce((sum, item) => sum + (item.omitted?.length ?? 0), 0),
       errors: run.errors.length,
+      retried: run.chapters.filter(item => item.retried).length,
       recallMissed: (run.recall ?? []).flatMap(item => item.missed),
     })),
     errors,
@@ -671,9 +710,9 @@ function renderReport(report: BenchReport): string {
     '',
     '## Seeds',
     '',
-    '| seed | kind | chapters | chars | tokens | write ms | errors |',
-    '| --- | --- | --- | --- | --- | --- | --- |',
-    ...report.seeds.map(seed => `| ${seed.seed} | ${seed.kind} | ${seed.chapters} | ${seed.characters} | ${seed.estimatedTokens} | ${seed.writeMs} | ${seed.errors} |`),
+    '| seed | kind | chapters | chars | tokens | write ms | errors | retried |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- |',
+    ...report.seeds.map(seed => `| ${seed.seed} | ${seed.kind} | ${seed.chapters} | ${seed.characters} | ${seed.estimatedTokens} | ${seed.writeMs} | ${seed.errors} | ${seed.retried} |`),
     '',
   ]
   if (report.errors.length > 0) {
