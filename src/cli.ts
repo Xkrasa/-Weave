@@ -64,6 +64,16 @@ import {
 import { deconstructFile } from './core/deconstruct.ts'
 import { startUiServer } from './core/ui-server.ts'
 import { evalReport, importEvalPairs, listEvalSessions } from './core/blind-eval.ts'
+import {
+  abandonReaderPromise,
+  approveReaderPromiseBook,
+  confirmReaderPromiseCandidate,
+  extractReaderPromiseCandidates,
+  listReaderPromises,
+  recordReaderPayoff,
+  saveReaderPromiseDraft,
+  type ReaderPromiseBook,
+} from './core/reader-promises.ts'
 import { approvePlan, listPlans, parsePlanKind } from './core/planning.ts'
 import { usageSummary } from './core/usage.ts'
 import {
@@ -150,6 +160,8 @@ async function main(): Promise<number> {
       return commandDeconstruct(root, parsed, json)
     case 'plan':
       return commandPlan(root, parsed, json)
+    case 'promise':
+      return commandPromise(root, parsed, json)
     case 'outline':
       return commandOutline(root, parsed, json)
     case 'ui':
@@ -466,6 +478,88 @@ async function commandPlan(root: string, parsed: Parsed, json: boolean): Promise
     return 0
   }
   throw usageError('用法：weave plan status|approve <story|volume|character-arcs|rolling> [--volume <n>]')
+}
+
+async function commandPromise(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0] ?? 'list'
+  switch (action) {
+    case 'set': {
+      const file = requiredString(parsed, 'file')
+      const raw = JSON.parse(await readFile(path.resolve(file), 'utf8')) as unknown
+      const content = (Array.isArray(raw) ? { promises: raw } : raw) as ReaderPromiseBook
+      const status = await saveReaderPromiseDraft(root, content)
+      if (json) outputJson({ ok: true, status })
+      else console.log('已保存 ReaderPromise 草案；请检查并执行 weave promise approve')
+      return 0
+    }
+    case 'approve': {
+      const status = await approveReaderPromiseBook(root)
+      if (json) outputJson({ ok: true, status })
+      else console.log('已批准 ReaderPromise')
+      return 0
+    }
+    case 'list':
+    case 'show': {
+      const result = await listReaderPromises(root)
+      if (action === 'show') {
+        const promiseId = parsed.positionals[1]
+        if (!promiseId) throw usageError('用法：weave promise show <promiseId>')
+        const state = result.promises.find(item => item.promise.promiseId === promiseId)
+        if (!state) throw validationError(`未找到已批准的 ReaderPromise：${promiseId}`)
+        if (json) outputJson({ ok: true, bookStatus: result.bookStatus, promise: state })
+        else console.log(JSON.stringify(state, null, 2))
+        return 0
+      }
+      if (json) outputJson({ ok: true, ...result })
+      else {
+        console.log(`ReaderPromise 文件状态：${result.bookStatus}`)
+        for (const state of result.promises) {
+          console.log(`${state.promise.promiseId}\t${state.effectiveStatus}\t推进 ${state.advanceCount} 章\t${state.promise.description}`)
+        }
+      }
+      return 0
+    }
+    case 'payoff': {
+      const promiseId = parsed.positionals[1]
+      if (!promiseId) throw usageError('用法：weave promise payoff <promiseId> --chapter <n> --quote <text> [--occurrence <n>]')
+      const chapter = optionalNumber(parsed, 'chapter')
+      if (chapter === undefined) throw usageError('缺少 --chapter')
+      const observation = await recordReaderPayoff(root, {
+        promiseId,
+        chapter,
+        quote: requiredString(parsed, 'quote'),
+        occurrence: optionalNumber(parsed, 'occurrence'),
+      })
+      if (json) outputJson({ ok: true, observation })
+      else console.log(`已确认 ${promiseId} 在第 ${chapter} 章的兑现证据`)
+      return 0
+    }
+    case 'extract': {
+      const chapter = parseChapter(parsed.positionals[1])
+      const candidates = await extractReaderPromiseCandidates(root, chapter, await loadModelConfig(root), new AbortController().signal)
+      if (json) outputJson({ ok: true, candidates })
+      else console.log(`已保存 ${candidates.length} 条候选；逐条确认前不会改变承诺状态`)
+      return 0
+    }
+    case 'confirm': {
+      const candidateId = parsed.positionals[1]
+      if (!candidateId) throw usageError('用法：weave promise confirm <candidateId>')
+      const observation = await confirmReaderPromiseCandidate(root, candidateId)
+      if (json) outputJson({ ok: true, observation })
+      else console.log(`已确认候选 ${candidateId}`)
+      return 0
+    }
+    case 'abandon': {
+      const promiseId = parsed.positionals[1]
+      if (!promiseId) throw usageError('用法：weave promise abandon <promiseId> --reason <text>')
+      await abandonReaderPromise(root, promiseId, requiredString(parsed, 'reason'))
+      if (json) outputJson({ ok: true, promiseId, status: 'abandoned' })
+      else console.log(`已废弃 ${promiseId}`)
+      return 0
+    }
+    default:
+      throw usageError('用法：weave promise set|approve|list|show|payoff|extract|confirm|abandon')
+  }
 }
 
 async function commandOutline(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -1451,6 +1545,9 @@ function printHelp(): void {
   weave knowledge check <chapter>
   weave rewrite <chapter> --paragraph <id> --goal <text>
   weave plan status|approve <story|volume|character-arcs|rolling> [--volume <n>]
+  weave promise set --file <path> | approve | list | show <promiseId>
+  weave promise payoff <promiseId> --chapter <n> --quote <text> [--occurrence <n>]
+  weave promise extract <chapter> | confirm <candidateId> | abandon <promiseId> --reason <text>
   weave outline status|generate <from> [--count <n>]|show|check|apply|approve <chapter>
   weave method list|show <id>|candidates|approve <id>|route <chapter> [--platform long-form|short-form|generic|qidian|fanqie] [--max-tokens <n>]
   weave method history <chapter>

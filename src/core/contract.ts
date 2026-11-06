@@ -89,13 +89,18 @@ export function normalizeContract(input: unknown): ChapterContract {
     }
     const hook = intent.hook === undefined ? undefined : stringField(intent.hook)
     if (intent.hook !== undefined && !hook) throw validationError('readerIntent.hook 不能为空')
+    const promiseIds = intent.promiseIds === undefined ? undefined : stringArray(intent.promiseIds)
+    const payoffPromiseIds = intent.payoffPromiseIds === undefined ? undefined : stringArray(intent.payoffPromiseIds)
     contract.readerIntent = {
       purpose,
       payoff,
       ...(intensity ? { intensity } : {}),
       ...(hook ? { hook } : {}),
+      ...(promiseIds ? { promiseIds } : {}),
+      ...(payoffPromiseIds ? { payoffPromiseIds } : {}),
     }
   }
+  if (raw.volume !== undefined) contract.volume = Number(raw.volume)
   return contract
 }
 
@@ -142,6 +147,9 @@ export function validateContract(
 
   if (!Number.isSafeInteger(contract.chapter) || contract.chapter <= 0) {
     errors.push({ code: 'INVALID_CHAPTER', field: 'chapter', message: 'chapter 必须是正整数' })
+  }
+  if (contract.volume !== undefined && (!Number.isSafeInteger(contract.volume) || contract.volume <= 0)) {
+    errors.push({ code: 'INVALID_VOLUME', field: 'volume', message: '卷号必须是正整数' })
   }
   if (!Number.isSafeInteger(contract.targetWords) || contract.targetWords <= 0) {
     errors.push({ code: 'INVALID_TARGET_WORDS', field: 'targetWords', message: 'targetWords 必须是正整数' })
@@ -272,6 +280,8 @@ export async function writeContractCheck(root: string, contract: ChapterContract
   const { collectLedger } = await import('./story-ledger.ts')
   const ledger = await collectLedger(root, contract.chapter)
   const errors = validateContract(contract, registry, ledger.beliefs)
+  const { validateReaderPromiseReferences } = await import('./reader-promises.ts')
+  errors.push(...await validateReaderPromiseReferences(root, contract))
   const record: ContractCheckRecord = {
     contractHash: contractHash(contract),
     canonHash: await canonSnapshotHash(root),

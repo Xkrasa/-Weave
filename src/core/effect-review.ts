@@ -7,6 +7,7 @@ import { draftHash, resolveEvidence, saveStage } from './stages.ts'
 import { validationError } from './errors.ts'
 import { collectLoopState } from './story-ledger.ts'
 import { loadExpressionLintConfig, runExpressionLint } from './expression-lint.ts'
+import { readerPromiseFindings } from './reader-promises.ts'
 
 export interface EffectFinding {
   findingId: string
@@ -221,6 +222,19 @@ async function lintFindings(
       // A missing quote must not become a hard failure; keep the advisory without evidence.
     }
     findings.push(finding)
+  }
+
+  for (const match of await readerPromiseFindings(root, chapter)) {
+    findings.push({
+      findingId: `e-lint-${findings.length + 1}`,
+      dimension: '读者期待',
+      severity: match.severity,
+      description: match.description,
+      source: 'lint',
+      status: 'open',
+      ruleId: match.ruleId,
+      ruleVersion: match.ruleVersion,
+    })
   }
 
   const loops = await collectLoopState(root, chapter).catch(() => null)

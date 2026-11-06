@@ -74,10 +74,16 @@ export interface ChapterReaderIntent {
   intensity?: 'strong' | 'medium' | 'soft'
   /** Specific question or expectation carried into the next chapter. */
   hook?: string
+  /** ReaderPromises advanced or related in this chapter. */
+  promiseIds?: string[]
+  /** ReaderPromises planned to be paid off in this chapter; must be included in promiseIds. */
+  payoffPromiseIds?: string[]
 }
 
 export interface ChapterContract {
   chapter: number
+  /** Optional volume used only for planning-reference validation. */
+  volume?: number
   title: string
   pov: string
   time: string
