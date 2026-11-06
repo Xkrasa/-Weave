@@ -1,8 +1,22 @@
-import type { ModelConfig, RunUsage } from './types.ts'
-import { modelError } from './errors.ts'
+import type { ModelConfig, RunUsage, StreamAttempt } from './types.ts'
+import { modelError, type WeaveError } from './errors.ts'
+
+export type { StreamAttempt } from './types.ts'
 
 export interface StreamResult {
   usage: RunUsage
+  attempts: StreamAttempt[]
+}
+
+class AttemptFailure extends Error {
+  readonly retryable: boolean
+  readonly retryAfterMs?: number
+
+  constructor(message: string, retryable: boolean, retryAfterMs?: number) {
+    super(message)
+    this.retryable = retryable
+    this.retryAfterMs = retryAfterMs
+  }
 }
 
 export async function completeText(input: {
@@ -19,6 +33,11 @@ export async function completeText(input: {
   return { text, usage: result.usage }
 }
 
+/**
+ * A stream can only be retried transparently before the first delta reaches the caller.
+ * Once text has been emitted, a retry would duplicate prose, so the failure surfaces and the
+ * caller keeps the partial under its own run.
+ */
 export async function streamChapter(input: {
   config: ModelConfig
   system: string
@@ -26,6 +45,51 @@ export async function streamChapter(input: {
   signal: AbortSignal
   onDelta: (text: string) => void
 }): Promise<StreamResult> {
+  const maxRetries = Math.max(0, input.config.maxRetries ?? 3)
+  const baseMs = Math.max(0, input.config.retryBaseMs ?? 800)
+  const attempts: StreamAttempt[] = []
+  for (let attempt = 1; attempt <= maxRetries + 1; attempt += 1) {
+    const startedAt = new Date().toISOString()
+    let emitted = false
+    try {
+      const usage = await streamOnce({
+        ...input,
+        onDelta: text => {
+          emitted = true
+          input.onDelta(text)
+        },
+      })
+      attempts.push({ attempt, status: 'ok', startedAt })
+      return { usage, attempts }
+    } catch (error) {
+      if (input.signal.aborted) {
+        attempts.push({ attempt, status: 'failed', reason: 'cancelled', startedAt })
+        throw fail('生成已取消', attempts)
+      }
+      const failure = error instanceof AttemptFailure
+        ? error
+        : new AttemptFailure(errorMessage(error), false)
+      const lastAttempt = attempt === maxRetries + 1
+      if (emitted || !failure.retryable || lastAttempt) {
+        attempts.push({ attempt, status: 'failed', reason: failure.message, startedAt })
+        throw fail(failure.message, attempts)
+      }
+      const waitMs = failure.retryAfterMs ?? backoffMs(baseMs, attempt)
+      attempts.push({ attempt, status: 'retry', reason: failure.message, waitMs, startedAt })
+      await delay(waitMs, input.signal)
+    }
+  }
+  /* c8 ignore next */
+  throw fail('模型请求重试次数已用尽', attempts)
+}
+
+async function streamOnce(input: {
+  config: ModelConfig
+  system: string
+  user: string
+  signal: AbortSignal
+  onDelta: (text: string) => void
+}): Promise<RunUsage> {
   const apiKey = process.env.WEAVE_API_KEY?.trim() ?? ''
   const endpoint = `${input.config.baseUrl.replace(/\/+$/, '')}/chat/completions`
   const timeout = AbortSignal.timeout(input.config.timeoutMs)
@@ -52,13 +116,17 @@ export async function streamChapter(input: {
     })
   } catch (error) {
     if (input.signal.aborted) throw modelError('生成已取消')
-    if (timeout.aborted) throw modelError(`模型请求超时（${input.config.timeoutMs}ms）`)
-    throw modelError(`无法连接模型服务：${errorMessage(error)}`)
+    if (timeout.aborted) throw new AttemptFailure(`模型请求超时（${input.config.timeoutMs}ms）`, true)
+    throw new AttemptFailure(`无法连接模型服务：${errorMessage(error)}`, true)
   }
 
   if (!response.ok || !response.body) {
     const body = await response.text().catch(() => '')
-    throw modelError(`模型服务返回 ${response.status}`, body.slice(0, 2000))
+    throw new AttemptFailure(
+      `模型服务返回 ${response.status}${body ? `：${body.slice(0, 500)}` : ''}`,
+      isRetryableStatus(response.status),
+      retryAfterMs(response.headers.get('retry-after')),
+    )
   }
 
   let buffer = ''
@@ -75,7 +143,7 @@ export async function streamChapter(input: {
       buffer = events.pop() ?? ''
       for (const event of events) {
         const result = parseEvent(event)
-        if (result.done) return { usage }
+        if (result.done) return usage
         if (result.text) input.onDelta(result.text)
         if (result.usage) usage = result.usage
       }
@@ -85,14 +153,50 @@ export async function streamChapter(input: {
       if (result.text) input.onDelta(result.text)
       if (result.usage) usage = result.usage
     }
-    return { usage }
+    return usage
   } catch (error) {
     if (input.signal.aborted) throw modelError('生成已取消')
-    if (timeout.aborted) throw modelError(`模型请求超时（${input.config.timeoutMs}ms）`)
-    throw modelError(`模型流中断：${errorMessage(error)}`)
+    if (timeout.aborted) throw new AttemptFailure(`模型请求超时（${input.config.timeoutMs}ms）`, true)
+    throw new AttemptFailure(`模型流中断：${errorMessage(error)}`, true)
   } finally {
     reader.releaseLock()
   }
+}
+
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500
+}
+
+function retryAfterMs(header: string | null): number | undefined {
+  if (!header) return undefined
+  const trimmed = header.trim()
+  if (!trimmed) return undefined
+  const seconds = Number(trimmed)
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 60_000)
+  const date = Date.parse(trimmed)
+  if (Number.isFinite(date)) return Math.max(0, Math.min(date - Date.now(), 60_000))
+  return undefined
+}
+
+function backoffMs(baseMs: number, attempt: number): number {
+  const exponential = baseMs * 2 ** (attempt - 1)
+  const jitter = Math.floor(Math.random() * Math.max(1, baseMs / 2))
+  return Math.min(exponential + jitter, 30_000)
+}
+
+function delay(ms: number, signal: AbortSignal): Promise<void> {
+  if (ms <= 0) return Promise.resolve()
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(modelError('生成已取消'))
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function parseEvent(raw: string): { text?: string; usage?: RunUsage; done?: boolean } {
@@ -129,6 +233,12 @@ function parseEvent(raw: string): { text?: string; usage?: RunUsage; done?: bool
 
 function numberOrUndefined(value: unknown): number | undefined {
   return typeof value === 'number' ? value : undefined
+}
+
+function fail(message: string, attempts: StreamAttempt[]): WeaveError {
+  const error = modelError(message) as WeaveError & { attempts?: StreamAttempt[] }
+  error.attempts = attempts
+  return error
 }
 
 function errorMessage(error: unknown): string {

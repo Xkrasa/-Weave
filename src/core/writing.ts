@@ -7,6 +7,7 @@ import type {
   ImpactReport,
   ProjectionState,
   RunRecord,
+  RunRecovery,
 } from './types.ts'
 import { assertNoPendingImpacts, createImpactReport } from './impact.ts'
 import { loadCharacters, loadContract, contractHash, requirePassingContractCheck } from './contract.ts'
@@ -82,7 +83,13 @@ export interface WriteResult {
 export async function writeChapter(
   root: string,
   chapter: number,
-  options: { signal: AbortSignal; onDelta?: (text: string) => void; onEvent?: (event: GenerationEvent) => void },
+  options: {
+    signal: AbortSignal
+    onDelta?: (text: string) => void
+    onEvent?: (event: GenerationEvent) => void
+    /** Failed/cancelled run whose partial should be recorded as the reason for this fresh run. */
+    resumeFromRunId?: string
+  },
 ): Promise<WriteResult> {
   const contract = await loadContract(root, chapter)
   await requirePassingContractCheck(root, contract)
@@ -115,6 +122,7 @@ export async function writeChapter(
   const context = assembled.context
   if (!context) throw validationError('上下文装配失败')
 
+  const recovery = await resolveRecovery(root, chapter, options.resumeFromRunId)
   const run: RunRecord = {
     schemaVersion: 1,
     runId: newRunId(),
@@ -127,6 +135,7 @@ export async function writeChapter(
     promptHash: hashText(`${context.system}\n${context.user}`),
     materialSourceIds: context.included.map(item => item.sourceId),
     methodSelection,
+    ...(recovery ? { recovery } : {}),
   }
   await saveRun(root, run)
 
@@ -162,7 +171,7 @@ export async function writeChapter(
       createdAt: new Date().toISOString(),
     }
     await saveDraftMeta(root, nextMeta)
-    const finished = finishRun(run, 'completed', { usage: result.usage })
+    const finished = finishRun(run, 'completed', { usage: result.usage, attempts: result.attempts })
     await saveRun(root, finished)
     emit({ type: 'completed', draft })
     return {
@@ -181,6 +190,7 @@ export async function writeChapter(
     const finished = finishRun(run, cancelled ? 'cancelled' : 'failed', {
       error: error instanceof Error ? error.message : String(error),
       partialPath: savedPartial ? path.relative(root, savedPartial).split(path.sep).join('/') : undefined,
+      attempts: (error as { attempts?: RunRecord['attempts'] }).attempts,
     })
     await saveRun(root, finished)
     emit(
@@ -383,6 +393,26 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     impact,
     draftEdited,
   }
+}
+
+async function resolveRecovery(
+  root: string,
+  chapter: number,
+  resumeFromRunId: string | undefined,
+): Promise<RunRecovery | null> {
+  if (!resumeFromRunId) return null
+  const prior = await loadRun(root, resumeFromRunId)
+  if (!prior) throw validationError(`未找到运行记录：${resumeFromRunId}`)
+  if (prior.chapter !== chapter) {
+    throw validationError(`运行 ${resumeFromRunId} 属于第 ${prior.chapter} 章，不能用于第 ${chapter} 章`)
+  }
+  if (prior.status !== 'failed' && prior.status !== 'cancelled') {
+    throw validationError(`运行 ${resumeFromRunId} 状态为 ${prior.status}，只有失败或取消的运行可以恢复`)
+  }
+  if (!prior.partialPath) throw validationError(`运行 ${resumeFromRunId} 没有可恢复的部分稿`)
+  const partial = await readTextIfExists(path.join(root, prior.partialPath))
+  if (!partial?.trim()) throw validationError(`运行 ${resumeFromRunId} 的部分稿为空或已丢失`)
+  return { fromRunId: prior.runId, partialPath: prior.partialPath, strategy: 'regenerate' }
 }
 
 async function clearDraft(root: string, chapter: number): Promise<void> {

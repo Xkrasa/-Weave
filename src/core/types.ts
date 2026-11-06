@@ -23,6 +23,9 @@ export interface ModelConfig {
   snapshotEvery: number
   extractionModel?: string
   reviewModel?: string
+  /** Transparent retries allowed only before the first streamed delta. */
+  maxRetries?: number
+  retryBaseMs?: number
 }
 
 export interface KnowledgeFact {
@@ -277,6 +280,21 @@ export interface RunUsage {
   totalTokens?: number
 }
 
+export interface StreamAttempt {
+  attempt: number
+  status: 'ok' | 'retry' | 'failed'
+  reason?: string
+  waitMs?: number
+  startedAt: string
+}
+
+/** A fresh run that supersedes a failed one; it never concatenates onto the old partial. */
+export interface RunRecovery {
+  fromRunId: string
+  partialPath: string
+  strategy: 'regenerate'
+}
+
 export interface RunRecord {
   schemaVersion: 1
   runId: string
@@ -297,6 +315,8 @@ export interface RunRecord {
   partialPath?: string
   error?: string
   usage?: RunUsage
+  attempts?: StreamAttempt[]
+  recovery?: RunRecovery
 }
 
 export interface ProjectionState {

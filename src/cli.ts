@@ -18,6 +18,7 @@ import {
   writeContractCheck,
 } from './core/contract.ts'
 import { writeChapter, amendChapter, finalizeChapter } from './core/writing.ts'
+import { findRecoverableRun } from './core/runs.ts'
 import { createImpactReport, loadImpactReport, resolveImpact } from './core/impact.ts'
 import { currentCommit, readMainline } from './core/ledger.ts'
 import {
@@ -422,6 +423,17 @@ async function commandUi(root: string, parsed: Parsed, json: boolean): Promise<n
     ui.server.once('close', resolve)
   })
   return 0
+}
+
+async function resolveResumeRun(root: string, chapter: number, parsed: Parsed): Promise<string | undefined> {
+  const fromRun = parsed.flags['from-run']
+  if (typeof fromRun === 'string') return fromRun
+  const resume = parsed.flags.resume
+  if (resume === undefined) return undefined
+  if (typeof resume === 'string') return resume
+  const recoverable = await findRecoverableRun(root, chapter)
+  if (!recoverable) throw validationError(`第 ${chapter} 章没有可恢复的运行；请直接重新生成`)
+  return recoverable.runId
 }
 
 function openBrowser(url: string): void {
@@ -866,6 +878,7 @@ async function commandTimeline(root: string, parsed: Parsed, json: boolean): Pro
 async function commandWrite(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const chapter = parseChapter(parsed.positionals[0])
   const events = parsed.flags.events === true
+  const resumeFromRunId = await resolveResumeRun(root, chapter, parsed)
   if (events && json) throw usageError('--events 与 --json 不能同时使用')
   const controller = new AbortController()
   const onSigint = (): void => controller.abort()
@@ -878,6 +891,7 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
   try {
     const result = await writeChapter(root, chapter, {
       signal: controller.signal,
+      resumeFromRunId,
       onDelta: json || events ? undefined : text => process.stdout.write(text),
       onEvent: events
         ? (event: GenerationEvent) => {
@@ -898,6 +912,8 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
         included: result.included,
         omitted: result.omitted,
         usage: result.run.usage ?? {},
+        attempts: result.run.attempts ?? [],
+        recovery: result.run.recovery,
       })
     } else {
       console.log(`\n\n已生成第 ${chapter} 章草稿：${result.draftPath}`)
@@ -1174,7 +1190,7 @@ function printHelp(): void {
   weave waive <chapter> --finding <id>|--all-warnings --reason <text> [--scope ...] [--until <n>]
   weave waivers list|revoke <waiverId>
   weave timeline <chapter>
-  weave write <chapter> [--json|--events] [--cancel-after-ms <n>]
+  weave write <chapter> [--json|--events] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
   weave amend <chapter> [--force]
   weave finalize <chapter>
   weave impact <chapter>

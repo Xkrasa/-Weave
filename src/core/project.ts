@@ -133,6 +133,8 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
     temperature: 0.8,
     timeoutMs: 120_000,
     snapshotEvery: positiveInt(options.snapshotEvery, 10, 'snapshotEvery'),
+    maxRetries: 3,
+    retryBaseMs: 800,
   }
 
   for (const dirPath of [
