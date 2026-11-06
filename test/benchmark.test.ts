@@ -80,10 +80,10 @@ test('benchmark longitudinal mode synthesizes prior chapters, then measures cont
     }
     assert.equal(report.ok, true)
     assert.equal(report.totals.chapters, 3)
-    // The baseline has no retrieval wiring yet; the harness must record the gap instead of hiding it.
+    // Recall is measured against the seed's expectations, not inferred from the prose.
     assert.equal(report.recall.expectations, 3)
-    assert.equal(report.recall.matchedTerms, 0)
-    assert.ok(report.recall.missedTerms > 0)
+    assert.ok(report.recall.matchedTerms > 0, 'retrieval must reach at least one expected prior chapter')
+    assert.ok(report.recall.matchedTerms + report.recall.missedTerms > 0)
 
     const mainline = await readFile(path.join(out, 'long-harbor', 'ledger', 'mainline.jsonl'), 'utf8')
     const lines = mainline.split(/\r?\n/).filter(Boolean)

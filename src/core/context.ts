@@ -50,7 +50,11 @@ export function assembleContext(
   const required = usable.filter(item => item.required)
   const optional = usable
     .filter(item => !item.required)
-    .sort((a, b) => a.sourceId.localeCompare(b.sourceId))
+    .sort((a, b) =>
+      (b.relevance ?? 0) - (a.relevance ?? 0)
+      || (a.priority ?? 100) - (b.priority ?? 100)
+      || a.sourceId.localeCompare(b.sourceId),
+    )
   const requiredTokens = required.reduce((sum, item) => sum + estimateTokens(item.text, config.charsPerToken), 0)
 
   if (unknownRequired) {

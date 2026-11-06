@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { strToU8, zipSync } from 'fflate'
 import os from 'node:os'
 import path from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 
 const REPO_ROOT = path.resolve(import.meta.dirname, '..')
 const CLI = path.join(REPO_ROOT, 'src', 'cli.ts')
@@ -2491,3 +2492,120 @@ async function findText(dir: string, needle: string): Promise<string | null> {
   }
   return null
 }
+
+test('P0-safe continuation exposes covered previous prose for the same POV only', async () => {
+  const first = '林岚在码头翻开账本。\n\n她把缺页按回书脊，记住了港务局的印。'
+  const second = '林岚回到码头，缺页的折痕还在。\n'
+  const extraction = JSON.stringify({
+    summary: '林岚发现账本缺页',
+    noEventsReason: null,
+    records: [{
+      recordId: 'r1',
+      kind: 'event',
+      summary: '林岚发现账本缺页',
+      participants: ['林岚'],
+      location: '海港',
+      storyTime: '第一天',
+      payload: {},
+      evidence: [
+        { quote: '林岚在码头翻开账本。', occurrence: 1 },
+        { quote: '她把缺页按回书脊，记住了港务局的印。', occurrence: 1 },
+      ],
+    }],
+    timeline: [{
+      eventId: 'e1',
+      recordId: 'r1',
+      summary: '林岚发现账本缺页',
+      dayOffset: 0,
+      durationDays: 0,
+      participants: ['林岚'],
+      causedBy: [],
+      type: 'main',
+      evidence: [{ quote: '林岚在码头翻开账本。', occurrence: 1 }],
+    }],
+    facts: [],
+    beliefs: [],
+    loops: [],
+  })
+  const model = new FakeModel([first, extraction, coveragePayload(), warningReviewFor('林岚在码头翻开账本。'), second])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await contract1(dir)
+    assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+
+    await setContract(dir, 2, { characters: ['林岚'], pov: '林岚' })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    const written = await runCli(dir, ['write', '2', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(written.code, 0, written.stderr)
+    const payload = parseJson<{ included: string[] }>(written.stdout)
+    assert.ok(payload.included.includes('finalized-history:continuation:1'))
+
+    const body = JSON.stringify(model.requests[4])
+    assert.ok(body.includes('上一章定稿结尾（POV 已验证）'), body.slice(0, 200))
+    assert.ok(body.includes('她把缺页按回书脊'))
+    assert.ok(body.includes('prose'))
+    assert.ok(body.includes('林岚发现账本缺页'))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('retrieval feeds finalized evidence into the prompt and filters other POVs', async () => {
+  const model = new FakeModel(['林岚把铜扣翻过来，看清了背面的编号。'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await setCharacters(dir, [
+      { name: '林岚', status: 'alive', introducedIn: 1 },
+      { name: '周砚', status: 'alive', introducedIn: 1 },
+    ])
+    await setContract(dir, 1, { pov: '周砚', characters: ['周砚'] })
+    assert.equal((await checkContract(dir, 1)).code, 0)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), '周砚把铜扣翻过来，背面刻着一串潮汐编号。\n')
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+
+    await setContract(dir, 2, { pov: '林岚', characters: ['林岚'] })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '002.md'), '林岚在旧仓库翻到一枚铜扣，背面被磨平了。\n')
+    assert.equal((await runCli(dir, ['finalize', '2', '--json'])).code, 0)
+
+    await setContract(dir, 3, { pov: '林岚', characters: ['林岚'] })
+    assert.equal((await checkContract(dir, 3)).code, 0)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '003.md'), '她把铜扣收进口袋，决定第二天再回仓库。\n')
+    assert.equal((await runCli(dir, ['finalize', '3', '--json'])).code, 0)
+
+    await setContract(dir, 4, {
+      pov: '林岚',
+      characters: ['林岚'],
+      threads: ['铜扣'],
+      previousLink: '承接铜扣这条线索',
+    })
+    assert.equal((await checkContract(dir, 4)).code, 0)
+    const written = await runCli(dir, ['write', '4', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(written.code, 0, written.stdout + written.stderr)
+    const payload = parseJson<{ included: string[] }>(written.stdout)
+    assert.ok(payload.included.some(id => id.startsWith('finalized-history:ch-002-')), JSON.stringify(payload.included))
+
+    const body = JSON.stringify(model.requests[0])
+    assert.ok(body.includes('林岚在旧仓库翻到一枚铜扣'), 'same-POV evidence should reach the prompt')
+    assert.equal(body.includes('背面刻着一串潮汐编号'), false, 'another POV chapter must not leak')
+
+    const db = new DatabaseSync(path.join(dir, '.weave', 'index.db'))
+    db.prepare("UPDATE search_state SET status = 'stale' WHERE id = 1").run()
+    db.close()
+    const stale = await runCli(dir, ['write', '4', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(stale.code, 4)
+    const stalePayload = parseJson<{ error: { message: string } }>(stale.stdout)
+    assert.match(stalePayload.error.message, /检索索引/)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

@@ -4,11 +4,12 @@ import { hashText } from './hash.ts'
 import { listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
 import { loadCharacters, loadContract } from './contract.ts'
 import { projectPaths } from './project.ts'
-import { currentCommit, readMainline } from './ledger.ts'
+import { currentCommit, finalPath, readMainline } from './ledger.ts'
 import { collectLedger, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
 import { loadMethods, methodText, selectMethods } from './methods.ts'
 import { loadStyleConstitution, loadAuthorSamples, styleText } from './style.ts'
 import { conflictError } from './errors.ts'
+import { rebuildSearchIndex, searchBook, searchIndexHealth } from './search.ts'
 
 interface ReferenceManifestEntry {
   id: string
@@ -82,28 +83,22 @@ export async function collectMaterials(root: string, contract: ChapterContract):
       throw conflictError(`第 ${contract.chapter - 1} 章尚未定稿，不能开始第 ${contract.chapter} 章`)
     }
     const previousContract = await loadContract(root, contract.chapter - 1)
-    const safeSummary = {
-      chapter: contract.chapter - 1,
-      title: previousContract.title,
-      pov: contract.pov,
-      facts: povFacts,
-      beliefs: povBeliefs,
-      ...(contract.narrativeMode === 'omniscient'
-        ? {
-            endingState: previousContract.endingState,
-            nextLink: previousContract.nextLink,
-            visibleKnowledge: contract.visibleKnowledge,
-          }
-        : {}),
-    }
+    const continuation = await buildContinuation(
+      root,
+      contract,
+      previousContract,
+      previousCommit,
+      povFacts,
+      povBeliefs,
+    )
     materials.push(
       material(
-        `pov:previous-summary:${contract.chapter - 1}`,
-        'derived-locator',
-        'derived',
+        continuation.sourceId,
+        'finalized-history',
+        'finalized',
         true,
-        '上一章视角安全摘要（不是原文）',
-        JSON.stringify(safeSummary, null, 2),
+        continuation.label,
+        JSON.stringify(continuation.payload, null, 2),
       ),
     )
   }
@@ -191,6 +186,8 @@ export async function collectMaterials(root: string, contract: ChapterContract):
     )
   }
 
+  materials.push(...(await collectRetrievedEvidence(root, contract)))
+
   const manifest = await readJsonIfExists<ReferenceManifest>(path.join(paths.references, 'manifest.json'))
   if (manifest?.references?.length) {
     for (const entry of manifest.references) {
@@ -217,6 +214,276 @@ export async function collectMaterials(root: string, contract: ChapterContract):
   }
 
   return materials
+}
+
+
+interface ContinuationPayload {
+  chapter: number
+  mode: 'prose' | 'summary'
+  actualEnding: string
+  excerpt?: string
+  excerptOffset?: number
+  visibility: {
+    pov: string
+    samePov: boolean
+    continuity: 'same-location' | 'same-time' | 'unknown'
+    coveredParagraphs: number
+    totalParagraphs: number
+  }
+  facts: unknown[]
+  beliefs: unknown[]
+  fallbackReason?: string
+}
+
+/**
+ * Prose may only enter the next chapter when the previous chapter's own evidence covers every
+ * exposed paragraph for the same POV. Anything less certain degrades to a summary.
+ */
+async function buildContinuation(
+  root: string,
+  contract: ChapterContract,
+  previousContract: ChapterContract,
+  previousCommit: NonNullable<Awaited<ReturnType<typeof currentCommit>>>,
+  povFacts: unknown[],
+  povBeliefs: unknown[],
+): Promise<{ sourceId: string; label: string; payload: ContinuationPayload }> {
+  const chapter = contract.chapter - 1
+  const samePov = previousContract.pov === contract.pov
+  const continuity: ContinuationPayload['visibility']['continuity'] =
+    previousContract.location === contract.location
+      ? 'same-location'
+      : previousContract.time === contract.time ? 'same-time' : 'unknown'
+  const actualEnding = actualEndingOf(previousCommit)
+  const payload: ContinuationPayload = {
+    chapter,
+    mode: 'summary',
+    actualEnding,
+    visibility: { pov: contract.pov, samePov, continuity, coveredParagraphs: 0, totalParagraphs: 0 },
+    facts: povFacts,
+    beliefs: povBeliefs,
+  }
+  const summary = { sourceId: `pov:previous-summary:${chapter}`, label: '上一章视角安全摘要（不是原文）' }
+
+  if (contract.narrativeMode === 'omniscient') {
+    payload.fallbackReason = 'omniscient-view'
+    return { ...summary, payload }
+  }
+  if (!samePov) {
+    payload.fallbackReason = 'different-pov'
+    return { ...summary, payload }
+  }
+  if (continuity === 'unknown') {
+    payload.fallbackReason = 'scene-discontinuity'
+    return { ...summary, payload }
+  }
+  if (previousCommit.schemaVersion !== 3 || !previousCommit.ledger) {
+    payload.fallbackReason = 'missing-evidence-ledger'
+    return { ...summary, payload }
+  }
+  const prose = await readTextIfExists(finalPath(root, chapter))
+  if (!prose?.trim()) {
+    payload.fallbackReason = 'missing-final-prose'
+    return { ...summary, payload }
+  }
+  const visible = visibleSpans(previousCommit, contract.pov)
+  if (visible.length === 0) {
+    payload.fallbackReason = 'no-pov-evidence'
+    return { ...summary, payload }
+  }
+  const excerpt = tailExcerpt(prose, 800, 300)
+  const paragraphs = paragraphSpans(excerpt.text)
+  const covered = paragraphs.filter(paragraph =>
+    visible.some(span => span.byteStart < paragraph.end && paragraph.start < span.byteEnd),
+  )
+  payload.visibility.coveredParagraphs = covered.length
+  payload.visibility.totalParagraphs = paragraphs.length
+  if (paragraphs.length === 0) {
+    payload.fallbackReason = 'empty-excerpt'
+    return { ...summary, payload }
+  }
+  if (covered.length !== paragraphs.length) {
+    payload.fallbackReason = 'excerpt-not-covered'
+    return { ...summary, payload }
+  }
+  const leaked = foreignPropositionLeak(previousCommit, contract.pov, excerpt.text)
+  if (leaked) {
+    payload.fallbackReason = `foreign-secret:${leaked.slice(0, 24)}`
+    return { ...summary, payload }
+  }
+  payload.mode = 'prose'
+  payload.excerpt = excerpt.text
+  payload.excerptOffset = excerpt.offset
+  return {
+    sourceId: `finalized-history:continuation:${chapter}`,
+    label: '上一章定稿结尾（POV 已验证）',
+    payload,
+  }
+}
+
+function actualEndingOf(commit: NonNullable<Awaited<ReturnType<typeof currentCommit>>>): string {
+  const events = commit.ledger?.events ?? []
+  return events.slice(-2).map(event => event.summary).join('；')
+}
+
+function visibleSpans(
+  commit: NonNullable<Awaited<ReturnType<typeof currentCommit>>>,
+  pov: string,
+): Array<{ byteStart: number; byteEnd: number }> {
+  const ledger = commit.ledger
+  if (!ledger) return []
+  return [
+    ...ledger.events.filter(event => event.participants.includes(pov)).flatMap(event => event.evidence),
+    ...ledger.facts.filter(fact => fact.subject === pov).flatMap(fact => fact.evidence),
+    ...ledger.beliefs.filter(belief => belief.characterId === pov).flatMap(belief => belief.evidence),
+  ]
+}
+
+function foreignPropositionLeak(
+  commit: NonNullable<Awaited<ReturnType<typeof currentCommit>>>,
+  pov: string,
+  excerpt: string,
+): string | null {
+  for (const belief of commit.ledger?.beliefs ?? []) {
+    if (belief.characterId === pov) continue
+    if (belief.attitude !== 'knows' && belief.attitude !== 'believes') continue
+    const proposition = belief.proposition.replace(/\s+/g, '')
+    if (proposition.length >= 4 && excerpt.replace(/\s+/g, '').includes(proposition)) return belief.proposition
+  }
+  return null
+}
+
+function tailExcerpt(text: string, max: number, min: number): { text: string; offset: number } {
+  const paragraphs = text.split(/\n{2,}/)
+  const kept: string[] = []
+  let characters = 0
+  for (let index = paragraphs.length - 1; index >= 0; index -= 1) {
+    const paragraph = paragraphs[index]!.trim()
+    if (!paragraph) continue
+    if (characters > 0 && characters + [...paragraph].length > max) break
+    kept.unshift(paragraph)
+    characters += [...paragraph].length
+    if (characters >= min) break
+  }
+  const joined = kept.join('\n\n')
+  const offset = Math.max(0, text.indexOf(joined))
+  return { text: joined, offset }
+}
+
+function paragraphSpans(text: string): Array<{ start: number; end: number }> {
+  const spans: Array<{ start: number; end: number }> = []
+  let cursor = 0
+  for (const part of text.split(/\n{2,}/)) {
+    const trimmed = part.trim()
+    if (!trimmed) continue
+    const index = text.indexOf(trimmed, cursor)
+    if (index < 0) continue
+    spans.push({
+      start: Buffer.byteLength(text.slice(0, index), 'utf8'),
+      end: Buffer.byteLength(text.slice(0, index + trimmed.length), 'utf8'),
+    })
+    cursor = index + trimmed.length
+  }
+  return spans
+}
+
+
+const RETRIEVAL_LIMIT = 4
+const RETRIEVAL_CHARS = 900
+
+/**
+ * Pull a small set of finalized passages that answer "who/what appeared before".
+ * Candidates must come from the current mainline, keep relevance through budget trimming,
+ * and pass the same POV rule as continuity prose.
+ */
+async function collectRetrievedEvidence(root: string, contract: ChapterContract): Promise<Material[]> {
+  if (contract.chapter <= 1) return []
+  const head = await readMainline(root)
+  if (Object.keys(head.selectedCommitByChapter).length === 0) return []
+
+  let health = await searchIndexHealth(root)
+  if (health.status === 'missing') {
+    await rebuildSearchIndex(root)
+    health = await searchIndexHealth(root)
+  }
+  if (health.status !== 'current' || health.mainlineRevision !== head.mainlineRevision) {
+    throw conflictError('检索索引不可用或落后于主线；请执行 weave rebuild --projection search')
+  }
+
+  const queries = retrievalQueries(contract)
+  const candidates = new Map<string, { score: number; chapter: number; paragraph: number; text: string; sourceCommit: string }>()
+  for (const [queryIndex, query] of queries.entries()) {
+    const result = await searchBook(root, query, { limit: 5 })
+    for (const [rank, item] of result.results.entries()) {
+      if (item.chapter >= contract.chapter) continue
+      if (item.chapter === contract.chapter - 1) continue
+      const score = 1 / (1 + rank) + 1 / (1 + queryIndex)
+      const existing = candidates.get(item.chunkId)
+      if (existing) existing.score += score
+      else candidates.set(item.chunkId, {
+        score, chapter: item.chapter, paragraph: item.paragraph, text: item.text, sourceCommit: item.sourceCommit,
+      })
+    }
+  }
+
+  const ordered = [...candidates.values()].sort((a, b) =>
+    b.score - a.score || b.chapter - a.chapter || a.paragraph - b.paragraph,
+  )
+  const materials: Material[] = []
+  for (const candidate of ordered) {
+    if (materials.length >= RETRIEVAL_LIMIT) break
+    if (!(await povAllowsEvidence(root, contract, candidate.chapter, candidate.text))) continue
+    const text = [...candidate.text].slice(0, RETRIEVAL_CHARS).join('')
+    const chapter = String(candidate.chapter).padStart(3, '0')
+    const paragraph = String(candidate.paragraph).padStart(3, '0')
+    materials.push({
+      ...material(
+        `finalized-history:ch-${chapter}-p${paragraph}`,
+        'finalized-history',
+        'finalized',
+        false,
+        `前文呼应：第 ${candidate.chapter} 章第 ${candidate.paragraph} 段`,
+        text,
+      ),
+      priority: 10,
+      relevance: Number(candidate.score.toFixed(4)),
+    })
+  }
+  return materials
+}
+
+function retrievalQueries(contract: ChapterContract): string[] {
+  const queries: string[] = []
+  const threads = contract.threads.join(' ').trim()
+  if (threads) queries.push(threads)
+  const cast = contract.characters.join(' ').trim()
+  if (cast) queries.push(cast)
+  if (contract.goal.trim()) queries.push(contract.goal.trim().slice(0, 60))
+  if (contract.previousLink.trim()) queries.push(contract.previousLink.trim().slice(0, 60))
+  return [...new Set(queries)]
+}
+
+async function povAllowsEvidence(
+  root: string,
+  contract: ChapterContract,
+  chapter: number,
+  text: string,
+): Promise<boolean> {
+  if (contract.narrativeMode === 'omniscient') return true
+  const chapterContract = await loadContract(root, chapter).catch(() => null)
+  if (!chapterContract) return false
+  if (chapterContract.pov !== contract.pov) return false
+  const commitId = (await readMainline(root)).selectedCommitByChapter[String(chapter)]
+  if (!commitId) return false
+  const commit = await currentCommit(root, chapter)
+  if (!commit?.ledger) return true
+  const squashed = text.replace(/\s+/g, '')
+  for (const belief of commit.ledger.beliefs) {
+    if (belief.characterId === contract.pov) continue
+    if (belief.attitude !== 'knows' && belief.attitude !== 'believes') continue
+    const proposition = belief.proposition.replace(/\s+/g, '')
+    if (proposition.length >= 4 && squashed.includes(proposition)) return false
+  }
+  return true
 }
 
 function material(

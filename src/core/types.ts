@@ -99,6 +99,10 @@ export interface Material {
   contentHash: string
   visibility: 'project' | 'author-only'
   purpose: string
+  /** Lower runs first when budgets are tight. Defaults to 100. */
+  priority?: number
+  /** Retrieval relevance; keeps ranking through budget trimming. */
+  relevance?: number
 }
 
 export type MaterialDecision =
