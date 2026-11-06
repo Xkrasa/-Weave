@@ -3061,6 +3061,9 @@ test('content check blocks prose that ends mid-sentence', async () => {
     assert.equal(payload.passed, false)
     assert.ok(payload.findings.some(item => item.code === 'TRUNCATED_ENDING' && item.severity === 'blocking'))
 
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), '林岚在码头翻开账本。\n\n她听见身后有人，猛地回头——')
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0, 'em dash is a valid suspense ending')
+
     await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), P05_DRAFT)
     assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
   } finally {

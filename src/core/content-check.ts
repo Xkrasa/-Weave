@@ -70,7 +70,7 @@ export async function runContentCheck(
   }
 
   const tail = draft.trim()
-  if (tail.length > 10 && !/[。！？…～”」』）)】]$/.test(tail)) {
+  if (tail.length > 10 && !/[。！？…～—”」』）)】]$/.test(tail)) {
     findings.push({
       severity: 'blocking',
       code: 'TRUNCATED_ENDING',

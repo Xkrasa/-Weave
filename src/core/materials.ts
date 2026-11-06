@@ -447,7 +447,10 @@ function paragraphSpans(text: string): Array<{ start: number; end: number }> {
 
 
 const RETRIEVAL_LIMIT = 4
+const RETRIEVAL_PER_CHAPTER = 2
 const RETRIEVAL_CHARS = 900
+const DUPLICATE_SHINGLE = 4
+const DUPLICATE_THRESHOLD = 0.6
 
 /**
  * Pull a small set of finalized passages that answer "who/what appeared before".
@@ -488,10 +491,16 @@ async function collectRetrievedEvidence(root: string, contract: ChapterContract)
     b.score - a.score || b.chapter - a.chapter || a.paragraph - b.paragraph,
   )
   const materials: Material[] = []
+  const perChapter = new Map<number, number>()
+  const selectedTexts: string[] = []
   for (const candidate of ordered) {
     if (materials.length >= RETRIEVAL_LIMIT) break
-    if (!(await povAllowsEvidence(root, contract, candidate.chapter, candidate.text))) continue
+    if ((perChapter.get(candidate.chapter) ?? 0) >= RETRIEVAL_PER_CHAPTER) continue
     const text = [...candidate.text].slice(0, RETRIEVAL_CHARS).join('')
+    if (selectedTexts.some(existing => nearDuplicate(existing, text))) continue
+    if (!(await povAllowsEvidence(root, contract, candidate.chapter, candidate.text))) continue
+    perChapter.set(candidate.chapter, (perChapter.get(candidate.chapter) ?? 0) + 1)
+    selectedTexts.push(text)
     const chapter = String(candidate.chapter).padStart(3, '0')
     const paragraph = String(candidate.paragraph).padStart(3, '0')
     materials.push({
@@ -649,6 +658,26 @@ function splitPovKnowledge(
   )
   const backgroundBeliefs = beliefs.filter(belief => !criticalBeliefs.includes(belief))
   return { criticalFacts, criticalBeliefs, backgroundFacts, backgroundBeliefs }
+}
+
+
+/** Near-duplicate passages (same beat repeated, or a chapter quoting itself) waste evidence slots. */
+function nearDuplicate(left: string, right: string): boolean {
+  const a = shingles(left)
+  const b = shingles(right)
+  if (a.size === 0 || b.size === 0) return left.trim() === right.trim()
+  let shared = 0
+  for (const item of a) if (b.has(item)) shared += 1
+  return shared / (a.size + b.size - shared) > DUPLICATE_THRESHOLD
+}
+
+function shingles(text: string): Set<string> {
+  const compact = text.replace(/\s+/g, '')
+  const set = new Set<string>()
+  for (let index = 0; index + DUPLICATE_SHINGLE <= compact.length; index += 1) {
+    set.add(compact.slice(index, index + DUPLICATE_SHINGLE))
+  }
+  return set
 }
 
 function material(
