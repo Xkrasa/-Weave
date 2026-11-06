@@ -26,6 +26,7 @@ import {
   type LedgerProjectionState,
 } from './ledger-projection.ts'
 import { conflictError } from './errors.ts'
+import { rebuildSearchIndex, searchIndexHealth, type SearchIndexState } from './search.ts'
 
 export interface ChapterStatus {
   chapter: number
@@ -50,6 +51,7 @@ export interface ProjectStatus {
   ledgerProjections: LedgerProjectionState[]
   impacts: Array<{ chapter: number; pending: number; targets: number[] }>
   pendingImpacts: number
+  searchIndex: Awaited<ReturnType<typeof searchIndexHealth>>
 }
 
 export async function projectStatus(root: string): Promise<ProjectStatus> {
@@ -96,6 +98,7 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
     ledgerProjections: await readLedgerProjectionStates(root),
     impacts,
     pendingImpacts: impacts.reduce((sum, item) => sum + item.pending, 0),
+    searchIndex: await searchIndexHealth(root),
   }
 }
 
@@ -224,6 +227,17 @@ export async function doctor(root: string): Promise<DoctorResult> {
     }
   }
 
+  const indexHealth = await searchIndexHealth(root)
+  if (selectedChapters.length > 0) {
+    if (indexHealth.status === 'missing') {
+      warnings.push('检索索引未建立；依赖检索的生成不会使用历史证据')
+    } else if (indexHealth.status !== 'current') {
+      errors.push(`检索索引状态为 ${indexHealth.status}${indexHealth.error ? `（${indexHealth.error}）` : ''}；请执行 weave index rebuild`)
+    } else if (indexHealth.mainlineRevision !== head.mainlineRevision) {
+      errors.push('检索索引落后于当前主线；请执行 weave index rebuild')
+    }
+  }
+
   const pending = await pendingImpactItems(root)
   for (const report of pending) {
     errors.push(`第 ${report.sourceChapter} 章仍有 ${report.items.length} 项未处理影响`)
@@ -246,6 +260,7 @@ export async function doctor(root: string): Promise<DoctorResult> {
 export interface RebuildResult {
   projection: ProjectionState | null
   ledgerProjection: LedgerProjectionState | null
+  index: { chunks: number; terms: number } | null
   chapters: number
   replayBaseChapter: number | null
 }
@@ -254,7 +269,7 @@ export async function rebuildBook(
   root: string,
   options: {
     force?: boolean
-    projection?: 'all' | 'content' | 'ledger' | LedgerProjectionName
+    projection?: 'all' | 'content' | 'ledger' | 'search' | LedgerProjectionName
     fromChapter?: number
   } = {},
 ): Promise<RebuildResult> {
@@ -270,7 +285,11 @@ export async function rebuildBook(
         ? await replayProjectionFrom(root, state.invalidFrom, { materialize: true })
         : await rebuildProjection(root, { materialize: true })
   }
-  if (projection !== 'content') {
+  let index: { chunks: number; terms: number } | null = null
+  if (projection === 'all' || projection === 'search') {
+    index = await rebuildSearchIndex(root)
+  }
+  if (projection !== 'content' && projection !== 'search') {
     const ledgerName: LedgerProjectionName | 'all' =
       projection === 'all' || projection === 'ledger' ? 'all' : projection
     const state = await readLedgerProjectionState(root)
@@ -290,6 +309,7 @@ export async function rebuildBook(
   return {
     projection: contentProjection,
     ledgerProjection,
+    index,
     chapters: contentProjection?.appliedThrough ?? ledgerProjection?.appliedThrough ?? 0,
     replayBaseChapter: contentProjection?.replayBaseChapter ?? ledgerProjection?.replayBaseChapter ?? null,
   }

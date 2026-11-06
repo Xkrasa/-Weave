@@ -55,6 +55,7 @@ import {
 } from './ledger-projection.ts'
 import { conflictError, modelError, reviewBlockedError, validationError, WeaveError } from './errors.ts'
 import { loadStage, requireStage } from './stages.ts'
+import { applyFinalizedChapter, markSearchIndexFailed } from './search.ts'
 import type {
   ContentCheckReport,
   CoverageAudit,
@@ -230,6 +231,7 @@ export interface FinalizeResult {
   projection: ProjectionState | null
   projectionFailed: boolean
   ledgerProjectionFailed: boolean
+  searchIndexFailed: boolean
   impact: ImpactReport | null
   draftEdited: boolean
 }
@@ -360,6 +362,13 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     projectionFailed = true
     projection = await markProjectionFailed(root, error instanceof Error ? error.message : String(error))
   }
+  let searchIndexFailed = false
+  try {
+    await applyFinalizedChapter(root, chapter)
+  } catch (error) {
+    searchIndexFailed = true
+    await markSearchIndexFailed(root, error instanceof Error ? error.message : String(error)).catch(() => {})
+  }
   let ledgerProjectionFailed = false
   if (commit.schemaVersion === 3) {
     try {
@@ -390,6 +399,7 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     projection,
     projectionFailed,
     ledgerProjectionFailed,
+    searchIndexFailed,
     impact,
     draftEdited,
   }

@@ -214,6 +214,7 @@ async function commandStatus(root: string, json: boolean): Promise<number> {
     console.log(`内容投影：${status.projection ? `${status.projection.status} @ ${status.projection.appliedThrough}` : '未建立'}`)
     console.log(`账本投影：${status.ledgerProjection ? `${status.ledgerProjection.status} @ ${status.ledgerProjection.appliedThrough}` : '未建立'}`)
     console.log(`未处理影响：${status.pendingImpacts}`)
+    console.log(`检索索引：${status.searchIndex.status} @ ${status.searchIndex.mainlineRevision ?? '无'}`)
   }
   return 0
 }
@@ -950,6 +951,7 @@ async function commandFinalize(root: string, parsed: Parsed, json: boolean): Pro
       projection: result.projection,
       projectionFailed: result.projectionFailed,
       ledgerProjectionFailed: result.ledgerProjectionFailed,
+      searchIndexFailed: result.searchIndexFailed,
       impact: result.impact,
       draftEdited: result.draftEdited,
     })
@@ -959,6 +961,7 @@ async function commandFinalize(root: string, parsed: Parsed, json: boolean): Pro
     if (result.draftEdited) console.log('注意：草稿在生成后被手工修改，本次定稿使用了修改后的内容')
     if (result.projectionFailed) console.error('警告：投影更新失败，请执行 weave rebuild')
     if (result.ledgerProjectionFailed) console.error('警告：账本投影更新失败，请执行 weave rebuild --projection ledger')
+    if (result.searchIndexFailed) console.error('警告：检索索引同步失败，请执行 weave rebuild --projection search')
     if (result.impact) {
       console.log(`影响面：${result.impact.items.length} 个后续章节待复查`)
       for (const item of result.impact.items) {
@@ -1025,12 +1028,12 @@ async function commandResolveImpact(root: string, parsed: Parsed, json: boolean)
 async function commandRebuild(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const requested = String(parsed.flags.projection ?? 'all')
   const allowed = new Set([
-    'all', 'content', 'ledger', 'ledger-index', 'entity-state', 'belief', 'open-loop', 'series-timeline',
+    'all', 'content', 'ledger', 'search', 'ledger-index', 'entity-state', 'belief', 'open-loop', 'series-timeline',
   ])
   if (!allowed.has(requested)) {
-    throw usageError('--projection 必须是 all、content、ledger、ledger-index、entity-state、belief、open-loop 或 series-timeline')
+    throw usageError('--projection 必须是 all、content、ledger、search、ledger-index、entity-state、belief、open-loop 或 series-timeline')
   }
-  const projection = requested as 'all' | 'content' | 'ledger' | LedgerProjectionName
+  const projection = requested as 'all' | 'content' | 'ledger' | 'search' | LedgerProjectionName
   const result = await rebuildBook(root, {
     force: parsed.flags.force === true,
     projection,
@@ -1041,6 +1044,7 @@ async function commandRebuild(root: string, parsed: Parsed, json: boolean): Prom
     console.log(`已重建投影：覆盖到第 ${result.chapters} 章`)
     if (result.projection) console.log(`内容投影：${result.projection.status} @ ${result.projection.appliedThrough}`)
     if (result.ledgerProjection) console.log(`账本投影：${result.ledgerProjection.status} @ ${result.ledgerProjection.appliedThrough}`)
+    if (result.index) console.log(`检索索引：${result.index.chunks} 段，${result.index.terms} 词项`)
   }
   return 0
 }
@@ -1196,7 +1200,7 @@ function printHelp(): void {
   weave impact <chapter>
   weave resolve-impact <chapter> --target <n> --decision accept|revise|defer
   weave resolve-impact <chapter> --all --decision accept
-  weave rebuild [--projection all|content|ledger] [--from <chapter>] [--force]
+  weave rebuild [--projection all|content|ledger|search] [--from <chapter>] [--force]
   weave export --format merged|split|txt [--platform generic|qidian|fanqie|custom] [--count-mode cjk|all]
   weave doctor
 

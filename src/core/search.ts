@@ -54,9 +54,21 @@ function open(root: string): DatabaseSync {
     CREATE TABLE IF NOT EXISTS search_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       mainline_revision INTEGER NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'current',
+      error TEXT
     );
   `)
+  try {
+    db.exec("ALTER TABLE search_state ADD COLUMN status TEXT NOT NULL DEFAULT 'current'")
+  } catch {
+    // Existing index already has the column.
+  }
+  try {
+    db.exec('ALTER TABLE search_state ADD COLUMN error TEXT')
+  } catch {
+    // Existing index already has the column.
+  }
   try {
     db.exec("ALTER TABLE search_chunks ADD COLUMN time_label TEXT NOT NULL DEFAULT ''")
   } catch {
@@ -70,72 +82,160 @@ function open(root: string): DatabaseSync {
   return db
 }
 
+export interface SearchIndexState {
+  mainlineRevision: number | null
+  status: 'current' | 'stale' | 'failed' | 'missing'
+  updatedAt: string | null
+  error?: string
+}
+
 export async function rebuildSearchIndex(root: string): Promise<{ chunks: number; terms: number }> {
   const head = await readMainline(root)
   const db = open(root)
   try {
     db.exec('BEGIN IMMEDIATE')
     db.exec('DELETE FROM search_terms; DELETE FROM search_chunks;')
-    db.prepare(
-      `INSERT INTO search_state (id, mainline_revision, updated_at) VALUES (1, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET mainline_revision = excluded.mainline_revision, updated_at = excluded.updated_at`,
-    ).run(head.mainlineRevision, new Date().toISOString())
     let chunkCount = 0
     let termCount = 0
     for (const [chapterText, commitId] of Object.entries(head.selectedCommitByChapter)) {
       const chapter = Number(chapterText)
       const commit = await readCommit(root, commitId)
       if (!commit) continue
-      const text = await readTextIfExists(finalPath(root, chapter))
-      if (!text) continue
-      const contract = await loadContract(root, chapter).catch(() => null)
-      const storyline = contract?.threads.join(',') ?? ''
-      const paragraphs = paragraphsWithOffsets(text)
-      for (const paragraph of paragraphs) {
-        const chunkId = `ch-${chapter}-${String(paragraph.index).padStart(3, '0')}`
-        const chapterEntities = [
-          ...new Set([
-            ...(commit.ledger?.events.flatMap(event => event.participants) ?? []),
-            ...(commit.ledger?.facts.map(fact => fact.subject) ?? []),
-            ...(commit.ledger?.loops?.flatMap(loop => loop.relatedEntities) ?? []),
-          ]),
-        ]
-        const entities = chapterEntities.filter(name => paragraph.text.includes(name))
-        const tokens = tokenize(paragraph.text)
-        const tf = new Map<string, number>()
-        for (const token of tokens) tf.set(token, (tf.get(token) ?? 0) + 1)
-        db.prepare(
-          `INSERT INTO search_chunks
-            (chunk_id, chapter, paragraph, text, start_byte, end_byte, entities, storyline,
-             time_label, location, source_commit, content_hash, length)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          chunkId,
-          chapter,
-          paragraph.index,
-          paragraph.text,
-          paragraph.startByte,
-          paragraph.endByte,
-          [...new Set(entities)].join(','),
-          storyline,
-          contract?.time ?? '',
-          contract?.location ?? '',
-          commitId,
-          commit.contentHash,
-          tokens.length,
-        )
-        for (const [term, count] of tf) {
-          db.prepare('INSERT INTO search_terms (term, chunk_id, tf) VALUES (?, ?, ?)').run(term, chunkId, count)
-          termCount += 1
-        }
-        chunkCount += 1
-      }
+      const indexed = await indexChapter(db, root, chapter, commitId, commit)
+      chunkCount += indexed.chunks
+      termCount += indexed.terms
     }
+    writeIndexState(db, head.mainlineRevision, 'current')
     db.exec('COMMIT')
     return { chunks: chunkCount, terms: termCount }
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * Keep the searchable index aligned with the selected mainline after a single finalize or amend.
+ * Rebuilds once when there is no usable baseline; otherwise replaces just this chapter.
+ */
+export async function applyFinalizedChapter(root: string, chapter: number): Promise<'incremental' | 'rebuilt'> {
+  const head = await readMainline(root)
+  const commitId = head.selectedCommitByChapter[String(chapter)]
+  const commit = commitId ? await readCommit(root, commitId) : null
+  const db = open(root)
+  let closed = false
+  try {
+    const state = readIndexStateFromDb(db)
+    if (!commit || !state || state.status !== 'current' || state.mainlineRevision === null) {
+      db.close()
+      closed = true
+      await rebuildSearchIndex(root)
+      return 'rebuilt'
+    }
+    db.exec('BEGIN IMMEDIATE')
+    db.prepare(
+      'DELETE FROM search_terms WHERE chunk_id IN (SELECT chunk_id FROM search_chunks WHERE chapter = ?)',
+    ).run(chapter)
+    db.prepare('DELETE FROM search_chunks WHERE chapter = ?').run(chapter)
+    await indexChapter(db, root, chapter, commit.commitId, commit)
+    writeIndexState(db, head.mainlineRevision, 'current')
+    db.exec('COMMIT')
+    return 'incremental'
+  } catch (error) {
+    try { db.exec('ROLLBACK') } catch { /* transaction may not have started */ }
+    throw error
+  } finally {
+    if (!closed) db.close()
+  }
+}
+
+async function indexChapter(
+  db: DatabaseSync,
+  root: string,
+  chapter: number,
+  commitId: string,
+  commit: NonNullable<Awaited<ReturnType<typeof readCommit>>>,
+): Promise<{ chunks: number; terms: number }> {
+  const text = await readTextIfExists(finalPath(root, chapter))
+  if (!text) return { chunks: 0, terms: 0 }
+  const contract = await loadContract(root, chapter).catch(() => null)
+  const storyline = contract?.threads.join(',') ?? ''
+  const chapterEntities = [
+    ...new Set([
+      ...(commit.ledger?.events.flatMap(event => event.participants) ?? []),
+      ...(commit.ledger?.facts.map(fact => fact.subject) ?? []),
+      ...(commit.ledger?.loops?.flatMap(loop => loop.relatedEntities) ?? []),
+    ]),
+  ]
+  let chunks = 0
+  let terms = 0
+  for (const paragraph of paragraphsWithOffsets(text)) {
+    const chunkId = `ch-${chapter}-${String(paragraph.index).padStart(3, '0')}`
+    const entities = chapterEntities.filter(name => paragraph.text.includes(name))
+    const tokens = tokenize(paragraph.text)
+    const tf = new Map<string, number>()
+    for (const token of tokens) tf.set(token, (tf.get(token) ?? 0) + 1)
+    db.prepare(
+      `INSERT OR REPLACE INTO search_chunks
+        (chunk_id, chapter, paragraph, text, start_byte, end_byte, entities, storyline,
+         time_label, location, source_commit, content_hash, length)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      chunkId,
+      chapter,
+      paragraph.index,
+      paragraph.text,
+      paragraph.startByte,
+      paragraph.endByte,
+      [...new Set(entities)].join(','),
+      storyline,
+      contract?.time ?? '',
+      contract?.location ?? '',
+      commitId,
+      commit.contentHash,
+      tokens.length,
+    )
+    for (const [term, count] of tf) {
+      db.prepare('INSERT OR REPLACE INTO search_terms (term, chunk_id, tf) VALUES (?, ?, ?)').run(term, chunkId, count)
+      terms += 1
+    }
+    chunks += 1
+  }
+  return { chunks, terms }
+}
+
+function writeIndexState(db: DatabaseSync, revision: number, status: SearchIndexState['status']): void {
+  db.prepare(
+    `INSERT INTO search_state (id, mainline_revision, updated_at, status, error) VALUES (1, ?, ?, ?, NULL)
+     ON CONFLICT(id) DO UPDATE SET
+       mainline_revision = excluded.mainline_revision,
+       updated_at = excluded.updated_at,
+       status = excluded.status,
+       error = NULL`,
+  ).run(revision, new Date().toISOString(), status)
+}
+
+function readIndexStateFromDb(db: DatabaseSync): SearchIndexState | null {
+  const row = db.prepare('SELECT mainline_revision, updated_at, status, error FROM search_state WHERE id = 1')
+    .get() as Record<string, unknown> | undefined
+  if (!row) return null
+  return {
+    mainlineRevision: Number(row.mainline_revision),
+    status: String(row.status ?? 'current') as SearchIndexState['status'],
+    updatedAt: String(row.updated_at),
+    ...(row.error == null ? {} : { error: String(row.error) }),
+  }
+}
+
+export async function markSearchIndexFailed(root: string, message: string): Promise<void> {
+  const db = open(root)
+  try {
+    const state = readIndexStateFromDb(db)
+    if (!state || state.mainlineRevision === null) return
+    db.prepare('UPDATE search_state SET status = ?, error = ?, updated_at = ? WHERE id = 1')
+      .run('failed', message.slice(0, 500), new Date().toISOString())
   } finally {
     db.close()
   }
@@ -159,9 +259,12 @@ export async function searchBook(
   const db = open(root)
   try {
     const head = await readMainline(root)
-    const indexed = db.prepare('SELECT mainline_revision FROM search_state WHERE id = 1')
+    const indexed = db.prepare('SELECT mainline_revision, status FROM search_state WHERE id = 1')
       .get() as Record<string, unknown> | undefined
     if (!indexed) throw conflictError('检索索引为空；请先执行 weave index rebuild')
+    if (String(indexed.status ?? 'current') !== 'current') {
+      throw conflictError('检索索引不可用（同步失败）；请执行 weave index rebuild')
+    }
     if (Number(indexed.mainline_revision) !== head.mainlineRevision) {
       throw conflictError('检索索引已落后于主线；请执行 weave index rebuild')
     }
@@ -261,20 +364,25 @@ export async function searchIndexHealth(root: string): Promise<{
   mainlineRevision: number | null
   currentMainlineRevision: number
   current: boolean
+  status: SearchIndexState['status']
+  error?: string
 }> {
   const db = open(root)
   try {
     const chunks = Number((db.prepare('SELECT COUNT(*) AS count FROM search_chunks').get() as Record<string, unknown>)?.count ?? 0)
     const terms = Number((db.prepare('SELECT COUNT(*) AS count FROM search_terms').get() as Record<string, unknown>)?.count ?? 0)
-    const state = db.prepare('SELECT mainline_revision FROM search_state WHERE id = 1')
-      .get() as Record<string, unknown> | undefined
+    const state = readIndexStateFromDb(db)
     const head = await readMainline(root)
     return {
       chunks,
       terms,
-      mainlineRevision: state ? Number(state.mainline_revision) : null,
+      mainlineRevision: state?.mainlineRevision ?? null,
       currentMainlineRevision: head.mainlineRevision,
-      current: Boolean(state) && Number(state!.mainline_revision) === head.mainlineRevision,
+      current: Boolean(state)
+        && state?.status === 'current'
+        && state?.mainlineRevision === head.mainlineRevision,
+      status: state?.status ?? 'missing',
+      ...(state?.error ? { error: state.error } : {}),
     }
   } finally {
     db.close()
