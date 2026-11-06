@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { initProject } from '../src/core/project.ts'
@@ -172,6 +172,67 @@ test('P3 UI exposes methods and style without a model call', async () => {
     const stylePayload = await style.json() as { passed: boolean; findings: unknown[] }
     assert.equal(stylePayload.passed, true)
     assert.ok(Array.isArray(stylePayload.findings))
+  } finally {
+    await app.close()
+    await rm(app.dir, { recursive: true, force: true })
+  }
+})
+
+test('UI exposes planning, outline and preference surfaces', async () => {
+  const app = await fixture()
+  try {
+    const plans = await request(app.base, '/api/plans')
+    assert.equal(plans.status, 200)
+    const planPayload = await plans.json() as { plans: Array<{ kind: string; status: string }> }
+    assert.ok(planPayload.plans.some(item => item.kind === 'story' && item.status === 'missing'))
+
+    await mkdir(path.join(app.dir, 'plans'), { recursive: true })
+    await writeFile(path.join(app.dir, 'plans', 'story.json'), `${JSON.stringify({
+      schemaVersion: 1,
+      kind: 'story',
+      status: 'draft',
+      provenance: 'generated',
+      contentHash: 'pending',
+      content: {
+        audience: '追更读者',
+        genre: '悬疑',
+        coreFantasy: '账本撬开港口',
+        uniqueSellingPoint: '每章一个可验证的缺页',
+        emotionalPromise: '越查越近',
+        protagonistDesire: '拿回房子',
+      },
+    }, null, 2)}\n`)
+    const approved = await request(app.base, '/api/plans/approve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-weave-token': app.token },
+      body: JSON.stringify({ kind: 'story' }),
+    })
+    assert.equal(approved.status, 200)
+    assert.equal((await approved.json() as { status: string }).status, 'approved')
+
+    const outlines = await request(app.base, '/api/outlines')
+    assert.equal(outlines.status, 200)
+    assert.deepEqual((await outlines.json() as { candidates: unknown[] }).candidates, [])
+
+    const learning = await request(app.base, '/api/preferences/learning')
+    assert.equal(learning.status, 200)
+    const learningPayload = await learning.json() as { signals: unknown[]; candidates: unknown[]; approved: unknown[] }
+    assert.ok(Array.isArray(learningPayload.signals))
+
+    const reviewed = await request(app.base, '/api/preferences/review', {
+      method: 'POST',
+      headers: { 'x-weave-token': app.token },
+    })
+    assert.equal(reviewed.status, 200)
+    assert.deepEqual((await reviewed.json() as { candidates: unknown[] }).candidates, [])
+
+    const effect = await request(app.base, '/api/chapters/1/effect-review')
+    assert.equal(effect.status, 200)
+    assert.equal((await effect.json() as { report: unknown }).report, null)
+
+    const shell = await (await request(app.base, '/')).text()
+    assert.match(shell, /data-tab="plan"/)
+    assert.match(shell, /data-tab="effect"/)
   } finally {
     await app.close()
     await rm(app.dir, { recursive: true, force: true })

@@ -31,6 +31,17 @@ import { atomicWriteJson, ensureDir, listFiles, readJsonIfExists } from './io.ts
 import { readSearchChunk, searchBook } from './search.ts'
 import { deconstructFile } from './deconstruct.ts'
 import { selectMethods, styleCheck } from './methods.ts'
+import { approvePlan, listPlans, parsePlanKind } from './planning.ts'
+import { applyCandidate, approveCandidate, candidateValidation, outlineReport } from './outline.ts'
+import { runEffectReview } from './effect-review.ts'
+import {
+  approvePreference,
+  disablePreference,
+  listPreferenceCandidates,
+  listPreferenceSignals,
+  readApprovedPreferences,
+  reviewPreferenceCandidates,
+} from './preferences.ts'
 import { assertProjectionCurrent } from './projections.ts'
 import { assertNoPendingImpacts } from './impact.ts'
 import { assertLedgerProjectionCurrent } from './ledger-projection.ts'
@@ -177,8 +188,78 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
     sendJson(response, 200, await chapterGates(root, chapter))
     return
   }
+  if (chapter && url.pathname === `/api/chapters/${chapter}/effect-review`) {
+    if (request.method === 'GET') {
+      sendJson(response, 200, { report: await loadStage(root, 'effect-review', chapter) })
+      return
+    }
+    if (request.method === 'POST') {
+      const contract = await loadContract(root, chapter)
+      const draft = await readDraft(root, chapter)
+      const config = await loadModelConfig(root)
+      const report = await runEffectReview(root, chapter, contract, draft, config, new AbortController().signal)
+      sendJson(response, 200, report)
+      return
+    }
+  }
   if (chapter && request.method === 'GET' && parts[3] === 'history') {
     sendJson(response, 200, await chapterHistory(root, chapter))
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/plans') {
+    sendJson(response, 200, { plans: await listPlans(root) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/plans/approve') {
+    const body = await readJsonBody<{ kind?: string; volume?: number }>(request)
+    const kind = parsePlanKind(body.kind)
+    const entry = await approvePlan(root, kind, body.volume)
+    sendJson(response, 200, entry)
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/outlines') {
+    sendJson(response, 200, await outlineReport(root))
+    return
+  }
+  if (parts[1] === 'outlines' && parts[2] && request.method === 'POST' && parts[3]) {
+    const outlineChapter = Number(parts[2])
+    if (!Number.isSafeInteger(outlineChapter) || outlineChapter <= 0) throw usageError('章节号必须是正整数')
+    if (parts[3] === 'apply') {
+      sendJson(response, 200, await applyCandidate(root, outlineChapter))
+      return
+    }
+    if (parts[3] === 'approve') {
+      sendJson(response, 200, await approveCandidate(root, outlineChapter))
+      return
+    }
+    if (parts[3] === 'check') {
+      sendJson(response, 200, await candidateValidation(root, outlineChapter))
+      return
+    }
+  }
+  if (request.method === 'GET' && url.pathname === '/api/preferences/learning') {
+    sendJson(response, 200, {
+      signals: await listPreferenceSignals(root),
+      candidates: await listPreferenceCandidates(root),
+      approved: await readApprovedPreferences(root),
+    })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/preferences/review') {
+    sendJson(response, 200, { candidates: await reviewPreferenceCandidates(root) })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/preferences/approve') {
+    const body = await readJsonBody<{ id?: string }>(request)
+    if (!body.id) throw usageError('缺少偏好 id')
+    sendJson(response, 200, await approvePreference(root, body.id))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/preferences/disable') {
+    const body = await readJsonBody<{ id?: string }>(request)
+    if (!body.id) throw usageError('缺少偏好 id')
+    await disablePreference(root, body.id)
+    sendJson(response, 200, { ok: true, id: body.id })
     return
   }
   if (url.pathname === '/api/preferences') {

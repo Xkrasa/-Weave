@@ -220,6 +220,87 @@ async function renderInspector() {
     $$('#inspector-body [data-waive]').forEach(node => node.addEventListener('click', () => waiveFinding(node.dataset.waive)));
     $$('#inspector-body [data-revise]').forEach(node => node.addEventListener('click', () => reviseFinding(node.dataset.revise)));
     $$('#inspector-body [data-ignore]').forEach(node => node.addEventListener('click', () => ignoreFinding(node.dataset.ignore)));
+  } else if (state.tab === 'plan') {
+    const [plans, outlines] = await Promise.all([api('/api/plans'), api('/api/outlines')]);
+    const planCards = plans.plans.map(entry => `
+      <div class="card">
+        <h3>${escapeHtml(entry.kind)}${entry.kind === 'volume' && entry.content?.volume ? ` ${escapeHtml(entry.content.volume)}` : ''} <span class="muted">${escapeHtml(entry.status)}</span></h3>
+        <p class="code">${escapeHtml(entry.path)}</p>
+        ${entry.status === 'draft' || entry.status === 'modified'
+          ? `<button data-plan-approve="${escapeHtml(entry.kind)}" data-plan-volume="${escapeHtml(entry.content?.volume ?? '')}">批准</button>`
+          : ''}
+      </div>`).join('');
+    const outlineCards = outlines.candidates.length
+      ? outlines.candidates.map(candidate => `
+        <div class="card">
+          <h3>第 ${candidate.chapter} 章 <span class="muted">${escapeHtml(candidate.status)}</span></h3>
+          <div class="finding-actions">
+            <button data-outline-check="${candidate.chapter}">检查</button>
+            <button data-outline-apply="${candidate.chapter}">写入合同</button>
+            ${candidate.status !== 'approved' ? `<button data-outline-approve="${candidate.chapter}">批准</button>` : ''}
+          </div>
+        </div>`).join('')
+      : '<div class="empty">还没有生成的章纲候选。</div>';
+    $('#inspector-body').innerHTML = `
+      <div class="section-label">故事规划</div>
+      ${planCards || '<div class="empty">还没有规划文件。</div>'}
+      <div class="section-label">章纲候选</div>
+      ${outlineCards}`;
+    $$('#inspector-body [data-plan-approve]').forEach(node => node.addEventListener('click', async () => {
+      try {
+        await api('/api/plans/approve', {
+          method: 'POST',
+          body: { kind: node.dataset.planApprove, volume: node.dataset.planVolume ? Number(node.dataset.planVolume) : undefined },
+        });
+        toast('已批准规划');
+        await renderInspector();
+      } catch (error) { toast(error.message, true); }
+    }));
+    $$('#inspector-body [data-outline-check]').forEach(node => node.addEventListener('click', async () => {
+      try {
+        const result = await api(`/api/outlines/${node.dataset.outlineCheck}/check`, { method: 'POST' });
+        toast(result.ok ? '候选检查通过' : `候选有 ${result.errors.length} 个问题`, !result.ok);
+      } catch (error) { toast(error.message, true); }
+    }));
+    $$('#inspector-body [data-outline-apply]').forEach(node => node.addEventListener('click', async () => {
+      try {
+        await api(`/api/outlines/${node.dataset.outlineApply}/apply`, { method: 'POST' });
+        toast('已写入合同；请运行合同检查后再批准');
+        await openChapter(state.current, true);
+      } catch (error) { toast(error.message, true); }
+    }));
+    $$('#inspector-body [data-outline-approve]').forEach(node => node.addEventListener('click', async () => {
+      try {
+        await api(`/api/outlines/${node.dataset.outlineApprove}/approve`, { method: 'POST' });
+        toast('已批准合同');
+        await renderInspector();
+      } catch (error) { toast(error.message, true); }
+    }));
+  } else if (state.tab === 'effect') {
+    const payload = await api(`/api/chapters/${state.current}/effect-review`);
+    const report = payload.report;
+    $('#inspector-body').innerHTML = `
+      <div class="section-label">阅读效果（仅建议，不阻断定稿）</div>
+      ${report
+        ? `<p>${escapeHtml(report.summary)}</p>${report.findings.map(finding => `
+            <div class="finding ${escapeHtml(finding.severity)}">
+              <div class="finding-head"><span>${escapeHtml(finding.dimension)}</span><span>${escapeHtml(finding.severity)}</span></div>
+              <p>${escapeHtml(finding.description)}</p>
+              ${finding.quote ? `<div class="quote">“${escapeHtml(finding.quote)}”</div>` : ''}
+            </div>`).join('')}`
+        : '<div class="empty">还没有运行效果审查。</div>'}
+      <button id="btn-effect-run">运行效果审查</button>`;
+    $('#btn-effect-run').addEventListener('click', async () => {
+      try {
+        updateSave('效果审查中…');
+        await api(`/api/chapters/${state.current}/effect-review`, { method: 'POST' });
+        updateSave('已保存');
+        await renderInspector();
+      } catch (error) {
+        updateSave('审查失败');
+        toast(error.message, true);
+      }
+    });
   } else if (state.tab === 'stages') {
     const stages = detail.stages || {};
     const block = (title, report, extra = '') => `
