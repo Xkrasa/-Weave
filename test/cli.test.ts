@@ -1107,6 +1107,144 @@ test('quantity ledger breaks surface in audit without blocking finalize', async 
   }
 })
 
+const P1_DRAFT = '林岚值完夜班回到宿舍，人还好好地活着。'
+const P2_DRAFT = '夜里火场坍塌，林岚被救出来时已经没有呼吸。'
+
+function statusExtraction(chapter: number, alive: boolean, quote: string): string {
+  return JSON.stringify({
+    summary: chapter === 1 ? '林岚平安值完夜班。' : '林岚火场被困。',
+    noEventsReason: null,
+    records: [{
+      recordId: 'r1',
+      kind: 'event',
+      summary: chapter === 1 ? '林岚平安值完夜班' : '林岚火场被困',
+      participants: ['林岚'],
+      location: '宿舍',
+      storyTime: `第 ${chapter} 天`,
+      payload: {},
+      evidence: [{ quote, occurrence: 1 }],
+    }],
+    timeline: [{
+      eventId: 'e1',
+      recordId: 'r1',
+      summary: chapter === 1 ? '林岚平安值完夜班' : '林岚火场被困',
+      dayOffset: 0,
+      durationDays: 0,
+      participants: ['林岚'],
+      causedBy: [],
+      type: 'main',
+      evidence: [{ quote, occurrence: 1 }],
+    }],
+    facts: [{
+      factId: `fact-status-${chapter}`,
+      subject: '林岚',
+      predicate: 'status',
+      object: alive ? 'alive' : 'dead',
+      validFromChapter: chapter,
+      validToChapter: null,
+      sourceRecordId: 'r1',
+      origin: 'derived',
+      supersedes: null,
+      confidence: 0.9,
+      evidence: [{ quote, occurrence: 1 }],
+    }],
+    beliefs: [],
+    loops: [],
+  })
+}
+
+test('ledger conflicts park as pending for adjudication instead of vanishing', async () => {
+  const model = new FakeModel([
+    P1_DRAFT, statusExtraction(1, true, '人还好好地活着'), coveragePayload(), warningReviewFor('人还好好地活着'),
+    P2_DRAFT, statusExtraction(2, false, '已经没有呼吸'), coveragePayload(), coveragePayload(), warningReviewFor('已经没有呼吸'),
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await setCharacters(dir, [{
+      name: '林岚',
+      status: 'alive',
+      introducedIn: 1,
+      knows: [{ fact: '账本缺页', fromChapter: 1 }],
+    }])
+    await setContract(dir, 1, { mustHappen: ['林岚平安值完夜班'] })
+    assert.equal((await checkContract(dir, 1)).code, 0)
+    assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['timeline', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+
+    await setContract(dir, 2, { mustHappen: ['林岚火场被困'] })
+    assert.equal((await checkContract(dir, 2)).code, 0)
+    assert.equal((await runCli(dir, ['write', '2', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    assert.equal((await runCli(dir, ['check', '2', '--json'])).code, 0)
+    const extracted = await runCli(dir, ['extract', '2', '--json'])
+    assert.equal(extracted.code, 0, extracted.stdout + extracted.stderr)
+    const payload = parseJson<{
+      passed: boolean
+      rejected: unknown[]
+      pending: Array<{ pendingId: string; subject: string; object: string; priorObject: string; conflictWith: string }>
+      facts: Array<{ predicate: string; object: string }>
+    }>(extracted.stdout)
+    assert.equal(payload.passed, true, 'pending must not fail extraction')
+    assert.deepEqual(payload.rejected, [])
+    assert.equal(payload.pending.length, 1)
+    const pending = payload.pending[0]!
+    assert.equal(pending.subject, '林岚')
+    assert.equal(pending.object, 'dead')
+    assert.equal(pending.priorObject, 'alive')
+    assert.equal(pending.conflictWith, 'fact-status-1')
+    assert.ok(!payload.facts.some(fact => fact.predicate === 'status'), 'conflicting fact must stay out of the ledger')
+
+    const status = parseJson<{ pendingConflicts?: Array<{ chapter: number; pendingId: string; subject: string }> }>(
+      (await runCli(dir, ['status', '--json'])).stdout,
+    )
+    assert.ok(status.pendingConflicts?.some(item => item.chapter === 2 && item.subject === '林岚'))
+
+    const audited = await runCli(dir, ['audit', '2', '--json'])
+    assert.equal(audited.code, 0, audited.stdout + audited.stderr)
+    const auditPayload = parseJson<{ warnings: string[]; passed: boolean }>(audited.stdout)
+    assert.ok(auditPayload.warnings[0]?.includes('待裁决冲突'), 'audit must surface pending at the top')
+    assert.equal(auditPayload.passed, true, 'pending must not block the audit')
+
+    const listed = parseJson<{ unresolved: Array<{ pendingId: string }>; resolved: unknown[] }>(
+      (await runCli(dir, ['pending', '2', '--json'])).stdout,
+    )
+    assert.equal(listed.unresolved.length, 1)
+    assert.equal(listed.unresolved[0]!.pendingId, pending.pendingId)
+
+    const decided = await runCli(dir, [
+      'pending', 'decide', '2', pending.pendingId, '--as', 'text', '--reason', '正文为准：火场殉职', '--json',
+    ])
+    assert.equal(decided.code, 0, decided.stdout + decided.stderr)
+    const relisted = parseJson<{ unresolved: unknown[]; resolved: Array<{ pendingId: string }> }>(
+      (await runCli(dir, ['pending', '2', '--json'])).stdout,
+    )
+    assert.equal(relisted.unresolved.length, 0)
+    assert.equal(relisted.resolved[0]!.pendingId, pending.pendingId)
+
+    const reaudited = await runCli(dir, ['audit', '2', '--json'])
+    assert.equal(reaudited.code, 0, reaudited.stdout + reaudited.stderr)
+    const reauditPayload = parseJson<{ warnings: string[]; quantityBreaks: unknown[] }>(reaudited.stdout)
+    assert.ok(!reauditPayload.warnings.some(line => line.includes('待裁决冲突')))
+
+    assert.equal((await runCli(dir, ['review', '2', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '2', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['rebuild', '--projection', 'ledger', '--json'])).code, 0, 'decided fact replays cleanly')
+
+    const afterStatus = parseJson<{ pendingConflicts?: unknown[] }>(
+      (await runCli(dir, ['status', '--json'])).stdout,
+    )
+    assert.equal(afterStatus.pendingConflicts, undefined, 'warning clears after adjudication')
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 async function prepareP05(model: FakeModel): Promise<string> {
   const dir = await initBook(model.baseUrl, [], 'p05')
   await contract1(dir)

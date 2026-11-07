@@ -9,6 +9,7 @@ import { textAtSpan } from './stages.ts'
 import { assertFinalIntegrity, currentCommit, finalPath, listCommits, readCommit, readMainline } from './ledger.ts'
 import { loadContract } from './contract.ts'
 import { withheldForChapter } from './materials.ts'
+import { listUnresolvedPending } from './pending.ts'
 import { impactSummary, pendingImpactItems } from './impact.ts'
 import {
   assertProjectionCurrent,
@@ -60,6 +61,15 @@ export interface ProjectStatus {
     chapter: number
     withheld: Array<{ sourceId: string; revealChapter: number; excerpt: string }>
   }
+  /** 已有抽取 stage 里仍未裁决的账本冲突；带病续写前必须能看到。 */
+  pendingConflicts?: Array<{
+    chapter: number
+    pendingId: string
+    subject: string
+    predicate: string
+    object: string
+    priorObject: string
+  }>
 }
 
 export async function projectStatus(root: string): Promise<ProjectStatus> {
@@ -101,6 +111,17 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
   } catch {
     // 下一章没有合同时不展示披露控制；扣留与否由写作时的装配报告说了算
   }
+  const pendingConflicts = (await listUnresolvedPending(
+    root,
+    [...chapters.map(item => item.chapter), ...drafts],
+  )).map(item => ({
+    chapter: item.chapter,
+    pendingId: item.pendingId,
+    subject: item.subject,
+    predicate: item.predicate,
+    object: item.object,
+    priorObject: item.priorObject,
+  }))
   return {
     root,
     title: project.title,
@@ -118,6 +139,7 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
     searchIndex: await searchIndexHealth(root),
     memory: await memoryStatus(root),
     ...(disclosure ? { disclosure } : {}),
+    ...(pendingConflicts.length > 0 ? { pendingConflicts } : {}),
   }
 }
 

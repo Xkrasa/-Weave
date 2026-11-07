@@ -16,6 +16,7 @@ import { resolveTaskConfig } from './model-policy.ts'
 import { appendUsage } from './usage.ts'
 import { conflictError, validationError } from './errors.ts'
 import { checkBalances } from './story-ledger.ts'
+import { loadPendingDecisions } from './pending.ts'
 
 const AUDIT_SYSTEM_PROMPT = [
   '你是覆盖审计器，只寻找第一遍抽取漏掉的重要事件、状态变化、时间表达和合同节点。',
@@ -55,12 +56,25 @@ export async function runCoverageAudit(
     ))
     .map(record => record.recordId)
   const expectedDimensions = await deriveExpectedDimensions(root, contract)
-  const dimensions = evaluateDimensions(expectedDimensions, extraction)
+  // 待裁决的事实仍算维度覆盖：变化已抽取到，裁决只决定它是否入账，不该把覆盖判定也扣下。
+  const pendingFacts = (extraction.pending ?? [])
+    .map(record => record.raw as typeof extraction.facts[number])
+  const dimensions = evaluateDimensions(
+    expectedDimensions,
+    pendingFacts.length > 0 ? { ...extraction, facts: [...extraction.facts, ...pendingFacts] } : extraction,
+  )
   const registry = await loadCharacters(root)
   const timeline = validateTimeline(extraction.timeline ?? [], registry)
   const secondPass = await runSecondPass(root, chapter, contract, draft, extraction, config, signal)
   const quantityBreaks = await checkBalances(root, chapter, extraction.facts)
   const warnings: string[] = []
+  const decidedPending = new Set((await loadPendingDecisions(root))
+    .filter(decision => decision.chapter === chapter)
+    .map(decision => decision.pendingId))
+  const unresolvedPending = (extraction.pending ?? []).filter(record => !decidedPending.has(record.pendingId))
+  if (unresolvedPending.length > 0) {
+    warnings.unshift(`待裁决冲突 ${unresolvedPending.length} 条：执行 weave pending ${chapter} 查看并裁决`)
+  }
   if (uncoveredSegments.length > 0) warnings.push(`有 ${uncoveredSegments.length} 个段落没有证据覆盖`)
   if (unplanned.length > 5) warnings.push(`有 ${unplanned.length} 条未列入合同的事件，需人工确认`)
   if (dimensions.missed.length > 0) warnings.push(`未交代必检维度：${dimensions.missed.join('、')}`)

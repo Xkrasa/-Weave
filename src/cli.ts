@@ -48,6 +48,7 @@ import { runCoverageAudit, runTimelineReport } from './core/audit.ts'
 import { runReview } from './core/review.ts'
 import { runEffectReview } from './core/effect-review.ts'
 import { applyWaivers, createWaivers, loadWaivers, revokeWaiver } from './core/waivers.ts'
+import { decidePending, listPending, listUnresolvedPending } from './core/pending.ts'
 import {
   ignoreFinding,
   mergeRevision,
@@ -163,6 +164,8 @@ async function main(): Promise<number> {
       return commandWaive(root, parsed, json)
     case 'waivers':
       return commandWaivers(root, parsed, json)
+    case 'pending':
+      return commandPending(root, parsed, json)
     case 'search':
       return commandSearch(root, parsed, json)
     case 'chunk':
@@ -404,6 +407,50 @@ async function commandWaive(root: string, parsed: Parsed, json: boolean): Promis
   )
   if (json) outputJson({ ok: true, waivers: created })
   else console.log(`已创建/复用 ${created.length} 条豁免`)
+  return 0
+}
+
+async function commandPending(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0] ?? 'list'
+  if (action === 'decide') {
+    const chapter = parseChapter(parsed.positionals[1])
+    const pendingId = parsed.positionals[2]
+    if (!pendingId) throw usageError('用法：weave pending decide <章号> <pendingId> --as text|ledger --reason 理由')
+    const as = String(parsed.flags.as ?? '')
+    if (as !== 'text' && as !== 'ledger') throw usageError('--as 只能是 text（以正文为准）或 ledger（以账本为准）')
+    const reason = requiredString(parsed, 'reason')
+    const decision = await decidePending(root, chapter, pendingId, as as 'text' | 'ledger', reason)
+    if (json) outputJson({ ok: true, decision })
+    else {
+      console.log(`已裁决 ${pendingId}：以${as === 'text' ? '正文' : '账本'}为准`)
+      console.log(`理由：${decision.reason}`)
+    }
+    return 0
+  }
+  const chapterArg = Number(parsed.positionals[0])
+  if (Number.isSafeInteger(chapterArg) && chapterArg > 0) {
+    const listed = await listPending(root, chapterArg)
+    if (json) outputJson({ ok: true, chapter: chapterArg, ...listed })
+    else {
+      console.log(`第 ${chapterArg} 章待裁决（${listed.unresolved.length} 未决 / ${listed.resolved.length} 已决）`)
+      for (const record of listed.unresolved) {
+        console.log(`- ${record.pendingId}：${record.subject} 的 ${record.predicate} 账本为「${record.priorObject}」，正文写「${record.object}」`)
+        console.log(`  引文：${record.quote}`)
+        console.log(`  裁决：weave pending decide ${chapterArg} ${record.pendingId} --as text|ledger --reason 理由`)
+      }
+    }
+    return 0
+  }
+  if (action !== 'list') throw usageError('用法：weave pending [list|<章号>|decide]')
+  const status = await projectStatus(root)
+  const unresolved = await listUnresolvedPending(root, [...status.chapters.map(item => item.chapter), ...status.drafts])
+  if (json) outputJson({ ok: true, unresolved })
+  else {
+    console.log(`未裁决冲突：${unresolved.length} 条`)
+    for (const record of unresolved) {
+      console.log(`- 第 ${record.chapter} 章 ${record.pendingId}：${record.subject} 的 ${record.predicate} 账本为「${record.priorObject}」，正文写「${record.object}」`)
+    }
+  }
   return 0
 }
 

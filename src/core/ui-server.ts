@@ -15,6 +15,7 @@ import { runExtraction } from './extraction.ts'
 import { runCoverageAudit } from './audit.ts'
 import { runReview } from './review.ts'
 import { applyWaivers, createWaivers, loadWaivers, revokeWaiver } from './waivers.ts'
+import { decidePending, listPending, listUnresolvedPending } from './pending.ts'
 import {
   ignoreFinding,
   loadRevision,
@@ -391,6 +392,29 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
   }
   if (request.method === 'DELETE' && parts[1] === 'waivers' && parts[2]) {
     sendJson(response, 200, await revokeWaiver(root, parts[2]))
+    return
+  }
+  if (url.pathname === '/api/pending' && request.method === 'GET') {
+    const chapterParam = numberParam(url.searchParams.get('chapter'))
+    if (chapterParam !== undefined) {
+      const listed = await listPending(root, chapterParam)
+      sendJson(response, 200, { chapter: chapterParam, ...listed })
+      return
+    }
+    const status = await projectStatus(root)
+    sendJson(response, 200, {
+      pending: await listUnresolvedPending(root, [
+        ...status.chapters.map(item => item.chapter),
+        ...status.drafts,
+      ]),
+    })
+    return
+  }
+  if (url.pathname === '/api/pending/decide' && request.method === 'POST') {
+    const body = await readJsonBody<{ chapter?: number; pendingId?: string; as?: string; reason?: string }>(request)
+    if (!body.chapter || !body.pendingId || !body.reason) throw usageError('缺少 chapter、pendingId 或 reason')
+    if (body.as !== 'text' && body.as !== 'ledger') throw usageError('as 只能是 text 或 ledger')
+    sendJson(response, 200, await decidePending(root, body.chapter, body.pendingId, body.as, body.reason))
     return
   }
   if (request.method === 'GET' && parts[1] === 'chunks' && parts[2]) {

@@ -44,9 +44,25 @@ export interface ExtractionReport {
   beliefs: LedgerBelief[]
   loops: LoopChange[]
   rejected: RejectedRecord[]
+  /** 与账本冲突、待作者裁决的记录：不是被丢弃，而是被扣下。 */
+  pending: PendingRecord[]
   model: string
   usage?: RunUsage
   passed: boolean
+}
+
+export interface PendingRecord {
+  pendingId: string
+  chapter: number
+  subject: string
+  predicate: string
+  object: string
+  quote: string
+  conflictWith: string
+  priorObject: string
+  reason: 'contradicts-ledger'
+  raw: unknown
+  createdAt: string
 }
 
 export interface TimelineEvent {

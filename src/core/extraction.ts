@@ -3,6 +3,7 @@ import type {
   EvidenceSpan,
   ExtractedRecord,
   ExtractionReport,
+  PendingRecord,
   RejectedRecord,
   TimelineEvent,
 } from './stage-types.ts'
@@ -115,6 +116,9 @@ export function evaluateDimensions(
 }
 
 const UNCHANGED_WITH_REASON = /^(?:unchanged|无变化)\s*[:：]\s*(\S.*)$/i
+
+/** 单值状态谓词：同一时刻只能有一个值，新旧不一致且未声明 supersedes 时进待裁决。 */
+const CONFLICT_PREDICATES = new Set(['status', 'condition', 'injury', 'health', 'alive', 'dead'])
 
 /** A bare "unchanged" is not an explanation; the reason must carry some substance. */
 function isExplicitUnchanged(value: string): boolean {
@@ -541,6 +545,38 @@ export async function runExtraction(
     rejected.push({ reason: '没有抽取到记录，且未提供 noEventsReason', raw: null })
   }
 
+  // 与账本冲突的单值状态（如正文写已死、账本记录存活）不丢弃也不采纳：扣进待裁决，由作者定夺。
+  const pending: PendingRecord[] = []
+  if (chapter > 1) {
+    const priorLedger = await collectLedger(root, chapter - 1)
+    const priorState = effectiveFacts(priorLedger.facts, chapter)
+    for (let index = facts.length - 1; index >= 0; index -= 1) {
+      const fact = facts[index]!
+      if (!CONFLICT_PREDICATES.has(fact.predicate)) continue
+      const clash = priorState.find(prior =>
+        prior.subject === fact.subject
+        && prior.predicate === fact.predicate
+        && prior.object !== fact.object
+        && fact.supersedes !== prior.factId,
+      )
+      if (!clash) continue
+      facts.splice(index, 1)
+      pending.unshift({
+        pendingId: `pending-${chapter}-${fact.factId}`,
+        chapter,
+        subject: fact.subject,
+        predicate: fact.predicate,
+        object: fact.object,
+        quote: fact.evidence[0]?.quote ?? '',
+        conflictWith: clash.factId,
+        priorObject: clash.object,
+        reason: 'contradicts-ledger',
+        raw: fact,
+        createdAt: new Date().toISOString(),
+      })
+    }
+  }
+
   const report: ExtractionReport = {
     schemaVersion: 1,
     chapter,
@@ -555,6 +591,7 @@ export async function runExtraction(
     beliefs,
     loops,
     rejected,
+    pending,
     model,
     usage: result.usage,
     passed: rejected.length === 0,
