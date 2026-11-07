@@ -5,6 +5,7 @@ import { atomicWrite, atomicWriteJson, ensureDir, fileHash, isMissing, listFiles
 import { conflictError, validationError } from './errors.ts'
 import { projectPaths } from './project.ts'
 import { hashText } from './hash.ts'
+import { lcsMatches } from './lcs.ts'
 import { recordIdeaPromotionDecision } from './pending.ts'
 
 export type IdeaStatus = 'inbox' | 'promoted' | 'archived'
@@ -687,39 +688,15 @@ function isWithin(child: string, parent: string): boolean {
 function lineDiff(before: string, after: string): string {
   const left = before.split('\n')
   const right = after.split('\n')
-  const rows = left.length + 1
-  const cols = right.length + 1
-  const table: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(0))
-  for (let i = left.length - 1; i >= 0; i -= 1) {
-    for (let j = right.length - 1; j >= 0; j -= 1) {
-      table[i]![j] = left[i] === right[j]
-        ? table[i + 1]![j + 1]! + 1
-        : Math.max(table[i + 1]![j]!, table[i]![j + 1]!)
-    }
-  }
   const lines: string[] = []
-  let i = 0
-  let j = 0
-  while (i < left.length && j < right.length) {
-    if (left[i] === right[j]) {
-      lines.push(` ${left[i]}`)
-      i += 1
-      j += 1
-    } else if (table[i + 1]![j]! >= table[i]![j + 1]!) {
-      lines.push(`-${left[i]}`)
-      i += 1
-    } else {
-      lines.push(`+${right[j]}`)
-      j += 1
-    }
-  }
-  while (i < left.length) {
-    lines.push(`-${left[i]}`)
-    i += 1
-  }
-  while (j < right.length) {
-    lines.push(`+${right[j]}`)
-    j += 1
+  let b = 0
+  let a = 0
+  for (const match of [...lcsMatches(left, right), { before: left.length, after: right.length }]) {
+    for (const line of left.slice(b, match.before)) lines.push(`-${line}`)
+    for (const line of right.slice(a, match.after)) lines.push(`+${line}`)
+    if (match.before < left.length) lines.push(` ${left[match.before]}`)
+    b = match.before + 1
+    a = match.after + 1
   }
   return lines.join('\n')
 }

@@ -3,6 +3,7 @@ import { currentCommit, finalPath } from './ledger.ts'
 import { readDraft } from './stages.ts'
 import { hashText } from './hash.ts'
 import { conflictError } from './errors.ts'
+import { lcsMatches } from './lcs.ts'
 
 export interface CompareRow {
   index: number
@@ -60,30 +61,7 @@ function splitParagraphs(text: string): string[] {
 }
 
 function diffParagraphs(before: string[], after: string[]): CompareRow[] {
-  const rows = before.length + 1
-  const cols = after.length + 1
-  const table: number[][] = Array.from({ length: rows }, () => new Array<number>(cols).fill(0))
-  for (let i = before.length - 1; i >= 0; i -= 1) {
-    for (let j = after.length - 1; j >= 0; j -= 1) {
-      table[i]![j] = before[i] === after[j]
-        ? table[i + 1]![j + 1]! + 1
-        : Math.max(table[i + 1]![j]!, table[i]![j + 1]!)
-    }
-  }
-  const matches: Array<{ before: number; after: number }> = []
-  let i = 0
-  let j = 0
-  while (i < before.length && j < after.length) {
-    if (before[i] === after[j]) {
-      matches.push({ before: i, after: j })
-      i += 1
-      j += 1
-    } else if (table[i + 1]![j]! >= table[i]![j + 1]!) {
-      i += 1
-    } else {
-      j += 1
-    }
-  }
+  const matches = lcsMatches(before, after)
 
   const result: CompareRow[] = []
   let b = 0
