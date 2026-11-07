@@ -571,6 +571,7 @@ async function writeSegmentedChapter(
     input.options.onEvent?.({ ...event, seq: seq++, runId: run.runId, chapter })
   }
   emit({ type: 'started' })
+  let failedRecord: SegmentRunRecord | undefined
 
   const contextHashes: string[] = []
   const included = new Set<string>()
@@ -590,6 +591,7 @@ async function writeSegmentedChapter(
       const segmentConfig = segmentModelConfig(input.modelConfig, segment.targetWords)
       let acceptedText = ''
       let acceptedUsage: RunUsage | undefined
+      let acceptedAttempt = 0
       let lastRetryReasons: string[] = []
       let acceptedContext: import('./context.ts').AssembledContext | null = null
       for (let attempt = 1; attempt <= MAX_SEGMENT_ATTEMPTS; attempt += 1) {
@@ -642,6 +644,7 @@ async function writeSegmentedChapter(
         if (checked.passed) {
           acceptedText = checked.text
           acceptedUsage = result.usage
+          acceptedAttempt = attempt
           acceptedContext = context
           break
         }
@@ -654,6 +657,7 @@ async function writeSegmentedChapter(
         lastRetryReasons = checked.retryReasons
         if (attempt === MAX_SEGMENT_ATTEMPTS) {
           await markSegmentStatus(root, chapter, segment.segmentId, 'failed')
+          failedRecord = { segmentId: segment.segmentId, status: 'failed', attempts: attempt }
           throw validationError(
             `第 ${segment.segmentId} 段连续 ${MAX_SEGMENT_ATTEMPTS} 次未通过校验：${checked.retryReasons.join('；')}`,
           )
@@ -666,6 +670,7 @@ async function writeSegmentedChapter(
         segmentId: segment.segmentId,
         status: 'draft',
         contentHash: saved.contentHash,
+        attempts: acceptedAttempt,
         ...(acceptedUsage ? { usage: acceptedUsage } : {}),
       }
       summaries.push(summary)
@@ -738,7 +743,7 @@ async function writeSegmentedChapter(
         partialPath: savedPartial ? path.relative(root, savedPartial).split(path.sep).join('/') : run.partialPath,
         attempts: (error as { attempts?: RunRecord['attempts'] }).attempts,
       }),
-      segments: summaries,
+      segments: failedRecord ? [...summaries, failedRecord] : summaries,
     }
     await saveRun(root, finished)
     emit(

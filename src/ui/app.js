@@ -632,7 +632,7 @@ function renderSegmentsTab(payload, esc) {
         <span class="status-tag status-${esc(segmentStatus)}">${esc(SEGMENT_STATUS_LABELS[segmentStatus] || segmentStatus)}</span>
       </div>
       <p class="small muted">节拍：${esc(segment.beatIds.join('、') || '—')}</p>
-      <p class="small">目标 ${segment.targetWords} 字 · 实际 ${stat ? stat.chars : '—'} 字${record?.usage?.totalTokens ? ` · ${record.usage.totalTokens} tokens` : ''}</p>
+      <p class="small">目标 ${segment.targetWords} 字 · 实际 ${stat ? stat.chars : '—'} 字${record?.usage?.totalTokens ? ` · ${record.usage.totalTokens} tokens` : ''} · 重试 ${record?.attempts === undefined ? '—' : Math.max(0, record.attempts - 1)} 次</p>
       <p class="small">${esc(segment.goal)}</p>
       <p class="small muted">入口：${esc(segment.entryState)} → 出口：${esc(segment.exitState)}</p>
       ${failed && payload.run ? `<div class="finding-actions"><button data-segment-resume="${esc(payload.run.runId)}">重试失败段 / 从该段恢复</button></div>` : ''}

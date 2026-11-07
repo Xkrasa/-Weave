@@ -427,6 +427,8 @@ export interface SegmentRunRecord {
   status: 'planned' | 'generating' | 'draft' | 'checked' | 'approved' | 'failed'
   contentHash?: string
   usage?: RunUsage
+  /** Model attempts spent on this segment; absent for runs written before it was recorded. */
+  attempts?: number
 }
 
 export interface ProjectionState {

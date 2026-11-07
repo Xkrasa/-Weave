@@ -358,11 +358,13 @@ test('a failed segment stops the chapter and resume starts from the first unfini
         status: string
         draftingStrategy?: string
         partialPath?: string
-        segments?: Array<{ segmentId: string; status: string; contentHash?: string }>
+        segments?: Array<{ segmentId: string; status: string; contentHash?: string; attempts?: number }>
       }))
     const failedRun = runs.find(run => run.status === 'failed' && run.draftingStrategy === 'segmented')
     assert.ok(failedRun)
-    assert.deepEqual(failedRun!.segments?.map(segment => segment.segmentId), ['seg-01'])
+    assert.deepEqual(failedRun!.segments?.map(segment => segment.segmentId), ['seg-01', 'seg-02'])
+    assert.equal(failedRun!.segments![1]!.status, 'failed')
+    assert.equal(failedRun!.segments![1]!.attempts, 3)
     const firstHash = failedRun!.segments![0]!.contentHash
 
     const plan = JSON.parse(await readFile(path.join(dir, '.weave', 'segments', 'chapter-001', 'plan.json'), 'utf8')) as {
