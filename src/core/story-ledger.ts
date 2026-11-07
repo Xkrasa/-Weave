@@ -8,6 +8,7 @@ import type {
   LedgerFact,
   LoopChange,
   OpenLoop,
+  QuantityBreak,
 } from './types.ts'
 import type { ExtractionReport } from './stage-types.ts'
 import { readCommit, readMainline } from './ledger.ts'
@@ -288,6 +289,62 @@ export async function collectLedger(root: string, throughChapter?: number): Prom
     facts: sources.facts.map(item => item.record),
     beliefs: sources.beliefs.map(item => item.record),
   }
+}
+
+/**
+ * 数值总账校验：按 subject + predicate + unit 归并全部带 quantity 的事实（含被取代的——每笔变化都发生过），
+ * 逐章验证 上一结余 + 变化 === 本章结余。基线不明（balance 为 null）只重置锚点、不判对错。
+ * 找到的差异交作者裁决，不阻断定稿。
+ */
+export async function checkBalances(
+  root: string,
+  throughChapter?: number,
+  /** 当前章抽取 stage 里的事实：审计发生在 finalize 之前，本账还没进 commit。 */
+  stageFacts: LedgerFact[] = [],
+): Promise<QuantityBreak[]> {
+  const ledger = await collectLedger(root, throughChapter)
+  const knownIds = new Set(ledger.facts.map(fact => fact.factId))
+  const allFacts = [...ledger.facts, ...stageFacts.filter(fact => !knownIds.has(fact.factId))]
+  const groups = new Map<string, LedgerFact[]>()
+  for (const fact of allFacts) {
+    if (!fact.quantity) continue
+    const key = `${fact.subject} ${fact.predicate} ${fact.quantity.unit}`
+    const group = groups.get(key)
+    if (group) group.push(fact)
+    else groups.set(key, [fact])
+  }
+  const breaks: QuantityBreak[] = []
+  for (const group of groups.values()) {
+    const ordered = [...group].sort((a, b) => a.chapter - b.chapter || a.validFromChapter - b.validFromChapter)
+    let anchor: number | null = null
+    for (const fact of ordered) {
+      const quantity = fact.quantity
+      if (!quantity) continue
+      if (quantity.balance === null) {
+        anchor = null
+        continue
+      }
+      if (anchor !== null) {
+        const expected: number = anchor + quantity.delta
+        if (expected !== quantity.balance) {
+          breaks.push({
+            subject: fact.subject,
+            predicate: fact.predicate,
+            unit: quantity.unit,
+            chapter: fact.chapter,
+            factId: fact.factId,
+            previousBalance: anchor,
+            delta: quantity.delta,
+            statedBalance: quantity.balance,
+            expectedBalance: expected,
+            quote: fact.evidence[0]?.quote ?? '',
+          })
+        }
+      }
+      anchor = quantity.balance
+    }
+  }
+  return breaks
 }
 
 export function effectiveFacts(facts: LedgerFact[], chapter: number): LedgerFact[] {

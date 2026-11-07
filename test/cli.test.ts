@@ -1003,6 +1003,110 @@ test('canon reveal withholding keeps unrevealed materials out of the prompt', as
   }
 })
 
+const Q1_DRAFT = '林岚清点袋中银元，数出一百五十枚。'
+const Q2_DRAFT = '林岚交给船老大二十枚银元，袋里还剩一百三十枚。'
+const Q3_DRAFT = '林岚又付给码头苦力十五枚银元，她说袋里还剩一百二十枚。'
+
+function quantityExtraction(chapter: number, summary: string, quote: string, delta: number, balance: number | null): string {
+  return JSON.stringify({
+    summary: `${summary}。`,
+    noEventsReason: null,
+    records: [{
+      recordId: 'r1',
+      kind: 'event',
+      summary,
+      participants: ['林岚'],
+      location: '海港',
+      storyTime: `第 ${chapter} 天`,
+      payload: {},
+      evidence: [{ quote, occurrence: 1 }],
+    }],
+    timeline: [{
+      eventId: 'e1',
+      recordId: 'r1',
+      summary,
+      dayOffset: 0,
+      durationDays: 0,
+      participants: ['林岚'],
+      causedBy: [],
+      type: 'main',
+      evidence: [{ quote, occurrence: 1 }],
+    }],
+    facts: [{
+      factId: `fact-yinyuan-${chapter}`,
+      subject: '林岚',
+      predicate: 'possession',
+      object: '银元袋',
+      quantity: { delta, balance, unit: '银元' },
+      validFromChapter: chapter,
+      validToChapter: null,
+      sourceRecordId: 'r1',
+      origin: 'derived',
+      supersedes: null,
+      confidence: 0.9,
+      evidence: [{ quote, occurrence: 1 }],
+    }],
+    beliefs: [],
+    loops: [],
+  })
+}
+
+test('quantity ledger breaks surface in audit without blocking finalize', async () => {
+  const model = new FakeModel([
+    Q1_DRAFT, quantityExtraction(1, '林岚清点银元', '数出一百五十枚', 0, 150), coveragePayload(), warningReviewFor('数出一百五十枚'),
+    Q2_DRAFT, quantityExtraction(2, '林岚交出银元', '交给船老大二十枚银元', -20, 130), coveragePayload(), warningReviewFor('交给船老大二十枚银元'),
+    Q3_DRAFT, quantityExtraction(3, '林岚再付银元', '付给码头苦力十五枚银元', -15, 120), coveragePayload(), warningReviewFor('付给码头苦力十五枚银元'),
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  await setCharacters(dir, [{
+    name: '林岚',
+    status: 'alive',
+    introducedIn: 1,
+    knows: [{ fact: '账本缺页', fromChapter: 1 }],
+  }])
+  const mustHappen = ['林岚清点银元', '林岚交出银元', '林岚再付银元']
+  const audits: Array<{ quantityBreaks: Array<{ subject: string; unit: string; chapter: number; previousBalance: number | null; delta: number; statedBalance: number; expectedBalance: number }>; passed: boolean }> = []
+  try {
+    for (const chapter of [1, 2, 3]) {
+      await setContract(dir, chapter, { mustHappen: [mustHappen[chapter - 1]!] })
+      const checked = await checkContract(dir, chapter)
+      assert.equal(checked.code, 0, checked.stderr)
+      const written = await runCli(dir, ['write', String(chapter), '--json'], { WEAVE_API_KEY: SECRET })
+      assert.equal(written.code, 0, written.stderr)
+      const rechecked = await runCli(dir, ['check', String(chapter), '--json'])
+      assert.equal(rechecked.code, 0, rechecked.stdout + rechecked.stderr)
+      const extracted = await runCli(dir, ['extract', String(chapter), '--json'])
+      assert.equal(extracted.code, 0, extracted.stdout + extracted.stderr)
+      const timeline = await runCli(dir, ['timeline', String(chapter), '--json'])
+      assert.equal(timeline.code, 0, timeline.stdout + timeline.stderr)
+      const audited = await runCli(dir, ['audit', String(chapter), '--json'])
+      assert.equal(audited.code, 0, audited.stdout + audited.stderr)
+      audits.push(parseJson<typeof audits[number]>(audited.stdout))
+      const reviewed = await runCli(dir, ['review', String(chapter), '--json'])
+      assert.equal(reviewed.code, 0, reviewed.stdout + reviewed.stderr)
+      const finalized = await runCli(dir, ['finalize', String(chapter), '--json'])
+      assert.equal(finalized.code, 0, finalized.stdout + finalized.stderr)
+    }
+
+    assert.deepEqual(audits[0]!.quantityBreaks, [])
+    assert.deepEqual(audits[1]!.quantityBreaks, [])
+    assert.equal(audits[2]!.quantityBreaks.length, 1)
+    const brk = audits[2]!.quantityBreaks[0]!
+    assert.equal(brk.subject, '林岚')
+    assert.equal(brk.unit, '银元')
+    assert.equal(brk.chapter, 3)
+    assert.equal(brk.previousBalance, 130)
+    assert.equal(brk.delta, -15)
+    assert.equal(brk.statedBalance, 120)
+    assert.equal(brk.expectedBalance, 115)
+    assert.equal(audits[2]!.passed, true, 'quantity breaks must not block the audit')
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 async function prepareP05(model: FakeModel): Promise<string> {
   const dir = await initBook(model.baseUrl, [], 'p05')
   await contract1(dir)

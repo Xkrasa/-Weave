@@ -15,6 +15,7 @@ import { completeJsonObject } from './model.ts'
 import { resolveTaskConfig } from './model-policy.ts'
 import { appendUsage } from './usage.ts'
 import { conflictError, validationError } from './errors.ts'
+import { checkBalances } from './story-ledger.ts'
 
 const AUDIT_SYSTEM_PROMPT = [
   '你是覆盖审计器，只寻找第一遍抽取漏掉的重要事件、状态变化、时间表达和合同节点。',
@@ -58,11 +59,17 @@ export async function runCoverageAudit(
   const registry = await loadCharacters(root)
   const timeline = validateTimeline(extraction.timeline ?? [], registry)
   const secondPass = await runSecondPass(root, chapter, contract, draft, extraction, config, signal)
+  const quantityBreaks = await checkBalances(root, chapter, extraction.facts)
   const warnings: string[] = []
   if (uncoveredSegments.length > 0) warnings.push(`有 ${uncoveredSegments.length} 个段落没有证据覆盖`)
   if (unplanned.length > 5) warnings.push(`有 ${unplanned.length} 条未列入合同的事件，需人工确认`)
   if (dimensions.missed.length > 0) warnings.push(`未交代必检维度：${dimensions.missed.join('、')}`)
   warnings.push(...timeline.warnings)
+  for (const item of quantityBreaks) {
+    warnings.push(
+      `数值总账对不上：${item.subject} 的 ${item.unit}（第 ${item.chapter} 章）上章 ${item.previousBalance} + 变化 ${item.delta} 应为 ${item.expectedBalance}，正文写 ${item.statedBalance}`,
+    )
+  }
 
   const audit: CoverageAudit = {
     schemaVersion: 1,
@@ -77,6 +84,7 @@ export async function runCoverageAudit(
     noEventsReason: extraction.noEventsReason,
     timeline,
     secondPass,
+    quantityBreaks,
     warnings,
     passed:
       extraction.passed

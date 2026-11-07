@@ -22,6 +22,7 @@ const SYSTEM_PROMPT = [
   '正文没写的不补、不猜：记录只能来自本章正文实际写出的内容，不得依据合同、常识或前情补齐正文没有的情节。',
   '推不出来的数不编：数量、金额、距离、时距等数值只有正文明确写出才记录；推不出来就不记，宁缺不凑。',
   '正文与合同或必检维度不一致时，按正文如实记录并在 summary 指出差异；不得为迎合合同改写事实，也不得擅自裁决以哪边为准。',
+  '数值类事实（银两、灵石、库存等）必须给出 quantity：delta 与 balance 都用整数最小单位（不用小数）；基线不明时 balance 填 null 且 unverified 为 true，禁止反推结余。',
   '对于提示中列出的每个必检维度（expectedDimensions），必须在对应结构字段（records/facts/beliefs/loops）中给出带证据的变化，或在 dimensions 对象中显式说明“unchanged: 具体原因”。',
   '不得用 unchanged 掩盖正文中实际发生的变化；没有具体原因的空声明视为未交代。',
 ].join('\n')
@@ -214,8 +215,9 @@ export async function runExtraction(
       facts: [{
         factId: 'fact-1',
         subject: '人物名',
-        predicate: 'location',
-        object: '地点',
+        predicate: 'possession',
+        object: '持有物',
+        quantity: { delta: -20, balance: 130, unit: '银元' },
         validFromChapter: chapter,
         validToChapter: null,
         sourceRecordId: 'r1',
@@ -384,6 +386,33 @@ export async function runExtraction(
       rejected.push({ recordId: factId, reason: '事实缺少 subject/predicate/object', raw: item })
       return
     }
+    const quantityRaw = objectOrNull(factRaw.quantity)
+    if (factRaw.quantity !== undefined && factRaw.quantity !== null && !quantityRaw) {
+      rejected.push({ recordId: factId, reason: '数值总账格式非法：quantity 必须是对象', raw: item })
+      return
+    }
+    let quantity: LedgerFact['quantity'] | undefined
+    if (quantityRaw) {
+      const balanceRaw = quantityRaw.balance
+      const balance = balanceRaw === undefined || balanceRaw === null ? null : balanceRaw
+      const deltaValid = typeof quantityRaw.delta === 'number' && Number.isSafeInteger(quantityRaw.delta)
+      const balanceValid = balance === null || (typeof balance === 'number' && Number.isSafeInteger(balance))
+      const unitValid = typeof quantityRaw.unit === 'string' && quantityRaw.unit.trim().length > 0
+      if (!deltaValid || !balanceValid || !unitValid) {
+        rejected.push({
+          recordId: factId,
+          reason: '数值总账格式非法：delta 与 balance 必须是整数（最小单位），unit 必须非空',
+          raw: item,
+        })
+        return
+      }
+      quantity = {
+        delta: quantityRaw.delta as number,
+        balance,
+        unit: (quantityRaw.unit as string).trim(),
+        ...(balance === null ? { unverified: true } : {}),
+      }
+    }
     const before = rejected.length
     const evidence = resolveEvidenceList(draft, chapter, factRaw.evidence, factId, rejected)
     if (evidence.length === 0 || rejected.length > before) {
@@ -404,6 +433,7 @@ export async function runExtraction(
       subject,
       predicate,
       object,
+      ...(quantity ? { quantity } : {}),
       validFromChapter,
       validToChapter,
       sourceEvent,

@@ -105,6 +105,7 @@ export interface CoverageAudit {
     rejected: string[]
   }
   warnings: string[]
+  quantityBreaks: import('./types.ts').QuantityBreak[]
   passed: boolean
 }
 

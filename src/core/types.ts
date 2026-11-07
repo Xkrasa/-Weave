@@ -228,6 +228,13 @@ export interface LedgerFact {
   subject: string
   predicate: string
   object: string
+  /** 数值总账（整数最小单位，不用小数）；balance 为 null 表示基线不明、只报变化量。可选字段，旧数据没有。 */
+  quantity?: {
+    delta: number
+    balance: number | null
+    unit: string
+    unverified?: boolean
+  }
   validFromChapter: number
   validToChapter: number | null
   sourceEvent?: string
@@ -235,6 +242,20 @@ export interface LedgerFact {
   supersedes?: string | null
   confidence: number
   evidence: EvidenceSpan[]
+}
+
+/** checkBalances 找到的对不上的账：三值齐全，交作者裁决，不阻断定稿。 */
+export interface QuantityBreak {
+  subject: string
+  predicate: string
+  unit: string
+  chapter: number
+  factId: string
+  previousBalance: number | null
+  delta: number
+  statedBalance: number
+  expectedBalance: number
+  quote: string
 }
 
 export type BeliefAttitude = 'knows' | 'believes' | 'suspects' | 'misbelieves' | 'doubts'

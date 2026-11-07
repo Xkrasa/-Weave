@@ -1149,6 +1149,9 @@ async function commandAudit(root: string, parsed: Parsed, json: boolean): Promis
     console.log(`合同节点：${report.contract.covered.length}/${report.contract.planned.length}`)
     for (const missed of report.contract.missed) console.log(`- 未覆盖：${missed}`)
     for (const error of report.timeline.errors) console.log(`- 时间线：${error}`)
+    for (const item of report.quantityBreaks) {
+      console.log(`- 数值总账：${item.subject} 的 ${item.unit}（第 ${item.chapter} 章）上章 ${item.previousBalance} + ${item.delta} 应为 ${item.expectedBalance}，正文写 ${item.statedBalance}`)
+    }
   }
   return report.passed ? 0 : 3
 }
