@@ -9,7 +9,7 @@ import type {
   StageKind,
 } from './stage-types.ts'
 import type { ContractCheckRecord } from './contract.ts'
-import { checkPath, contractHash, loadContract, requirePassingContractCheck } from './contract.ts'
+import { checkPath, contractHash, loadContract, requirePassingContractCheck, chapterFileStem } from './contract.ts'
 import { draftHash, loadStage, readDraft } from './stages.ts'
 import { listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
 import { projectPaths, loadModelConfig } from './project.ts'
@@ -17,6 +17,7 @@ import { contextCapacityTokens, effectiveContextWindow } from './config.ts'
 import { assembleChapterContext } from './materials.ts'
 import { readSegmentPlan, segmentTextPath, type SegmentPlanView, type ChapterSegment } from './segments.ts'
 import { readBeatCandidate, type BeatCandidateView } from './beats.ts'
+import { countProseChars } from './segment-checks.ts'
 import { assertNoPendingImpacts } from './impact.ts'
 import { assertProjectionCurrent } from './projections.ts'
 import { assertLedgerProjectionCurrent } from './ledger-projection.ts'
@@ -268,7 +269,7 @@ async function computeSegmentStats(
     const text = (await readTextIfExists(segmentTextPath(root, chapter, segment.segmentId)).catch(() => null)) ?? ''
     stats.push({
       segmentId: segment.segmentId,
-      chars: [...text.replace(/\s/g, '')].length,
+      chars: countProseChars(text),
       status: runtimeStatus.get(segment.segmentId) ?? segment.status,
     })
   }
@@ -373,7 +374,7 @@ function locationFields(location: ReturnType<typeof resolveEvidence>): {
 }
 
 async function listRevisionSummaries(root: string, chapter: number): Promise<RevisionSummary[]> {
-  const dir = path.join(projectPaths(root).revisions, String(chapter).padStart(3, '0'))
+  const dir = path.join(projectPaths(root).revisions, chapterFileStem(chapter))
   const draft = await readDraft(root, chapter).catch(() => '')
   const table = buildOffsetTable(draft)
   const summaries: RevisionSummary[] = []
@@ -502,7 +503,7 @@ async function buildGates(
   }
 
   const hash = draftHash(draft)
-  add('draft', '草稿存在', Boolean(draft.trim()), `${[...draft.replace(/\s/g, '')].length} 字`)
+  add('draft', '草稿存在', Boolean(draft.trim()), `${countProseChars(draft)} 字`)
   add(
     'content-check',
     '内容检查',

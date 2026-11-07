@@ -82,6 +82,3 @@ export function meaningfulKeywords(state: string): string[] {
     .slice(0, 6)
 }
 
-export function buildRetryReasons(result: SegmentCheckResult): string {
-  return result.retryReasons.join('；')
-}

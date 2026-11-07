@@ -16,6 +16,11 @@ import { finishRun, newRunId, saveRun } from './runs.ts'
 export type DraftingStrategy = 'prose-first' | 'beat-first' | 'segmented'
 export type BeatCandidateStatus = 'draft' | 'approved' | 'modified' | 'skipped'
 
+/** Shared whitelist for CLI/API strategy params; unknown values fall back to the caller's default. */
+export function parseDraftingStrategy(value: string | null | undefined): DraftingStrategy | undefined {
+  return value === 'prose-first' || value === 'beat-first' || value === 'segmented' ? value : undefined
+}
+
 export interface SceneBeat {
   goal: string
   obstacle: string

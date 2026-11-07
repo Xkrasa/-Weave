@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 import path from 'node:path'
 import { readFile, readdir } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
@@ -127,6 +127,7 @@ import {
   archiveIdea,
   applyPromotion,
   captureIdea,
+  formatIdeaScope,
   listIdeas,
   listStaleIdeas,
   loadPromotionProposal,
@@ -351,7 +352,7 @@ async function commandIdea(root: string, parsed: Parsed, json: boolean): Promise
         console.log(`已捕获想法 ${idea.id}`)
         console.log(`标题：${idea.title}`)
         console.log(`状态：${idea.status}`)
-        console.log(`范围：${formatIdeaScope(idea.scope)}`)
+        console.log(`范围：${formatIdeaScope(idea.scope, 'ref')}`)
         if (idea.tags.length) console.log(`标签：${idea.tags.join('、')}`)
       }
       return 0
@@ -371,7 +372,7 @@ async function commandIdea(root: string, parsed: Parsed, json: boolean): Promise
         for (const idea of filtered) {
           const promotion = idea.promotionState === 'stale' ? ' · 晋升目标已变化' : idea.promotionState === 'active' ? ' · 已晋升' : ''
           const tags = idea.tags.length ? ` · ${idea.tags.map(tag => `#${tag}`).join(' ')}` : ''
-          console.log(`${idea.id}  [${idea.status}] ${idea.title}（${formatIdeaScope(idea.scope)}）${tags}${promotion}`)
+          console.log(`${idea.id}  [${idea.status}] ${idea.title}（${formatIdeaScope(idea.scope, 'ref')}）${tags}${promotion}`)
         }
       }
       return 0
@@ -382,7 +383,7 @@ async function commandIdea(root: string, parsed: Parsed, json: boolean): Promise
       if (json) outputJson({ ok: true, idea: result.meta, body: result.body })
       else {
         console.log(`${result.meta.title}（${result.meta.id}）`)
-        console.log(`状态：${result.meta.status}；范围：${formatIdeaScope(result.meta.scope)}；优先级：${result.meta.priority}`)
+        console.log(`状态：${result.meta.status}；范围：${formatIdeaScope(result.meta.scope, 'ref')}；优先级：${result.meta.priority}`)
         if (result.meta.tags.length) console.log(`标签：${result.meta.tags.join('、')}`)
         if (result.meta.promotionState === 'stale') console.log('注意：晋升目标已变化，请重新评估。')
         console.log('')
@@ -488,13 +489,6 @@ async function commandIdea(root: string, parsed: Parsed, json: boolean): Promise
     default:
       throw usageError('用法：weave idea add|list|show|edit|archive|promote|apply|stale|feedback')
   }
-}
-
-function formatIdeaScope(scope: { kind: string; ref?: number | string }): string {
-  if (scope.kind === 'chapter') return `chapter:${String(scope.ref)}`
-  if (scope.kind === 'volume') return `volume:${String(scope.ref)}`
-  if (scope.kind === 'character') return `character:${String(scope.ref)}`
-  return scope.kind
 }
 
 async function commandConfig(root: string, parsed: Parsed, json: boolean): Promise<number> {

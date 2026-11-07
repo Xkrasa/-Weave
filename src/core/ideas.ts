@@ -140,7 +140,7 @@ export async function captureIdea(root: string, input: IdeaInput): Promise<IdeaV
   }
   await ensureDir(projectPaths(root).ideas)
   await writePair(root, idea, body)
-  return decorate(root, idea, body)
+  return decorate(root, idea)
 }
 
 export async function listIdeas(root: string, filter: IdeaFilter = {}): Promise<IdeaView[]> {
@@ -158,8 +158,7 @@ export async function listIdeas(root: string, filter: IdeaFilter = {}): Promise<
     }
     if (filter.tag && !idea.tags.includes(filter.tag)) continue
     if (filter.scopeKind && idea.scope.kind !== filter.scopeKind) continue
-    const body = await readIdeaBody(root, idea.id)
-    views.push(await decorate(root, idea, body.missing ? null : body.text))
+    views.push(await decorate(root, idea))
   }
   return views.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id))
 }
@@ -168,7 +167,7 @@ export async function readIdea(root: string, id: string): Promise<{ meta: IdeaVi
   const idea = await loadIdea(root, id)
   const stored = await readIdeaBody(root, id)
   return {
-    meta: await decorate(root, idea.meta, stored.missing ? null : stored.text, stored.missing),
+    meta: await decorate(root, idea.meta, stored.missing),
     body: stored.missing ? '' : stored.text,
   }
 }
@@ -195,7 +194,7 @@ export async function updateIdea(root: string, id: string, patch: IdeaPatch): Pr
     await atomicWrite(ideaBodyPath(root, id), withTrailingNewline(body ?? ''))
   }
   await atomicWriteJson(ideaMetaPath(root, id), next)
-  return decorate(root, next, body ?? stored.text)
+  return decorate(root, next)
 }
 
 export async function archiveIdea(root: string, id: string): Promise<IdeaView> {
@@ -207,8 +206,7 @@ export async function archiveIdea(root: string, id: string): Promise<IdeaView> {
     updatedAt: new Date().toISOString(),
   }
   await atomicWriteJson(ideaMetaPath(root, id), next)
-  const stored = await readIdeaBody(root, id)
-  return decorate(root, next, stored.missing ? null : stored.text)
+  return decorate(root, next)
 }
 
 /** Author-only "used" mark; the map never infers usage on its own. */
@@ -226,8 +224,7 @@ export async function markIdeaUsed(root: string, id: string, chapters: number[])
     updatedAt: new Date().toISOString(),
   }
   await atomicWriteJson(ideaMetaPath(root, id), next)
-  const stored = await readIdeaBody(root, id)
-  return decorate(root, next, stored.missing ? null : stored.text)
+  return decorate(root, next)
 }
 
 export async function clearIdeaUsage(root: string, id: string): Promise<IdeaView> {
@@ -235,8 +232,7 @@ export async function clearIdeaUsage(root: string, id: string): Promise<IdeaView
   const next: Idea = { ...current.meta, updatedAt: new Date().toISOString() }
   delete next.usage
   await atomicWriteJson(ideaMetaPath(root, id), next)
-  const stored = await readIdeaBody(root, id)
-  return decorate(root, next, stored.missing ? null : stored.text)
+  return decorate(root, next)
 }
 
 /** Stores promotion metadata on the idea; callers own the target file lifecycle. */
@@ -249,8 +245,7 @@ export async function recordPromotion(root: string, id: string, promotion: IdeaP
     updatedAt: new Date().toISOString(),
   }
   await atomicWriteJson(ideaMetaPath(root, id), next)
-  const stored = await readIdeaBody(root, id)
-  return decorate(root, next, stored.missing ? null : stored.text)
+  return decorate(root, next)
 }
 
 export async function promotionState(root: string, idea: Idea): Promise<IdeaPromotionState> {
@@ -383,6 +378,40 @@ export function ideaScopeMatches(
   return true
 }
 
+/**
+ * First `mustNotHappen` entry whose text an idea's title or body mentions verbatim.
+ * Shared by context assembly (drops the material) and review (raises a soft warning).
+ */
+export function findForbiddenIdeaMention(
+  contract: Pick<ChapterContract, 'mustNotHappen'>,
+  idea: Pick<Idea, 'title'>,
+  body: string,
+): string | null {
+  for (const item of contract.mustNotHappen ?? []) {
+    const needle = item.trim()
+    if (needle && (body.includes(needle) || idea.title.includes(needle))) return needle
+  }
+  return null
+}
+
+/** One place that enumerates the scope union for display: human label (`第 3 章`) or CLI ref (`chapter:3`). */
+export function formatIdeaScope(scope: IdeaScope, style: 'label' | 'ref' = 'label'): string {
+  switch (scope.kind) {
+    case 'chapter':
+      return style === 'label' ? `第 ${scope.ref} 章` : `chapter:${scope.ref}`
+    case 'volume':
+      return style === 'label' ? `第 ${scope.ref} 卷` : `volume:${scope.ref}`
+    case 'character':
+      return style === 'label' ? `人物：${scope.ref}` : `character:${scope.ref}`
+    case 'book':
+      return style === 'label' ? '全书' : 'book'
+    case 'world':
+      return style === 'label' ? '世界观' : 'world'
+    case 'mechanic':
+      return style === 'label' ? '机制' : 'mechanic'
+  }
+}
+
 export function parseScope(value: string): IdeaScope {
   const [kind, rawRef] = value.split(':', 2)
   switch (kind) {
@@ -462,7 +491,7 @@ async function readIdeaBody(root: string, id: string): Promise<{ text: string; m
   return text === null ? { text: '', missing: true } : { text, missing: false }
 }
 
-async function decorate(root: string, idea: Idea, body: string | null, bodyMissing = false): Promise<IdeaView> {
+async function decorate(root: string, idea: Idea, bodyMissing = false): Promise<IdeaView> {
   return {
     ...idea,
     promotionState: await promotionState(root, idea),
@@ -562,11 +591,6 @@ export async function applyPromotion(
   return idea
 }
 
-/** Returns the derived promotion view; stale never mutates the target or the idea. */
-export async function markPromotionStale(root: string, ideaId: string): Promise<IdeaView> {
-  const result = await readIdea(root, ideaId)
-  return result.meta
-}
 
 export async function listStaleIdeas(root: string): Promise<IdeaView[]> {
   return (await listIdeas(root, { status: 'promoted' })).filter(idea => idea.promotionState === 'stale')
@@ -608,21 +632,12 @@ function candidateText(idea: Idea, body: string, target: IdeaPromotionTarget): s
     `# 作者想法：${idea.title}`,
     '',
     `- 来源：ideas/${idea.id}.md`,
-    `- 范围：${scopeLabel(idea.scope)}`,
+    `- 范围：${formatIdeaScope(idea.scope)}`,
     `- 标签：${idea.tags.length ? idea.tags.join('、') : '无'}`,
     `- 状态：晋升候选，尚未批准；确认后再合并到正式${formal}。`,
     '',
   ].join('\n')
   return `${header}${body.trim()}\n`
-}
-
-function scopeLabel(scope: IdeaScope): string {
-  if (scope.kind === 'chapter') return `第 ${scope.ref} 章`
-  if (scope.kind === 'volume') return `第 ${scope.ref} 卷`
-  if (scope.kind === 'character') return `人物：${scope.ref}`
-  if (scope.kind === 'book') return '全书'
-  if (scope.kind === 'world') return '世界观'
-  return '机制'
 }
 
 function promotionWarnings(idea: Idea, target: IdeaPromotionTarget): string[] {

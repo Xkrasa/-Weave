@@ -1,4 +1,4 @@
-import path from 'node:path'
+﻿import path from 'node:path'
 import { appendFile, mkdir } from 'node:fs/promises'
 import type { AuditMissedItem, CoverageAudit, ExtractionReport, PendingRecord } from './stage-types.ts'
 import { objectHash } from './hash.ts'
@@ -51,6 +51,10 @@ export async function decidedPendingIds(root: string, chapter: number): Promise<
 
 async function saveDecisions(root: string, decisions: PendingDecision[]): Promise<void> {
   await atomicWriteJson(storePath(root), { schemaVersion: 1, decisions })
+}
+
+function newDecisionId(): string {
+  return `decision-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
 }
 
 async function audit(root: string, event: string, decision: PendingDecision): Promise<void> {
@@ -116,7 +120,7 @@ export async function decidePending(
     await saveStage(root, 'extraction', chapter, report)
   }
   const decision: PendingDecision = {
-    decisionId: `decision-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    decisionId: newDecisionId(),
     pendingId,
     chapter,
     subject: record.subject,
@@ -142,7 +146,7 @@ export async function recordIdeaPromotionDecision(
   if (!input.reason.trim()) throw validationError('晋升裁决必须提供理由')
   const decisions = await loadPendingDecisions(root)
   const decision: PendingDecision = {
-    decisionId: `decision-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    decisionId: newDecisionId(),
     pendingId: `idea-promotion-${input.ideaId}`,
     kind: 'idea-promotion',
     chapter: 0,
@@ -157,7 +161,9 @@ export async function recordIdeaPromotionDecision(
   return decision
 }
 
-export function missedFingerprint(chapter: number, item: { summary: string; quote: string }): string {  return `missed-${chapter}-${objectHash({ summary: item.summary.trim(), quote: item.quote.trim() }).slice(0, 10)}`
+export function missedFingerprint(chapter: number, item: { summary: string; quote: string }): string {
+  const fingerprint = objectHash({ summary: item.summary.trim(), quote: item.quote.trim() }).slice(0, 10)
+  return `missed-${chapter}-${fingerprint}`
 }
 
 /** 某章已驳回（dismiss）的第二遍审计遗漏项 ID 集合。 */
@@ -189,7 +195,7 @@ export async function decideAuditMissed(
     entry => entry.chapter === chapter && entry.kind === 'audit-missed' && entry.pendingId === missedId && entry.choice === 'dismiss',
   )
   const decision: PendingDecision = existing ?? {
-    decisionId: `decision-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    decisionId: newDecisionId(),
     pendingId: missedId,
     kind: 'audit-missed',
     chapter,

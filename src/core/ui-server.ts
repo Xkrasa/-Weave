@@ -53,7 +53,7 @@ import {
 import { readCommit, readMainline } from './ledger.ts'
 import { buildChapterCockpit, buildChapterGates, latestWritingRuns } from './cockpit.ts'
 import { compareChapterWithCommit } from './compare.ts'
-import { readBeatCandidate, generateBeatCandidate, approveBeatCandidate } from './beats.ts'
+import { readBeatCandidate, generateBeatCandidate, approveBeatCandidate, parseDraftingStrategy } from './beats.ts'
 import { readSegmentPlan, planSegments, approveSegmentPlan } from './segments.ts'
 import { archiveIdea, captureIdea, listIdeas, readIdea, updateIdea, markIdeaUsed, clearIdeaUsage, promoteIdea, savePromotionProposal, loadPromotionProposal, applyPromotion, type IdeaPatch, type IdeaScope, type IdeaStatus, type IdeaLinks } from './ideas.ts'
 import type { IdeaPromotionTarget } from './types.ts'
@@ -212,10 +212,7 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
     return
   }
   if (chapter && request.method === 'POST' && parts[3] === 'write') {
-    const strategy = url.searchParams.get('strategy')
-    const draftingStrategy = strategy === 'segmented' || strategy === 'beat-first' || strategy === 'prose-first'
-      ? strategy
-      : undefined
+    const draftingStrategy = parseDraftingStrategy(url.searchParams.get('strategy'))
     const resume = url.searchParams.get('resume')
     const result = await writeChapter(root, chapter, {
       signal: new AbortController().signal,
@@ -896,9 +893,7 @@ async function streamWrite(
   })
   try {
     const strategy = options.strategy
-    const draftingStrategy = strategy === 'segmented' || strategy === 'beat-first' || strategy === 'prose-first'
-      ? strategy
-      : undefined
+    const draftingStrategy = parseDraftingStrategy(strategy)
     const result = await writeChapter(root, chapter, {
       signal: controller.signal,
       onDelta: delta => send({ type: 'delta', delta }),

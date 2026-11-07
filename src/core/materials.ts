@@ -17,7 +17,7 @@ import { listPlans, readApprovedPlan, type CharacterArc, type RollingPlan, type 
 import { ensureStoryMemory, povMemory } from './memory.ts'
 import { preferenceMaterial, readApprovedPreferences } from './preferences.ts'
 import { listUnresolvedPending } from './pending.ts'
-import { listIdeas, readIdea, ideaScopeMatches } from './ideas.ts'
+import { listIdeas, readIdea, ideaScopeMatches, findForbiddenIdeaMention } from './ideas.ts'
 
 interface ReferenceManifestEntry {
   id: string
@@ -481,12 +481,9 @@ async function collectIdeaMaterials(
       omitted.push({ sourceId, reason: 'budget' })
       continue
     }
-    for (const forbidden of contract.mustNotHappen ?? []) {
-      const needle = forbidden.trim()
-      if (!needle) continue
-      if (body.includes(needle) || meta.title.includes(needle)) {
-        warnings.push(`想法「${meta.title}」提到合同禁区「${needle}」；合同优先，想法不要写成已发生剧情。`)
-      }
+    const forbidden = findForbiddenIdeaMention(contract, meta, body)
+    if (forbidden) {
+      warnings.push(`想法「${meta.title}」提到合同禁区「${forbidden}」；合同优先，想法不要写成已发生剧情。`)
     }
   }
   return { materials, withheld, omitted, degraded, warnings }

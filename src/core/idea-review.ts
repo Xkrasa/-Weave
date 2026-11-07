@@ -1,6 +1,6 @@
 import type { ReviewFinding } from './stage-types.ts'
 import type { ChapterContract } from './types.ts'
-import { ideaScopeMatches, listIdeas, readIdea } from './ideas.ts'
+import { findForbiddenIdeaMention, ideaScopeMatches, listIdeas, readIdea } from './ideas.ts'
 import { meaningfulKeywords } from './segment-checks.ts'
 
 const REVIEW_DIMENSION = '想法回灌'
@@ -20,9 +20,7 @@ export async function collectIdeaReviewFindings(
   const findings: ReviewFinding[] = []
   for (const idea of ideas) {
     const { meta, body } = await readIdea(root, idea.id)
-    const forbidden = (contract.mustNotHappen ?? [])
-      .map(item => item.trim())
-      .find(item => item && (body.includes(item) || meta.title.includes(item)))
+    const forbidden = findForbiddenIdeaMention(contract, meta, body)
     if (forbidden) {
       findings.push({
         findingId: `idea-${idea.id}-conflict`,

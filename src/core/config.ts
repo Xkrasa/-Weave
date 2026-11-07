@@ -59,9 +59,8 @@ export function validateModelConfig(config: ModelConfig): string[] {
 }
 
 export function modelBudgetSummary(config: ModelConfig): ModelBudgetSummary {
-  if (validateModelConfig(config).length > 0) {
-    throw validationError('模型配置非法', validateModelConfig(config))
-  }
+  const errors = validateModelConfig(config)
+  if (errors.length > 0) throw validationError('模型配置非法', errors)
   return {
     model: config.model,
     contextWindow: config.contextWindow,

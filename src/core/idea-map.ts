@@ -99,10 +99,6 @@ export async function buildIdeaMap(root: string): Promise<IdeaMap> {
   }
 }
 
-export function isIdeaUsed(idea: IdeaView, finalized: Set<number>): boolean {
-  return isUsed(idea, finalized)
-}
-
 function isUsed(idea: IdeaView, finalized: Set<number>): boolean {
   if (idea.usage) return true
   if (idea.links.chapters.some(chapter => finalized.has(chapter))) return true
