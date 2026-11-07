@@ -33,10 +33,44 @@ async function tempDir(): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), 'weave-bench-'))
 }
 
+test('benchmark repeats each configuration three times by default and reports medians', async () => {
+  const out = await tempDir()
+  try {
+    const result = await run(['run', '--suite', 'segmented-rollout', '--seed', 'segmented-rollout-s', '--out', out])
+    assert.equal(result.code, 0, result.stdout + result.stderr)
+    const consolePayload = JSON.parse(result.stdout.trim()) as { repeats: number; seeds: number; chapters: number }
+    assert.equal(consolePayload.repeats, 3)
+    assert.equal(consolePayload.seeds, 1)
+    assert.equal(consolePayload.chapters, 1)
+
+    const report = JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8')) as {
+      repeats: number
+      totals: { seeds: number; chapters: number }
+      seeds: Array<{ seed: string; chapters: number }>
+    }
+    assert.equal(report.repeats, 3)
+    // Medians stay per configuration: three repeats are not three extra chapters.
+    assert.equal(report.totals.seeds, 1)
+    assert.equal(report.totals.chapters, 1)
+    assert.equal(report.seeds.length, 1)
+    assert.equal(report.seeds[0]?.seed, 'segmented-rollout-s')
+
+    for (const repeat of ['repeat-2', 'repeat-3']) {
+      const single = JSON.parse(await readFile(path.join(out, repeat, 'report.json'), 'utf8')) as { repeats: number }
+      assert.equal(single.repeats, 1)
+      assert.ok((await readFile(path.join(out, repeat, 'report.md'), 'utf8')).length > 0)
+    }
+    const markdown = await readFile(path.join(out, 'report.md'), 'utf8')
+    assert.match(markdown, /repeats: 3（数值为中位数）/)
+  } finally {
+    await rm(out, { recursive: true, force: true })
+  }
+})
+
 test('benchmark fake mode records craft and longitudinal runs without a real model', async () => {
   const out = await tempDir()
   try {
-    const craft = await run(['run', '--suite', 'craft', '--seed', 'harbor-ledger', '--out', out])
+    const craft = await run(['run', '--suite', 'craft', '--seed', 'harbor-ledger', '--repeat', '1', '--out', out])
     assert.equal(craft.code, 0, craft.stderr)
     const craftPayload = JSON.parse(craft.stdout.trim()) as { ok: boolean; mode: string; chapters: number }
     assert.equal(craftPayload.ok, true)
@@ -71,7 +105,7 @@ test('benchmark fake mode records craft and longitudinal runs without a real mod
 test('benchmark longitudinal mode synthesizes prior chapters, then measures continuations', async () => {
   const out = await tempDir()
   try {
-    const result = await run(['run', '--suite', 'longitudinal', '--seed', 'long-harbor', '--out', out])
+    const result = await run(['run', '--suite', 'longitudinal', '--seed', 'long-harbor', '--repeat', '1', '--out', out])
     assert.equal(result.code, 0, result.stderr)
     const report = JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8')) as {
       ok: boolean
@@ -101,9 +135,9 @@ test('benchmark pairs anonymizes order and score recovers the configured winner'
   try {
     const a = path.join(root, 'run-a')
     const b = path.join(root, 'run-b')
-    const first = await run(['run', '--suite', 'craft', '--seed', 'harbor-ledger', '--out', a])
+    const first = await run(['run', '--suite', 'craft', '--seed', 'harbor-ledger', '--repeat', '1', '--out', a])
     assert.equal(first.code, 0, first.stderr)
-    const second = await run(['run', '--suite', 'craft', '--seed', 'harbor-ledger', '--out', b])
+    const second = await run(['run', '--suite', 'craft', '--seed', 'harbor-ledger', '--repeat', '1', '--out', b])
     assert.equal(second.code, 0, second.stderr)
 
     const pairsDir = path.join(root, 'pairs')
@@ -143,7 +177,7 @@ test('benchmark pairs anonymizes order and score recovers the configured winner'
 test('benchmark records Fanqie evaluation metadata without turning holdout into a score', async () => {
   const out = await tempDir()
   try {
-    const result = await run(['run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes', '--max-output', '4096', '--out', out])
+    const result = await run(['run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes', '--max-output', '4096', '--repeat', '1', '--out', out])
     assert.equal(result.code, 0, result.stderr)
     const report = JSON.parse(await readFile(path.join(out, 'report.json'), 'utf8')) as {
       seeds: Array<{
@@ -177,10 +211,10 @@ test('benchmark readerIntent ablation removes only the optional intent', async (
   try {
     const baselineDir = path.join(root, 'baseline')
     const ablatedDir = path.join(root, 'ablated')
-    const baseline = await run(['run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes', '--out', baselineDir])
+    const baseline = await run(['run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes', '--repeat', '1', '--out', baselineDir])
     assert.equal(baseline.code, 0, baseline.stderr)
     const ablated = await run([
-      'run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes',
+      'run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes', '--repeat', '1',
       '--ablation.readerIntent=off', '--out', ablatedDir,
     ])
     assert.equal(ablated.code, 0, ablated.stderr)
@@ -206,7 +240,7 @@ test('benchmark beat-first uses unapproved generated fixtures and one prose run'
   try {
     const result = await run([
       'run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes',
-      '--strategy', 'beat-first', '--out', out,
+      '--strategy', 'beat-first', '--repeat', '1', '--out', out,
     ])
     assert.equal(result.code, 0, result.stdout + result.stderr)
     const candidate = JSON.parse(await readFile(path.join(out, 'fanqie-rewind-ten-minutes', 'plans', 'beats', '001.json'), 'utf8')) as {
@@ -234,7 +268,7 @@ test('benchmark authorSamples supports independent scene, legacy and off ablatio
     async function runStrategy(strategy: string): Promise<{ sampleId: string | null; included: string[] }> {
       const dir = path.join(root, strategy)
       const result = await run([
-        'run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes',
+        'run', '--suite', 'craft', '--seed', 'fanqie-rewind-ten-minutes', '--repeat', '1',
         '--ablation.authorSamples', strategy, '--out', dir,
       ])
       assert.equal(result.code, 0, result.stdout + result.stderr)

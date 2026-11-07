@@ -11,7 +11,7 @@
  * Usage:
  *   node scripts/benchmark.ts run --suite craft|longitudinal|segmented-rollout|all [--seed <id>] [--config baseline]
  *                                 [--ablation retrieval=off] [--strategy prose-first|beat-first|segmented] [--mode fake|real]
- *                                 [--base-url <url>] [--model <id>] [--out <dir>]
+ *                                 [--repeat <n>] [--base-url <url>] [--model <id>] [--out <dir>]
  *   node scripts/benchmark.ts pairs --a <runDir> --b <runDir> [--out <dir>]
  *   node scripts/benchmark.ts score --pairs <pairs.json> --scores <scores.jsonl>
  */
@@ -712,29 +712,46 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
   }
   if (!baseUrl) throw new Error('real mode requires --base-url or WEAVE_API_KEY + configured endpoint')
 
-  const runs: SeedRun[] = []
+  const repeatRaw = flagString(flags, 'repeat')
+  const repeat = repeatRaw === undefined ? 3 : Number(repeatRaw)
+  if (!Number.isSafeInteger(repeat) || repeat < 1) throw new Error('--repeat must be an integer >= 1')
+
+  const reports: BenchReport[] = []
   try {
-    for (const seed of seeds) {
-      const seedBase = mode === 'fake' ? fakeModels.get(seed.id)!.baseUrl : baseUrl
-      const run = await runSeed(seed, {
-        outDir, config, ablations, mode, baseUrl: seedBase, model, apiKey, timeoutMs, maxOutputTokens, renderer, draftingStrategy,
-      })
-      runs.push(run)
-      await writeFile(path.join(outDir, `${seed.id}.run.json`), `${JSON.stringify(run, null, 2)}\n`)
+    for (let index = 1; index <= repeat; index += 1) {
+      // The first repeat keeps the documented layout; extra repeats get their own directory
+      // so `pairs` still reads the first run without knowing about repetition.
+      const repeatDir = index === 1 ? outDir : path.join(outDir, `repeat-${index}`)
+      if (index > 1) await mkdir(repeatDir, { recursive: true })
+      const runs: SeedRun[] = []
+      for (const seed of seeds) {
+        const seedBase = mode === 'fake' ? fakeModels.get(seed.id)!.baseUrl : baseUrl
+        const run = await runSeed(seed, {
+          outDir: repeatDir, config, ablations, mode, baseUrl: seedBase, model, apiKey,
+          timeoutMs, maxOutputTokens, renderer, draftingStrategy,
+        })
+        runs.push(run)
+        await writeFile(path.join(repeatDir, `${seed.id}.run.json`), `${JSON.stringify(run, null, 2)}\n`)
+      }
+      const report = buildReport(runs, { suite, config, ablations, mode, model, draftingStrategy })
+      await writeFile(path.join(repeatDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
+      await writeFile(path.join(repeatDir, 'report.md'), renderReport(report))
+      reports.push(report)
     }
   } finally {
     for (const fake of fakeModels.values()) await fake.stop()
   }
 
-  const report = buildReport(runs, { suite, config, ablations, mode, model, draftingStrategy })
+  const report = aggregateReports(reports, { suite, config, ablations, mode, model, draftingStrategy })
   await writeFile(path.join(outDir, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
   await writeFile(path.join(outDir, 'report.md'), renderReport(report))
   console.log(JSON.stringify({
     ok: report.ok,
     mode,
     suite,
-    seeds: runs.length,
-    chapters: runs.reduce((sum, run) => sum + run.chapters.length, 0),
+    repeats: report.repeats,
+    seeds: report.totals.seeds,
+    chapters: report.totals.chapters,
     outDir,
     note: mode === 'fake' ? 'fake mode measures plumbing only; it cannot support literary claims' : 'real mode: retain raw outputs before judging',
   }, null, 2))
@@ -751,6 +768,8 @@ interface BenchReport {
   draftingStrategy: BenchStrategy
   createdAt: string
   note: string
+  /** How many independent runs each configuration was repeated; numeric fields below are medians when > 1. */
+  repeats: number
   totals: { seeds: number; chapters: number; writeMs: number; totalMs: number; planningMs: number; characters: number; segments: number; segmentsFailed: number }
   recall: { expectations: number; matchedTerms: number; missedTerms: number }
   seeds: Array<{
@@ -795,6 +814,7 @@ function buildReport(
     note: meta.mode === 'fake'
       ? 'Fake mode: deterministic scaffold prose. Measures plumbing only, never literary quality.'
       : 'Real mode: compare anonymized pairs; do not accept LLM self-scores as the only evidence.',
+    repeats: 1,
     totals: {
       seeds: runs.length,
       chapters: runs.reduce((sum, run) => sum + run.chapters.length, 0),
@@ -832,12 +852,89 @@ function buildReport(
   }
 }
 
+/** Rounds to whole numbers so ms and count fields stay readable in reports. */
+function median(values: number[]): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const middle = Math.floor(sorted.length / 2)
+  if (sorted.length % 2 === 1) return sorted[middle]!
+  return Math.round((sorted[middle - 1]! + sorted[middle]!) / 2)
+}
+
+/**
+ * Folds repeated runs into one report. Counts and durations are medians, never sums:
+ * a repeat is the same configuration measured again, not more chapters.
+ */
+function aggregateReports(
+  reports: BenchReport[],
+  meta: { suite: string; config: string; ablations: Record<string, string>; mode: 'fake' | 'real'; model: string; draftingStrategy: BenchStrategy },
+): BenchReport {
+  const first = reports[0]
+  if (!first) return buildReport([], meta)
+  const bySeed = new Map<string, BenchReport['seeds']>()
+  for (const report of reports) {
+    for (const seed of report.seeds) {
+      const bucket = bySeed.get(seed.seed) ?? []
+      bucket.push(seed)
+      bySeed.set(seed.seed, bucket)
+    }
+  }
+  const seeds: BenchReport['seeds'] = [...bySeed.values()].map(bucket => {
+    const base = bucket[0]!
+    return {
+      ...base,
+      chapters: median(bucket.map(item => item.chapters)),
+      writeMs: median(bucket.map(item => item.writeMs)),
+      totalMs: median(bucket.map(item => item.totalMs)),
+      planningMs: median(bucket.map(item => item.planningMs)),
+      characters: median(bucket.map(item => item.characters)),
+      estimatedTokens: median(bucket.map(item => item.estimatedTokens)),
+      omitted: median(bucket.map(item => item.omitted)),
+      segments: median(bucket.map(item => item.segments)),
+      segmentsFailed: median(bucket.map(item => item.segmentsFailed)),
+      errors: median(bucket.map(item => item.errors)),
+      retried: median(bucket.map(item => item.retried)),
+      recallMissed: [...new Set(bucket.flatMap(item => item.recallMissed))],
+    }
+  })
+  return {
+    ok: reports.every(report => report.ok),
+    suite: meta.suite,
+    config: meta.config,
+    ablations: meta.ablations,
+    mode: meta.mode,
+    model: meta.model,
+    draftingStrategy: meta.draftingStrategy,
+    createdAt: first.createdAt,
+    note: first.note,
+    repeats: reports.length,
+    totals: {
+      seeds: median(reports.map(report => report.totals.seeds)),
+      chapters: median(reports.map(report => report.totals.chapters)),
+      writeMs: median(reports.map(report => report.totals.writeMs)),
+      totalMs: median(reports.map(report => report.totals.totalMs)),
+      planningMs: median(reports.map(report => report.totals.planningMs)),
+      characters: median(reports.map(report => report.totals.characters)),
+      segments: median(reports.map(report => report.totals.segments)),
+      segmentsFailed: median(reports.map(report => report.totals.segmentsFailed)),
+    },
+    recall: {
+      expectations: median(reports.map(report => report.recall.expectations)),
+      matchedTerms: median(reports.map(report => report.recall.matchedTerms)),
+      missedTerms: median(reports.map(report => report.recall.missedTerms)),
+    },
+    seeds,
+    errors: reports.flatMap(report => report.errors),
+  }
+}
+
 function renderReport(report: BenchReport): string {
   const lines = [
     `# Weave benchmark — ${report.suite} / ${report.config}`,
     '',
     `- mode: **${report.mode}** · model: \`${report.model}\``,
     `- draftingStrategy: ${report.draftingStrategy}`,
+    `- repeats: ${report.repeats}${report.repeats > 1 ? '（数值为中位数）' : ''}`,
     `- ablations: ${Object.keys(report.ablations).length === 0 ? 'none' : JSON.stringify(report.ablations)}`,
     `- created: ${report.createdAt}`,
     `- note: ${report.note}`,
