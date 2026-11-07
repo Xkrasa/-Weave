@@ -6,6 +6,8 @@ export interface SegmentCheckInput {
   pov: string
   goal: string
   exitState: string
+  /** Chapter characters; used to warn when a name the segment goal mentions never appears. */
+  characters?: string[]
 }
 
 export interface SegmentCheckResult {
@@ -49,6 +51,10 @@ export function checkSegment(input: SegmentCheckInput): SegmentCheckResult {
 
   if (input.pov && !text.includes(input.pov)) {
     warnings.push(`本段没有出现视角人物「${input.pov}」`)
+  }
+  const goalCharacters = (input.characters ?? []).filter(name => name.trim() && input.goal.includes(name))
+  if (goalCharacters.length > 0 && !goalCharacters.some(name => text.includes(name))) {
+    warnings.push(`本段目标涉及的人物「${goalCharacters.join('、')}」没有出现`)
   }
   const exitKeywords = meaningfulKeywords(input.exitState)
   if (exitKeywords.length > 0 && !exitKeywords.some(keyword => text.includes(keyword))) {

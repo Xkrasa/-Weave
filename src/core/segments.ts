@@ -102,11 +102,12 @@ const HIGH_TURN_MARKERS = ['高潮', '反转', '真相', '揭露', '对决', '�
 const TRANSITION_MARKERS = ['过渡', '铺垫', '准备', '等待', '日常', '前夜', '将至']
 
 function beatWeight(beat: SceneBeat): number {
+  const authored = beat.targetWords
+  if (authored !== undefined && Number.isFinite(authored) && authored > 0) return authored
   const text = [beat.goal, beat.turn, beat.emotionalLanding ?? ''].join(' ')
   if (HIGH_TURN_MARKERS.some(marker => text.includes(marker))) return 1.3
   if (TRANSITION_MARKERS.some(marker => text.includes(marker))) return 0.8
-  const authored = beat.targetWords
-  return authored !== undefined && Number.isFinite(authored) && authored > 0 ? authored : 1
+  return 1
 }
 
 function splitEvenly<T>(items: T[], groups: number): T[][] {
@@ -172,6 +173,18 @@ export function proposeSegmentPlan(contract: ChapterContract, beats: SceneBeat[]
     })
     nextEntryState = exitState
   })
+
+  const outOfRange = segments.filter(
+    segment => segment.targetWords < MIN_SEGMENT_WORDS || segment.targetWords > MAX_SEGMENT_WORDS,
+  )
+  if (outOfRange.length > 0) {
+    const detail = outOfRange
+      .map(segment => `${segment.segmentId}=${segment.targetWords}`)
+      .join('、')
+    throw validationError(
+      `分段字数超出 ${MIN_SEGMENT_WORDS}–${MAX_SEGMENT_WORDS} 字：${detail}；请调整合同目标字数、节拍数量或 beat.targetWords 后再生成计划`,
+    )
+  }
 
   return { targetWords: contract.targetWords, segments }
 }
@@ -260,6 +273,8 @@ export function validateSegmentPlan(
     }
     if (!Number.isSafeInteger(segment.targetWords) || segment.targetWords <= 0) {
       errors.push(`第 ${index + 1} 段 targetWords 必须是正整数`)
+    } else if (segment.targetWords < MIN_SEGMENT_WORDS || segment.targetWords > MAX_SEGMENT_WORDS) {
+      errors.push(`第 ${index + 1} 段 targetWords ${segment.targetWords} 超出 ${MIN_SEGMENT_WORDS}–${MAX_SEGMENT_WORDS} 字`)
     }
   })
   const missing = expectedIds.filter(id => !seenIds.has(id))

@@ -156,7 +156,7 @@ export async function writeChapter(
     const plan = await requireApprovedSegmentPlan(root, chapter)
     const approvedBeats = await requireApprovedBeats(root, chapter, { allowBenchmarkDraft: options.benchmark === true })
     const resume = options.resumeFromRunId
-      ? await resolveSegmentResume(root, chapter, plan, options.resumeFromRunId)
+      ? await resolveSegmentResume(root, chapter, plan, approvedBeats.contentHash, options.resumeFromRunId)
       : undefined
     return writeSegmentedChapter(root, chapter, {
       contract,
@@ -552,6 +552,8 @@ async function writeSegmentedChapter(
     materialSourceIds: [],
     draftingStrategy: 'segmented',
     beatContentHash: input.beatContentHash,
+    planHash: input.plan.planHash,
+    contractHash: input.plan.contractHash,
     sampleSelection: prepared.sampleSelection,
     methodSelection: prepared.methodSelection,
     ...(recovery ? { recovery } : {}),
@@ -599,6 +601,7 @@ async function writeSegmentedChapter(
         const assembled = assembleContext(input.contract, prepared.materials, segmentConfig, {
           segment: prompt,
           withheld: prepared.withheld,
+          preOmitted: prepared.ideaOmitted,
         })
         if (assembled.decision.decision !== 'ready' || !assembled.context) {
           throw validationError(
@@ -607,6 +610,9 @@ async function writeSegmentedChapter(
           )
         }
         const context = assembled.context
+        if (prepared.ideaDegraded.length > 0) {
+          context.degraded = [...context.degraded, ...prepared.ideaDegraded]
+        }
         contextHashes.push(context.contextHash)
         estimatedTokens += context.estimatedTokens
         for (const item of context.included) included.add(item.sourceId)
@@ -640,6 +646,7 @@ async function writeSegmentedChapter(
           pov: input.contract.pov,
           goal: segment.goal,
           exitState: segment.exitState,
+          characters: input.contract.characters,
         })
         if (checked.passed) {
           acceptedText = checked.text
@@ -768,6 +775,7 @@ async function resolveSegmentResume(
   root: string,
   chapter: number,
   plan: ChapterSegmentPlan,
+  beatContentHash: string,
   runId: string,
 ): Promise<SegmentResume> {
   const prior = await loadRun(root, runId)
@@ -780,6 +788,15 @@ async function resolveSegmentResume(
   }
   if (prior.status !== 'failed' && prior.status !== 'cancelled') {
     throw validationError(`运行 ${runId} 状态为 ${prior.status}，只有失败或取消的运行可以恢复`)
+  }
+  if (prior.planHash !== plan.planHash) {
+    throw validationError('分段计划在运行失败后已变化，不能恢复；请重新生成并批准分段计划')
+  }
+  if (prior.contractHash !== plan.contractHash) {
+    throw validationError('合同在运行失败后已变化，不能恢复；请重新生成并批准分段计划')
+  }
+  if (prior.beatContentHash !== beatContentHash) {
+    throw validationError('节拍在运行失败后已变化，不能恢复；请重新生成并批准分段计划')
   }
 
   const completed: SegmentRunRecord[] = []

@@ -193,18 +193,29 @@ test('segments set rejects unknown beats and accepts an author-edited plan', asy
     assert.notEqual(rejected.code, 0)
     assert.match(rejected.stderr, /beat-99|targetWords/)
 
+    const tooLong = path.join(dir, 'too-long-plan.json')
+    await writeFile(tooLong, `${JSON.stringify({
+      targetWords: 4000,
+      segments: [
+        { beatIds: ['beat-01', 'beat-02', 'beat-03', 'beat-04'], goal: '核对与追查', entryState: '许舟收到异常罚单', exitState: '罚单被撤销', targetWords: 4000, mustNotHappen: [] },
+      ],
+    }, null, 2)}\n`)
+    const rangeRejected = await runCli(dir, ['segments', 'set', '1', '--file', tooLong])
+    assert.notEqual(rangeRejected.code, 0)
+    assert.match(rangeRejected.stderr, /1500–2500|超出/)
+
     const edited = path.join(dir, 'edited-plan.json')
     await writeFile(edited, `${JSON.stringify({
       targetWords: 4000,
       segments: [
-        { beatIds: ['beat-01', 'beat-02', 'beat-03'], goal: '核对与追查', entryState: '许舟收到异常罚单', exitState: '证据链补全', targetWords: 2900, mustNotHappen: [] },
-        { beatIds: ['beat-04'], goal: '提交申诉', entryState: '证据链补全', exitState: '罚单被撤销', targetWords: 1100, mustNotHappen: ['平台主动道歉'] },
+        { beatIds: ['beat-01', 'beat-02', 'beat-03'], goal: '核对与追查', entryState: '许舟收到异常罚单', exitState: '证据链补全', targetWords: 2500, mustNotHappen: [] },
+        { beatIds: ['beat-04'], goal: '提交申诉', entryState: '证据链补全', exitState: '罚单被撤销', targetWords: 1500, mustNotHappen: ['平台主动道歉'] },
       ],
     }, null, 2)}\n`)
     const saved = planPayload(await runCli(dir, ['segments', 'set', '1', '--file', edited, '--json']))
     assert.equal(saved.segments.length, 2)
     assert.deepEqual(saved.segments.map(segment => segment.beatIds), [['beat-01', 'beat-02', 'beat-03'], ['beat-04']])
-    assert.equal(saved.segments[0]!.targetWords, 2900)
+    assert.equal(saved.segments[0]!.targetWords, 2500)
     const view = JSON.parse((await runCli(dir, ['segments', 'show', '1', '--json'])).stdout) as ShowPayload
     assert.equal(view.status, 'draft')
     assert.equal((await runCli(dir, ['segments', 'approve', '1', '--json'])).code, 0)
@@ -290,6 +301,15 @@ test('segment checks retry hard failures and trim boundary overlap without block
   assert.equal(trimmed.text.startsWith('她终于承认'), true)
   assert.equal(trimmed.warnings.some(warning => warning.includes('重复')), true)
   assert.equal(trimmed.passed, true)
+
+  const goalCharacters = checkSegment({
+    ...base,
+    goal: '许舟向唐姨道歉',
+    characters: ['许舟', '唐姨'],
+    text: repeatTo('他核对订单时间线，把两份记录摆在桌上。', 1_900),
+  })
+  assert.equal(goalCharacters.passed, true)
+  assert.equal(goalCharacters.warnings.some(warning => warning.includes('唐姨')), true)
 })
 
 class FakeResumableModel {
@@ -397,6 +417,16 @@ test('a failed segment stops the chapter and resume starts from the first unfini
     const draft = await readFile(path.join(dir, 'chapters', 'drafts', '001.md'), 'utf8')
     assert.ok(draft.includes('许舟把订单截图推到唐姨面前'))
     assert.ok(draft.includes('唐姨终于承认那笔退款不是她操作的'))
+
+    const beatsFile = path.join(dir, 'plans', 'beats', '001.json')
+    const candidate = JSON.parse(await readFile(beatsFile, 'utf8')) as { beats: Array<Record<string, unknown>> }
+    candidate.beats[0]!.goal = '节拍在失败后被改写'
+    await writeFile(beatsFile, `${JSON.stringify(candidate, null, 2)}\n`)
+    assert.equal((await runCli(dir, ['beats', 'approve', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['segments', 'approve', '1', '--json'])).code, 0)
+    const staleResume = await runCli(dir, ['write', '1', '--strategy', 'segmented', '--resume', failedRun!.runId, '--json'])
+    assert.notEqual(staleResume.code, 0)
+    assert.match(staleResume.stdout + staleResume.stderr, /节拍.*变化|不能恢复/)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })

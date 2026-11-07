@@ -402,6 +402,10 @@ export interface RunRecord {
   materialSourceIds: string[]
   draftingStrategy?: 'prose-first' | 'beat-first' | 'segmented'
   beatContentHash?: string
+  /** Segment plan hash captured at run start; also changeable contextHash stays separate. */
+  planHash?: string
+  /** Contract hash captured at run start; segmented resume refuses a changed contract. */
+  contractHash?: string
   sampleSelection?: {
     samples: Array<{ id: string }>
     selected: Array<{ id: string; score: number; reasons: string[] }>
