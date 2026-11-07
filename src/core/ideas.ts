@@ -1,6 +1,6 @@
 import path from 'node:path'
 import { randomBytes } from 'node:crypto'
-import type { IdeaPromotionTarget } from './types.ts'
+import type { ChapterContract, IdeaPromotionTarget } from './types.ts'
 import { atomicWrite, atomicWriteJson, ensureDir, fileHash, isMissing, listFiles, readJson, readJsonIfExists, readTextIfExists } from './io.ts'
 import { conflictError, validationError } from './errors.ts'
 import { projectPaths } from './project.ts'
@@ -238,7 +238,8 @@ export async function clearIdeaUsage(root: string, id: string): Promise<IdeaView
   return decorate(root, next, stored.missing ? null : stored.text)
 }
 
-/** Stores promotion metadata on the idea; callers own the target file lifecycle. */export async function recordPromotion(root: string, id: string, promotion: IdeaPromotion): Promise<IdeaView> {
+/** Stores promotion metadata on the idea; callers own the target file lifecycle. */
+export async function recordPromotion(root: string, id: string, promotion: IdeaPromotion): Promise<IdeaView> {
   const current = await loadIdea(root, id)
   const next: Idea = {
     ...current.meta,
@@ -361,6 +362,24 @@ function normalizeScope(value: IdeaScope | string | undefined): IdeaScope {
     default:
       throw validationError(`未知 scope：${String((value as { kind?: string }).kind)}`)
   }
+}
+
+/**
+ * Scope admission used by context assembly and the soft review check. Book-scoped ideas are
+ * opt-in; chapter/volume/character scopes only match when the chapter actually qualifies.
+ */
+export function ideaScopeMatches(
+  idea: Pick<Idea, 'scope'>,
+  contract: Pick<ChapterContract, 'chapter' | 'volume' | 'characters'>,
+  options: { includeBookIdeas?: boolean } = {},
+): boolean {
+  const scope = idea.scope
+  if (scope.kind === 'chapter') return scope.ref === contract.chapter
+  if (scope.kind === 'volume') return contract.volume !== undefined && scope.ref === contract.volume
+  if (scope.kind === 'character') return contract.characters.includes(scope.ref)
+  if (scope.kind === 'book') return options.includeBookIdeas === true
+  // World/mechanic ideas are global, but still capped and ranked like every other idea.
+  return true
 }
 
 export function parseScope(value: string): IdeaScope {

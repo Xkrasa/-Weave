@@ -6,6 +6,7 @@ import { appendUsage } from './usage.ts'
 import { draftHash, resolveEvidence, saveStage } from './stages.ts'
 import { validationError } from './errors.ts'
 import { objectHash } from './hash.ts'
+import { collectIdeaReviewFindings } from './idea-review.ts'
 
 const SYSTEM_PROMPT = [
   '你是小说审稿器。只输出一个 JSON 对象，不要输出解释或 Markdown 围栏。',
@@ -97,6 +98,10 @@ export async function runReview(
     }
     findings.push(finding)
   })
+
+  // Promoted ideas add soft, deterministic checks. They never change the gate: only
+  // `blocking` findings feed `blockingCount` and `passed`.
+  findings.push(...await collectIdeaReviewFindings(root, contract, draft))
 
   const blockingCount = findings.filter(finding => finding.severity === 'blocking').length
   const report: ReviewReport = {

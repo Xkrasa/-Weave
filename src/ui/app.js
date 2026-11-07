@@ -852,6 +852,13 @@ async function focusFinding(findingId) {
     switchTab('evidence');
     return;
   }
+  // Edit mode keeps the textarea: select the exact occurrence instead of forcing review mode.
+  if (state.mode === 'edit') {
+    selectInEditor(fresh.charStart, fresh.charEnd);
+    switchTab('evidence');
+    await renderInspector();
+    return;
+  }
   const ratio = currentScrollRatio();
   state.mode = 'review';
   applyMode({ editor: ratio, view: ratio });
@@ -860,6 +867,50 @@ async function focusFinding(findingId) {
   }
   switchTab('evidence');
   await renderInspector();
+}
+
+/** Selects [start, end) in the textarea and scrolls it into view without switching modes. */
+function selectInEditor(charStart, charEnd) {
+  const editor = $('#draft');
+  if (!editor) return;
+  const length = editor.value.length;
+  const start = Math.max(0, Math.min(charStart, length));
+  const end = Math.max(start, Math.min(charEnd, length));
+  editor.focus();
+  editor.setSelectionRange(start, end);
+  editor.scrollTop = Math.max(0, measureEditorOffset(editor, start) - editor.clientHeight / 3);
+}
+
+/**
+ * Measures the pixel offset of a character offset in a textarea by mirroring its text layout.
+ * Wrapped lines make a line-count estimate unreliable, so the mirror reuses the live styles.
+ */
+function measureEditorOffset(editor, charStart) {
+  const style = getComputedStyle(editor);
+  const mirror = document.createElement('div');
+  for (const property of [
+    'fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'lineHeight', 'letterSpacing',
+    'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+  ]) {
+    mirror.style[property] = style[property];
+  }
+  const paddingX = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+  mirror.style.position = 'absolute';
+  mirror.style.visibility = 'hidden';
+  mirror.style.top = '0';
+  mirror.style.left = '-99999px';
+  mirror.style.boxSizing = 'content-box';
+  mirror.style.width = `${Math.max(0, editor.clientWidth - paddingX)}px`;
+  mirror.style.whiteSpace = 'pre-wrap';
+  mirror.style.overflowWrap = 'break-word';
+  mirror.textContent = editor.value.slice(0, charStart);
+  const marker = document.createElement('span');
+  marker.textContent = '\u200b';
+  mirror.appendChild(marker);
+  document.body.appendChild(mirror);
+  const offset = marker.offsetTop;
+  mirror.remove();
+  return offset;
 }
 
 async function focusHighlight(highlightId) {

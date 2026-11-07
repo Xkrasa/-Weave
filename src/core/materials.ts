@@ -17,7 +17,7 @@ import { listPlans, readApprovedPlan, type CharacterArc, type RollingPlan, type 
 import { ensureStoryMemory, povMemory } from './memory.ts'
 import { preferenceMaterial, readApprovedPreferences } from './preferences.ts'
 import { listUnresolvedPending } from './pending.ts'
-import { listIdeas, readIdea } from './ideas.ts'
+import { listIdeas, readIdea, ideaScopeMatches } from './ideas.ts'
 
 interface ReferenceManifestEntry {
   id: string
@@ -516,20 +516,6 @@ function makeIdeaMaterial(
 
 function ideaPriorityRank(priority: 'high' | 'normal' | 'low'): number {
   return priority === 'high' ? 0 : priority === 'normal' ? 1 : 2
-}
-
-function ideaScopeMatches(
-  idea: import('./ideas.ts').IdeaView,
-  contract: ChapterContract,
-  options: { includeBookIdeas?: boolean },
-): boolean {
-  const scope = idea.scope
-  if (scope.kind === 'chapter') return scope.ref === contract.chapter
-  if (scope.kind === 'volume') return contract.volume !== undefined && scope.ref === contract.volume
-  if (scope.kind === 'character') return contract.characters.includes(scope.ref)
-  if (scope.kind === 'book') return options.includeBookIdeas === true
-  // World/mechanic ideas are global, but still capped and ranked like every other idea.
-  return true
 }
 
 /**
