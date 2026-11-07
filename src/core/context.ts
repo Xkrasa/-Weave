@@ -29,6 +29,10 @@ export interface AssembledContext {
   renderer: PromptRenderer
   included: Material[]
   omitted: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
+  /** 披露未到而被扣留的材料；不是预算省略，由材料收集阶段写入。 */
+  withheld: Array<{ sourceId: string; reason: 'not-yet-revealed' }>
+  /** 预算不足被降级为紧凑形态的可选材料；required 不降级。 */
+  degraded: Array<{ sourceId: string; reason: 'budget' }>
   estimatedTokens: number
 }
 
@@ -144,6 +148,8 @@ export function assembleContext(
       renderer,
       included: ordered,
       omitted,
+      withheld: [],
+      degraded: [],
       estimatedTokens: usedTokens,
     },
   }

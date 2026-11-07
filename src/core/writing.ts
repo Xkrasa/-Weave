@@ -90,6 +90,8 @@ export interface WriteResult {
   keyCandidates: KeyCandidateGroup[]
   included: string[]
   omitted: Array<{ sourceId: string; reason: string }>
+  withheld: Array<{ sourceId: string; reason: string }>
+  degraded: Array<{ sourceId: string; reason: string }>
 }
 
 export async function writeChapter(
@@ -223,6 +225,8 @@ export async function writeChapter(
       estimatedTokens: context.estimatedTokens,
       included: context.included.map(item => item.sourceId),
       omitted: context.omitted,
+      withheld: context.withheld,
+      degraded: context.degraded,
     }
   } catch (error) {
     const cancelled = options.signal.aborted

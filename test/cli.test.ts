@@ -918,6 +918,28 @@ function reviewPayload(blocking = false): string {
   })
 }
 
+test('extraction rejects fabricated quotes instead of passing silently', async () => {
+  const model = new FakeModel([P05_DRAFT, extractionPayload('这句话不在正文里，是模型编造的。'), coveragePayload()])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    const extracted = await runCli(dir, ['extract', '1', '--json'])
+    assert.equal(extracted.code, 3, extracted.stdout + extracted.stderr)
+    const extraction = parseJson<{
+      passed: boolean
+      records: unknown[]
+      rejected: Array<{ reason: string }>
+    }>(extracted.stdout)
+    assert.equal(extraction.passed, false)
+    assert.equal(extraction.records.length, 0)
+    assert.ok(extraction.rejected.some(entry => entry.reason.includes('证据引文不在草稿中')))
+    assert.ok(extraction.rejected.some(entry => entry.reason.includes('整条记录被拒绝')))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 async function prepareP05(model: FakeModel): Promise<string> {
   const dir = await initBook(model.baseUrl, [], 'p05')
   await contract1(dir)
