@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { readJsonIfExists, listFiles, readTextIfExists } from './io.ts'
+import { atomicWriteJson, readJsonIfExists, listFiles, readTextIfExists } from './io.ts'
 import { projectPaths } from './project.ts'
 
 export interface StyleConstitution {
@@ -7,10 +7,26 @@ export interface StyleConstitution {
   pov: 'limited' | 'omniscient' | 'any'
   sentenceLength: { min: number; max: number }
   dialogueRatio: { min: number; max: number }
+  /** 标点频率维度：破折号过量是典型 AI 味特征，正则类检查管不到的量。可选，由作者 adopt 后生效。 */
+  dashRatio?: { min: number; max: number }
+  questionMarkRatio?: { min: number; max: number }
   interiority: 'low' | 'medium' | 'high'
   descriptionDensity: 'low' | 'medium' | 'high'
   endingStrategy: string
   forbiddenPatterns: string[]
+}
+
+export interface StyleCandidate {
+  schemaVersion: 1
+  derivedAt: string
+  derivedFrom: string[]
+  sampleCount: number
+  suggested: {
+    sentenceLength: { min: number; max: number }
+    dialogueRatio: { min: number; max: number }
+    dashRatio: { min: number; max: number }
+    questionMarkRatio: { min: number; max: number }
+  }
 }
 
 export interface AuthorSample {
@@ -151,11 +167,92 @@ function metadataValues(metadata: string, names: string[]): string[] {
   return value.split(',').map(item => item.trim()).filter(Boolean)
 }
 
+function percentile(sorted: number[], p: number): number {
+  if (sorted.length === 0) return 0
+  if (sorted.length === 1) return sorted[0]!
+  const index = (sorted.length - 1) * p
+  const lower = Math.floor(index)
+  const upper = Math.ceil(index)
+  if (lower === upper) return sorted[lower]!
+  return sorted[lower]! + (sorted[upper]! - sorted[lower]!) * (index - lower)
+}
+
+function quantileRange(values: number[], round: (value: number) => number): { min: number; max: number } {
+  const sorted = [...values].sort((a, b) => a - b)
+  return { min: round(percentile(sorted, 0.25)), max: round(percentile(sorted, 0.75)) }
+}
+
+/**
+ * 从作者定稿反推风格区间建议：取各样本章节的统计量，P25–P75 分位而非均值，
+ * 异常章（如刻意写战斗）只抬高分位边界、不会整体带偏。推导值只落候选文件，
+ * 作者 `weave style adopt` 后才写 canon——AI 推导值不得自动成为作者口径。
+ */
+export function deriveStyleRange(samples: Array<{ id: string; text: string }>): StyleCandidate | null {
+  const usable = samples.filter(sample => [...sample.text.trim()].length >= 100)
+  if (usable.length === 0) return null
+  const avgLengths: number[] = []
+  const dialogue: number[] = []
+  const dash: number[] = []
+  const question: number[] = []
+  for (const sample of usable) {
+    const text = sample.text
+    const sentences = text.split(/[。！？!?]/).map(item => item.trim()).filter(Boolean)
+    if (sentences.length > 0) {
+      avgLengths.push(sentences.reduce((sum, item) => sum + [...item].length, 0) / sentences.length)
+    }
+    const chars = [...text].length
+    const dialogueText = (text.match(/“[^”]*”|"[^"]*"/g) ?? []).join('')
+    dialogue.push([...dialogueText].length / chars)
+    dash.push((text.match(/——|—/g) ?? []).length / chars)
+    question.push((text.match(/？|\?/g) ?? []).length / chars)
+  }
+  return {
+    schemaVersion: 1,
+    derivedAt: new Date().toISOString(),
+    derivedFrom: usable.map(sample => sample.id),
+    sampleCount: usable.length,
+    suggested: {
+      sentenceLength: quantileRange(avgLengths, value => Math.max(1, Math.round(value))),
+      dialogueRatio: quantileRange(dialogue, value => Number(value.toFixed(3))),
+      dashRatio: quantileRange(dash, value => Number(value.toFixed(4))),
+      questionMarkRatio: quantileRange(question, value => Number(value.toFixed(4))),
+    },
+  }
+}
+
+export async function saveStyleCandidate(root: string, candidate: StyleCandidate): Promise<string> {
+  const target = path.join(projectPaths(root).metadata, 'style-candidate.json')
+  await atomicWriteJson(target, candidate)
+  return target
+}
+
+export async function loadStyleCandidate(root: string): Promise<StyleCandidate | null> {
+  return readJsonIfExists<StyleCandidate>(path.join(projectPaths(root).metadata, 'style-candidate.json'))
+}
+
+/** 作者明示采纳：候选区间并入 canon/style.json，其余作者口径字段不动。 */
+export async function adoptStyleCandidate(root: string): Promise<StyleConstitution> {
+  const candidate = await loadStyleCandidate(root)
+  if (!candidate) throw new Error('没有可采纳的风格候选；请先执行 weave style derive')
+  const current = await loadStyleConstitution(root)
+  const adopted: StyleConstitution = {
+    ...current,
+    sentenceLength: candidate.suggested.sentenceLength,
+    dialogueRatio: candidate.suggested.dialogueRatio,
+    dashRatio: candidate.suggested.dashRatio,
+    questionMarkRatio: candidate.suggested.questionMarkRatio,
+  }
+  await atomicWriteJson(path.join(projectPaths(root).canon, 'style.json'), adopted)
+  return adopted
+}
+
 export function styleText(style: StyleConstitution): string {
   return [
     `pov=${style.pov}`,
     `sentenceLength=${style.sentenceLength.min}-${style.sentenceLength.max}`,
     `dialogueRatio=${style.dialogueRatio.min}-${style.dialogueRatio.max}`,
+    style.dashRatio ? `dashRatio=${style.dashRatio.min}-${style.dashRatio.max}` : '',
+    style.questionMarkRatio ? `questionMarkRatio=${style.questionMarkRatio.min}-${style.questionMarkRatio.max}` : '',
     `interiority=${style.interiority}`,
     `descriptionDensity=${style.descriptionDensity}`,
     `ending=${style.endingStrategy}`,

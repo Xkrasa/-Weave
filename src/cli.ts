@@ -63,7 +63,13 @@ import {
   listMethodCandidates,
   saveMethodCandidates,
 } from './core/method-candidates.ts'
-import { loadAuthorSamples, selectAuthorSamples } from './core/style.ts'
+import {
+  adoptStyleCandidate,
+  deriveStyleRange,
+  loadAuthorSamples,
+  saveStyleCandidate,
+  selectAuthorSamples,
+} from './core/style.ts'
 import {
   rebuildSearchIndex,
   readSearchChunk,
@@ -107,7 +113,7 @@ import {
   outlineReport,
   readCandidate,
 } from './core/outline.ts'
-import { atomicWriteJson, ensureDir } from './core/io.ts'
+import { atomicWriteJson, ensureDir, readTextIfExists } from './core/io.ts'
 import {
   checkKnowledge,
   collectLedgerSources,
@@ -134,7 +140,7 @@ interface Parsed {
   flags: Record<string, string | true>
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank', 'open', 'key', 'analyze', 'methods'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank', 'open', 'key', 'analyze', 'methods', 'samples', 'show-withheld'])
 let eventStreamStarted = false
 
 async function main(): Promise<number> {
@@ -1011,6 +1017,17 @@ async function commandMethod(root: string, parsed: Parsed, json: boolean): Promi
   throw usageError('用法：weave method list|show <id>|candidates|approve <id>|route <chapter>')
 }
 
+async function finalizedStyleSamples(root: string): Promise<Array<{ id: string; text: string }>> {
+  const head = await readMainline(root)
+  const chapters = Object.keys(head.selectedCommitByChapter).map(Number).sort((a, b) => a - b).slice(-6)
+  const samples: Array<{ id: string; text: string }> = []
+  for (const chapter of chapters) {
+    const text = await readTextIfExists(path.join(root, 'chapters', 'final', `${String(chapter).padStart(3, '0')}.md`))
+    if (text?.trim()) samples.push({ id: `chapter:${chapter}`, text })
+  }
+  return samples
+}
+
 async function commandStyle(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const action = parsed.positionals[0]
   if (action === 'samples') {
@@ -1030,7 +1047,34 @@ async function commandStyle(root: string, parsed: Parsed, json: boolean): Promis
     else for (const sample of samples) console.log(`${sample.id}\t${sample.source}`)
     return 0
   }
-  if (action !== 'check') throw usageError('用法：weave style check <chapter>|samples')
+  if (action === 'derive') {
+    const useSamples = parsed.flags.samples === true
+    const samples = useSamples
+      ? (await loadAuthorSamples(root, Number.MAX_SAFE_INTEGER)).map(sample => ({ id: sample.id, text: sample.text }))
+      : await finalizedStyleSamples(root)
+    const candidate = deriveStyleRange(samples)
+    if (!candidate) throw validationError('没有可用的定稿或样本（每份至少 100 字）；先写作或改用 --samples')
+    const target = await saveStyleCandidate(root, candidate)
+    if (json) outputJson({ ok: true, candidate, path: target })
+    else {
+      console.log(`已推导风格候选（${candidate.sampleCount} 份样本，P25–P75 分位）：${target}`)
+      console.log(`句长：${candidate.suggested.sentenceLength.min}-${candidate.suggested.sentenceLength.max} 字`)
+      console.log(`对白占比：${candidate.suggested.dialogueRatio.min}-${candidate.suggested.dialogueRatio.max}`)
+      console.log(`破折号频率：${candidate.suggested.dashRatio.min}-${candidate.suggested.dashRatio.max}`)
+      console.log('候选不是 canon；确认后执行 weave style adopt 采纳')
+    }
+    return 0
+  }
+  if (action === 'adopt') {
+    const adopted = await adoptStyleCandidate(root)
+    if (json) outputJson({ ok: true, style: adopted })
+    else {
+      console.log(`已采纳风格候选 → canon/style.json`)
+      console.log(`句长：${adopted.sentenceLength.min}-${adopted.sentenceLength.max} 字；对白占比：${adopted.dialogueRatio.min}-${adopted.dialogueRatio.max}`)
+    }
+    return 0
+  }
+  if (action !== 'check') throw usageError('用法：weave style check <chapter>|samples|derive [--samples]|adopt')
   const chapter = parseChapter(parsed.positionals[1])
   const report = await styleCheck(root, chapter)
   if (json) outputJson(report)

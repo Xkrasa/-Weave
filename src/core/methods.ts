@@ -223,6 +223,14 @@ export async function styleCheck(root: string, chapter: number): Promise<{
   if (dialogueRatio > style.dialogueRatio.max) {
     findings.push({ severity: 'warning', code: 'HIGH_DIALOGUE', message: '对白占比高于风格宪法上限' })
   }
+  const dashRatio = [...draft].length === 0 ? 0 : (draft.match(/——|—/g) ?? []).length / [...draft].length
+  if (style.dashRatio && style.dashRatio.max > 0 && dashRatio > style.dashRatio.max) {
+    findings.push({
+      severity: 'warning',
+      code: 'EXCESS_DASH',
+      message: `破折号频率 ${dashRatio.toFixed(4)} 超过风格宪法上限 ${style.dashRatio.max}`,
+    })
+  }
   if (contract && style.pov !== 'any' && contract.narrativeMode !== style.pov) {
     findings.push({
       severity: 'warning',

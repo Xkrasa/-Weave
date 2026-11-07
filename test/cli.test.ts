@@ -1245,6 +1245,59 @@ test('ledger conflicts park as pending for adjudication instead of vanishing', a
   }
 })
 
+test('style derivation proposes ranges that only take effect after adopt', async () => {
+  const model = new FakeModel([
+    '林岚在码头数了三遍账目——每一遍都少十两。'
+    + '她把最后一页翻过去，又翻回来，指腹在纸面上压出褶皱。'
+    + '她说：“今天必须对上，差一两都过不去。”'
+    + '夜风从泊位那边灌进来，吹得账页哗哗作响，她按住纸角继续核对，直到灯芯烧到尽头。',
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    const written = await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(written.code, 0, written.stderr)
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 0, finalized.stderr)
+
+    const first = parseJson<{ candidate: { suggested: { sentenceLength: unknown; dialogueRatio: unknown; dashRatio: { max: number } }; derivedFrom: string[] } }>(
+      (await runCli(dir, ['style', 'derive', '--json'])).stdout,
+    )
+    assert.deepEqual(first.candidate.derivedFrom, ['chapter:1'])
+    assert.ok(first.candidate.suggested.dashRatio.max > 0, 'draft with a dash must yield a positive dash ceiling')
+
+    const second = parseJson<{ candidate: { suggested: unknown } }>(
+      (await runCli(dir, ['style', 'derive', '--json'])).stdout,
+    )
+    assert.deepEqual(second.candidate.suggested, first.candidate.suggested, 'repeated derivation is stable')
+
+    const canonStyle = path.join(dir, 'canon', 'style.json')
+    const beforeAdopt = await readFile(canonStyle, 'utf8').catch(() => null)
+    assert.ok(!beforeAdopt || !JSON.parse(beforeAdopt).dashRatio, 'derive must not touch canon')
+
+    const adopted = await runCli(dir, ['style', 'adopt', '--json'])
+    assert.equal(adopted.code, 0, adopted.stdout + adopted.stderr)
+    const canon = JSON.parse(await readFile(canonStyle, 'utf8')) as {
+      sentenceLength: unknown
+      dialogueRatio: unknown
+      dashRatio: unknown
+    }
+    assert.deepEqual(canon.sentenceLength, first.candidate.suggested.sentenceLength)
+    assert.deepEqual(canon.dialogueRatio, first.candidate.suggested.dialogueRatio)
+    assert.deepEqual(canon.dashRatio, first.candidate.suggested.dashRatio)
+
+    await writeFile(path.join(dir, 'chapters', 'drafts', '002.md'), '他走了——很远——不再回头——就这样。\n')
+    const checked = await runCli(dir, ['style', 'check', '2', '--json'])
+    assert.equal(checked.code, 0, checked.stdout + checked.stderr)
+    const report = parseJson<{ findings: Array<{ code: string }> }>(checked.stdout)
+    assert.ok(report.findings.some(finding => finding.code === 'EXCESS_DASH'), 'adopted dash ceiling must drive the lint')
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 async function prepareP05(model: FakeModel): Promise<string> {
   const dir = await initBook(model.baseUrl, [], 'p05')
   await contract1(dir)
