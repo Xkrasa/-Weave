@@ -8,6 +8,7 @@ import { loadContract, requirePassingContractCheck } from './contract.ts'
 import { assertOutlineApproved } from './outline.ts'
 import { collectMaterialBundle } from './materials.ts'
 import { assembleContext } from './context.ts'
+import { effectiveCharsPerToken, loadTokenCalibration } from './token-calibration.ts'
 import { completeJsonObject } from './model.ts'
 import { resolveTaskConfig } from './model-policy.ts'
 import { appendUsage } from './usage.ts'
@@ -79,8 +80,12 @@ export async function generateBeatCandidate(
   const contract = await loadContract(root, chapter)
   await requirePassingContractCheck(root, contract)
   const taskConfig = resolveTaskConfig(config, 'planning')
+  const calibration = await loadTokenCalibration(root)
   const { materials, withheld } = await collectMaterialBundle(root, contract)
-  const assembled = assembleContext(contract, materials, taskConfig, { withheld })
+  const assembled = assembleContext(contract, materials, taskConfig, {
+    withheld,
+    charsPerToken: effectiveCharsPerToken(taskConfig, calibration),
+  })
   if (assembled.decision.decision !== 'ready' || !assembled.context) {
     throw validationError(assembled.decision.decision === 'ready' ? '节拍材料装配失败' : assembled.decision.message)
   }

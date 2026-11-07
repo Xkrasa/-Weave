@@ -73,6 +73,7 @@ import { applyFinalizedChapter, markSearchIndexFailed } from './search.ts'
 import { assertOutlineApproved } from './outline.ts'
 import { ensureStoryMemory } from './memory.ts'
 import { resolveTaskConfig } from './model-policy.ts'
+import { recordTokenObservation } from './token-calibration.ts'
 import { generateKeyCandidates, type KeyCandidateGroup } from './tiered.ts'
 import type {
   ContentCheckReport,
@@ -193,6 +194,7 @@ export async function writeChapter(
     startedAt: new Date().toISOString(),
     contextHash: context.contextHash,
     promptHash: hashText(`${context.system}\n${context.user}`),
+    estimatedPromptChars: context.promptChars,
     materialSourceIds: context.included.map(item => item.sourceId),
     draftingStrategy,
     ...(beatCandidate ? { beatContentHash: beatCandidate.contentHash } : {}),
@@ -239,6 +241,7 @@ export async function writeChapter(
     await saveDraftMeta(root, nextMeta)
     const finished = finishRun(run, 'completed', { usage: result.usage, attempts: result.attempts })
     await saveRun(root, finished)
+    await recordTokenObservation(root, context.promptChars, result.usage?.promptTokens, context.charsPerToken)
     emit({ type: 'completed', draft })
     return {
       chapter,
@@ -580,6 +583,7 @@ async function writeSegmentedChapter(
   const omitted = new Map<string, string>()
   const degraded = new Map<string, string>()
   let estimatedTokens = 0
+  let promptChars = 0
   let layers = { stable: '', volume: '', chapter: '', full: '' }
   let renderer = 'json'
 
@@ -602,6 +606,7 @@ async function writeSegmentedChapter(
           segment: prompt,
           withheld: prepared.withheld,
           preOmitted: prepared.ideaOmitted,
+          charsPerToken: prepared.charsPerToken,
         })
         if (assembled.decision.decision !== 'ready' || !assembled.context) {
           throw validationError(
@@ -672,6 +677,14 @@ async function writeSegmentedChapter(
       }
       if (!acceptedContext) throw modelError(`第 ${segment.segmentId} 段没有可用正文`)
 
+      promptChars += acceptedContext.promptChars
+      await recordTokenObservation(
+        root,
+        acceptedContext.promptChars,
+        acceptedUsage?.promptTokens,
+        acceptedContext.charsPerToken,
+      )
+
       const saved = await saveSegmentOutput(root, chapter, segment.segmentId, acceptedText, run.runId)
       const summary: SegmentRunRecord = {
         segmentId: segment.segmentId,
@@ -688,6 +701,7 @@ async function writeSegmentedChapter(
       run.partialPath = path.relative(root, partialPath).split(path.sep).join('/')
       run.contextHash = objectHash({ planHash: input.plan.planHash, contexts: contextHashes })
       run.promptHash = objectHash({ contexts: contextHashes })
+      run.estimatedPromptChars = promptChars
       run.materialSourceIds = [...included]
       run.usage = sumUsage(usages)
       run.segments = summaries

@@ -399,6 +399,8 @@ export interface RunRecord {
   finishedAt?: string
   contextHash?: string
   promptHash?: string
+  /** Characters actually sent as the prompt; paired with usage.promptTokens for calibration. */
+  estimatedPromptChars?: number
   materialSourceIds: string[]
   draftingStrategy?: 'prose-first' | 'beat-first' | 'segmented'
   beatContentHash?: string

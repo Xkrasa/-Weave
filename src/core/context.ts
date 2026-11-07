@@ -1,4 +1,4 @@
-import type { ChapterContract, Material, MaterialDecision, ModelConfig } from './types.ts'
+﻿import type { ChapterContract, Material, MaterialDecision, ModelConfig } from './types.ts'
 import { hashText, objectHash } from './hash.ts'
 import { effectiveContextWindow, contextCapacityTokens } from './config.ts'
 
@@ -32,9 +32,13 @@ export interface AssembledContext {
   omitted: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
   /** 披露未到而被扣留的材料；不是预算省略，由材料收集阶段写入。 */
   withheld: Array<{ sourceId: string; reason: 'not-yet-revealed' | 'idea-spoiler' }>
-  /** 预算不足被降级为紧凑形态的可选材料；required 不降级。 */
+  /** Budget不足被降级为紧凑形态的可选材料；required 不降级。 */
   degraded: Array<{ sourceId: string; reason: 'budget' }>
   estimatedTokens: number
+  /** Characters actually sent in `system + user`; calibration compares this to provider usage. */
+  promptChars: number
+  /** Ratio used for this assembly (config value or the more conservative observed one). */
+  charsPerToken: number
 }
 
 export function estimateTokens(text: string, charsPerToken: number): number {
@@ -68,17 +72,20 @@ export function assembleContext(
     withheld?: Array<{ sourceId: string; reason: 'not-yet-revealed' | 'idea-spoiler' }>
     /** 材料收集阶段已判定超出想法配额/预算的条目；只上报，不再进入候选。 */
     preOmitted?: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
+    /** Token calibration: the caller passes the more conservative of config and observed values. */
+    charsPerToken?: number
   } = {},
 ): { decision: MaterialDecision; context: AssembledContext | null } {
   const renderer = renderMode(config)
+  const charsPerToken = options.charsPerToken ?? config.charsPerToken
   const segmentText = options.segment ? renderSegmentText(options.segment) : ''
   const contractText = `${JSON.stringify(contract, null, 2)}${options.beatText
     ? `\n\n已批准的场景节拍（生成辅助材料，不是既成事实）：\n${options.beatText}`
     : ''}${segmentText ? `\n\n${segmentText}` : ''}`
   const framing = `${SYSTEM_PROMPT}\n章节合同：\n${contractText}\n材料：\n`
   const fixedTokens =
-    estimateTokens(SYSTEM_PROMPT, config.charsPerToken) +
-    estimateTokens(contractText, config.charsPerToken) +
+    estimateTokens(SYSTEM_PROMPT, charsPerToken) +
+    estimateTokens(contractText, charsPerToken) +
     32
   const effectiveWindow = effectiveContextWindow(config)
   const capacityTokens = contextCapacityTokens(config, fixedTokens)
@@ -102,7 +109,7 @@ export function assembleContext(
       || (a.priority ?? 100) - (b.priority ?? 100)
       || a.sourceId.localeCompare(b.sourceId),
     )
-  const requiredTokens = required.reduce((sum, item) => sum + estimateTokens(item.text, config.charsPerToken), 0)
+  const requiredTokens = required.reduce((sum, item) => sum + estimateTokens(item.text, charsPerToken), 0)
 
   if (unknownRequired) {
     return {
@@ -120,7 +127,7 @@ export function assembleContext(
   }
 
   if (requiredTokens > capacityTokens) {
-    const oversized = required.find(item => estimateTokens(item.text, config.charsPerToken) > capacityTokens)
+    const oversized = required.find(item => estimateTokens(item.text, charsPerToken) > capacityTokens)
     const decision: 'split-required' | 'capacity-conflict' =
       !oversized && capacityTokens > 0 ? 'split-required' : 'capacity-conflict'
     return {
@@ -144,7 +151,7 @@ export function assembleContext(
   const degraded: Array<{ sourceId: string; reason: 'budget' }> = []
   let used = requiredTokens
   for (const item of optional) {
-    const tokens = estimateTokens(item.text, config.charsPerToken)
+    const tokens = estimateTokens(item.text, charsPerToken)
     if (used + tokens <= capacityTokens) {
       included.push(item)
       used += tokens
@@ -152,7 +159,7 @@ export function assembleContext(
     }
     // 预算不足的可选材料先降到紧凑形态保住存在性，仍塞不下才丢弃；required 永不走这条路。
     if (item.compact !== undefined) {
-      const compactTokens = estimateTokens(item.compact, config.charsPerToken)
+      const compactTokens = estimateTokens(item.compact, charsPerToken)
       if (used + compactTokens <= capacityTokens) {
         included.push({ ...item, text: item.compact, contentHash: hashText(item.compact) })
         degraded.push({ sourceId: item.sourceId, reason: 'budget' })
@@ -190,6 +197,8 @@ export function assembleContext(
       withheld: options.withheld ?? [],
       degraded,
       estimatedTokens: usedTokens,
+      promptChars: [...system].length + [...user].length,
+      charsPerToken,
     },
   }
 }

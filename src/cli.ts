@@ -2272,6 +2272,14 @@ async function commandDoctor(root: string, json: boolean): Promise<number> {
     if (result.budget) {
       console.log(`模型：${result.budget.model}；有效窗口 ${result.budget.effectiveWindow}；可用输入 ${result.budget.capacityTokens}`)
     }
+    if (result.calibration) {
+      const { calibration } = result
+      const percent = Math.round(calibration.deviation * 100)
+      console.log(
+        `token 校准：配置 ${calibration.configuredCharsPerToken} 字/token；观测 ${calibration.observedCharsPerToken}（${calibration.samples} 次）`
+        + `；最近一次估算 ${calibration.last.estimatedTokens} / 实际 ${calibration.last.promptTokens}（偏差 ${percent > 0 ? '+' : ''}${percent}%）`,
+      )
+    }
     for (const error of result.errors) console.error(`- ${error}`)
     for (const warning of result.warnings) console.warn(`- 警告：${warning}`)
   }

@@ -17,6 +17,7 @@ import { listPlans, readApprovedPlan, type CharacterArc, type RollingPlan, type 
 import { ensureStoryMemory, povMemory } from './memory.ts'
 import { preferenceMaterial, readApprovedPreferences } from './preferences.ts'
 import { listUnresolvedPending } from './pending.ts'
+import { effectiveCharsPerToken, loadTokenCalibration } from './token-calibration.ts'
 import { listIdeas, readIdea, ideaScopeMatches, findForbiddenIdeaMention } from './ideas.ts'
 
 interface ReferenceManifestEntry {
@@ -530,6 +531,9 @@ export async function prepareChapterContextInputs(
   } = {},
 ): Promise<{
   modelConfig: import('./types.ts').ModelConfig
+  /** Conservative ratio used for every budget decision in this bundle. */
+  charsPerToken: number
+  calibration: import('./token-calibration.ts').TokenCalibration | null
   materials: Material[]
   sampleSelection: import('./style.ts').AuthorSampleSelection
   methodSelection: import('./methods.ts').MethodSelection
@@ -539,10 +543,12 @@ export async function prepareChapterContextInputs(
   conflictWarnings: string[]
 }> {
   const modelConfig = options.modelConfig ?? resolveTaskConfig(await loadModelConfig(root), 'writing')
+  const calibration = await loadTokenCalibration(root)
+  const charsPerToken = effectiveCharsPerToken(modelConfig, calibration)
   const { materials, sampleSelection, methodSelection, withheld, ideaOmitted, ideaDegraded, ideaWarnings } = await collectMaterialBundle(root, contract, {
     authorSamples: options.authorSamples,
     includeBookIdeas: options.includeBookIdeas,
-    charsPerToken: modelConfig.charsPerToken,
+    charsPerToken,
   })
   const conflictWarnings: string[] = [...ideaWarnings]
   const head = await readMainline(root)
@@ -553,7 +559,18 @@ export async function prepareChapterContextInputs(
       `第 ${record.chapter} 章未裁决冲突：${record.subject} 的 ${record.predicate} 账本为「${record.priorObject}」，正文写「${record.object}」；执行 weave pending ${record.chapter} 裁决`,
     )
   }
-  return { modelConfig, materials, sampleSelection, methodSelection, withheld, ideaOmitted, ideaDegraded, conflictWarnings }
+  return {
+    modelConfig,
+    charsPerToken,
+    calibration,
+    materials,
+    sampleSelection,
+    methodSelection,
+    withheld,
+    ideaOmitted,
+    ideaDegraded,
+    conflictWarnings,
+  }
 }
 
 /**
@@ -587,6 +604,7 @@ export async function assembleChapterContext(
     ...(options.segment ? { segment: options.segment } : {}),
     withheld: prepared.withheld,
     preOmitted: prepared.ideaOmitted,
+    charsPerToken: prepared.charsPerToken,
   })
   if (assembled.context && prepared.ideaDegraded.length > 0) {
     assembled.context.degraded = [...assembled.context.degraded, ...prepared.ideaDegraded]

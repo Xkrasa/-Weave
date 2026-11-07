@@ -34,6 +34,12 @@ import { conflictError } from './errors.ts'
 import { rebuildSearchIndex, searchIndexHealth, type SearchIndexState } from './search.ts'
 import { loadStoryMemory, memoryIsCurrent } from './memory.ts'
 import { modelBudgetSummary, type ModelBudgetSummary } from './config.ts'
+import {
+  calibrationDeviation,
+  calibrationWarning,
+  loadTokenCalibration,
+  type CalibrationDeviation,
+} from './token-calibration.ts'
 
 export interface ChapterStatus {
   chapter: number
@@ -288,6 +294,8 @@ export interface DoctorResult {
   warnings: string[]
   checkedCommits: number
   budget?: ModelBudgetSummary
+  /** Observed vs configured token ratio; absent until at least one run reports usage. */
+  calibration?: CalibrationDeviation
 }
 
 async function memoryStatus(root: string): Promise<{
@@ -318,9 +326,17 @@ export async function doctor(root: string): Promise<DoctorResult> {
   const warnings: string[] = []
   let checkedCommits = 0
   let budget: ModelBudgetSummary | undefined
+  let calibration: CalibrationDeviation | undefined
   try {
     await loadProject(root)
-    budget = modelBudgetSummary(await loadModelConfig(root))
+    const modelConfig = await loadModelConfig(root)
+    budget = modelBudgetSummary(modelConfig)
+    const report = calibrationDeviation(modelConfig, await loadTokenCalibration(root))
+    if (report) {
+      calibration = report
+      const warning = calibrationWarning(report)
+      if (warning) warnings.push(warning)
+    }
   } catch (error) {
     errors.push(error instanceof Error ? error.message : String(error))
   }
@@ -450,7 +466,14 @@ export async function doctor(root: string): Promise<DoctorResult> {
     }
   }
 
-  return { ok: errors.length === 0, errors, warnings, checkedCommits, ...(budget ? { budget } : {}) }
+  return {
+    ok: errors.length === 0,
+    errors,
+    warnings,
+    checkedCommits,
+    ...(budget ? { budget } : {}),
+    ...(calibration ? { calibration } : {}),
+  }
 }
 
 export interface RebuildResult {
