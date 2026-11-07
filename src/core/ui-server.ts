@@ -16,6 +16,7 @@ import { runCoverageAudit } from './audit.ts'
 import { runReview } from './review.ts'
 import { applyWaivers, createWaivers, loadWaivers, revokeWaiver } from './waivers.ts'
 import { decidePending, listPending, listUnresolvedPending } from './pending.ts'
+import { assembleChapterContext } from './materials.ts'
 import {
   ignoreFinding,
   loadRevision,
@@ -407,6 +408,25 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
         ...status.chapters.map(item => item.chapter),
         ...status.drafts,
       ]),
+    })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/context/preview') {
+    const chapterParam = numberParam(url.searchParams.get('chapter'))
+    if (chapterParam === undefined) throw usageError('缺少 chapter')
+    const contract = await loadContract(root, chapterParam)
+    const assembled = await assembleChapterContext(root, contract)
+    sendJson(response, 200, {
+      chapter: chapterParam,
+      decision: assembled.decision,
+      context: assembled.context && {
+        contextHash: assembled.context.contextHash,
+        estimatedTokens: assembled.context.estimatedTokens,
+        included: assembled.context.included.map(item => item.sourceId),
+        omitted: assembled.context.omitted,
+        withheld: assembled.context.withheld,
+        degraded: assembled.context.degraded,
+      },
     })
     return
   }

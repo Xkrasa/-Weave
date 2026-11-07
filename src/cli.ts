@@ -125,6 +125,7 @@ import {
   seriesTimeline,
 } from './core/story-ledger.ts'
 import { loadCharacters } from './core/contract.ts'
+import { assembleChapterContext } from './core/materials.ts'
 import { assertLedgerProjectionCurrent, type LedgerProjectionName } from './core/ledger-projection.ts'
 import { assertProjectionCurrent } from './core/projections.ts'
 import { draftHash, loadStage, readDraft, requireStage, saveStage } from './core/stages.ts'
@@ -172,6 +173,8 @@ async function main(): Promise<number> {
       return commandWaivers(root, parsed, json)
     case 'pending':
       return commandPending(root, parsed, json)
+    case 'context':
+      return commandContext(root, parsed, json)
     case 'search':
       return commandSearch(root, parsed, json)
     case 'chunk':
@@ -1026,6 +1029,41 @@ async function finalizedStyleSamples(root: string): Promise<Array<{ id: string; 
     if (text?.trim()) samples.push({ id: `chapter:${chapter}`, text })
   }
   return samples
+}
+
+async function commandContext(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const contract = await loadContract(root, chapter)
+  const { decision, context } = await assembleChapterContext(root, contract)
+  if (decision.decision !== 'ready' || !context) {
+    const message = decision.decision === 'ready' ? '上下文装配失败' : decision.message
+    if (json) outputJson({ ok: false, decision })
+    else console.log(`装配不可用：${message}`)
+    return 3
+  }
+  const counts = new Map<string, number>()
+  for (const item of context.included) counts.set(item.category, (counts.get(item.category) ?? 0) + 1)
+  if (json) {
+    outputJson({
+      ok: true,
+      chapter,
+      contextHash: context.contextHash,
+      estimatedTokens: context.estimatedTokens,
+      included: context.included.map(item => item.sourceId),
+      counts: Object.fromEntries(counts),
+      omitted: context.omitted,
+      withheld: context.withheld,
+      degraded: context.degraded,
+    })
+  } else {
+    console.log(`第 ${chapter} 章装配预览：估算 ${context.estimatedTokens} token；contextHash ${context.contextHash.slice(0, 12)}…`)
+    const summary = [...counts].map(([category, count]) => `${category} ${count}`).join('、')
+    console.log(`材料：${context.included.length} 项${summary ? `（${summary}）` : ''}`)
+    if (context.withheld.length > 0) console.log(`未披露（披露未到，非省略）：${context.withheld.map(item => item.sourceId).join('、')}`)
+    if (context.degraded.length > 0) console.log(`降级：${context.degraded.map(item => item.sourceId).join('、')}`)
+    if (context.omitted.length > 0) console.log(`省略：${context.omitted.map(item => `${item.sourceId}(${item.reason})`).join('、')}`)
+  }
+  return 0
 }
 
 async function commandStyle(root: string, parsed: Parsed, json: boolean): Promise<number> {

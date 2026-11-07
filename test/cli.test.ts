@@ -1298,6 +1298,27 @@ test('style derivation proposes ranges that only take effect after adopt', async
   }
 })
 
+test('context preview matches the hash actually sent', async () => {
+  const model = new FakeModel(['第一章正文：林岚在码头核对账本，记下缺页数目。'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    const written = parseJson<{ contextHash: string; included: string[]; withheld: unknown[] }>(
+      (await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).stdout,
+    )
+    const preview = parseJson<{ contextHash: string; included: string[]; estimatedTokens: number }>(
+      (await runCli(dir, ['context', '1', '--json'])).stdout,
+    )
+    assert.equal(preview.contextHash, written.contextHash, 'preview must hash exactly what write sends')
+    assert.deepEqual(preview.included, written.included)
+    assert.ok(preview.estimatedTokens > 0)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 async function prepareP05(model: FakeModel): Promise<string> {
   const dir = await initBook(model.baseUrl, [], 'p05')
   await contract1(dir)

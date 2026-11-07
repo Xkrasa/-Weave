@@ -11,10 +11,9 @@ import type {
 } from './types.ts'
 import { assertNoPendingImpacts, createImpactReport } from './impact.ts'
 import { loadCharacters, loadContract, contractHash, requirePassingContractCheck } from './contract.ts'
-import { collectMaterialBundle } from './materials.ts'
+import { assembleChapterContext } from './materials.ts'
 import { formatBeats, requireApprovedBeats, type DraftingStrategy } from './beats.ts'
 import type { AuthorSampleSelection } from './style.ts'
-import { assembleContext } from './context.ts'
 import { streamChapter } from './model.ts'
 import { loadModelConfig, loadProject } from './project.ts'
 import { atomicWrite, normalizeText, readTextIfExists } from './io.ts'
@@ -140,17 +139,14 @@ export async function writeChapter(
   const beatCandidate = draftingStrategy === 'beat-first'
     ? await requireApprovedBeats(root, chapter, { allowBenchmarkDraft: options.benchmark === true })
     : null
-  const { materials, sampleSelection, methodSelection, withheld } = await collectMaterialBundle(root, contract, {
+  const { decision, context, sampleSelection, methodSelection } = await assembleChapterContext(root, contract, {
     authorSamples: options.authorSamples,
-  })
-  const assembled = assembleContext(contract, materials, modelConfig, {
     ...(beatCandidate ? { beatText: formatBeats(beatCandidate) } : {}),
-    withheld,
+    modelConfig,
   })
-  if (assembled.decision.decision !== 'ready') {
-    throw validationError(assembled.decision.message, assembled.decision)
+  if (decision.decision !== 'ready') {
+    throw validationError(decision.message, decision)
   }
-  const context = assembled.context
   if (!context) throw validationError('上下文装配失败')
 
   const recovery = await resolveRecovery(root, chapter, options.resumeFromRunId)

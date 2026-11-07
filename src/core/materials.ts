@@ -6,6 +6,9 @@ import { loadCharacters, loadContract } from './contract.ts'
 import { projectPaths } from './project.ts'
 import { currentCommit, finalPath, readMainline } from './ledger.ts'
 import { collectLedger, collectLoopState, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
+import { assembleContext } from './context.ts'
+import { loadModelConfig } from './project.ts'
+import { resolveTaskConfig } from './model-policy.ts'
 import { loadMethods, methodText, selectMethods } from './methods.ts'
 import { loadStyleConstitution, selectAuthorSamples, styleText } from './style.ts'
 import { conflictError, validationError } from './errors.ts'
@@ -383,6 +386,36 @@ export async function collectMaterials(
   options: { authorSamples?: 'scene' | 'legacy' | 'off' } = {},
 ): Promise<Material[]> {
   return (await collectMaterialBundle(root, contract, options)).materials
+}
+
+/**
+ * 与 writeChapter 共用的装配入口：预览（weave context / /api/context/preview）和实际生成
+ * 必须走同一函数、同一参数，contextHash 才能互为凭证。
+ */
+export async function assembleChapterContext(
+  root: string,
+  contract: ChapterContract,
+  options: {
+    authorSamples?: 'scene' | 'legacy' | 'off'
+    beatText?: string
+    /** writeChapter 复用自己的写作任务配置；预览不传时由本函数加载同一配置。 */
+    modelConfig?: import('./types.ts').ModelConfig
+  } = {},
+): Promise<{
+  decision: import('./types.ts').MaterialDecision
+  context: import('./context.ts').AssembledContext | null
+  sampleSelection: import('./style.ts').AuthorSampleSelection
+  methodSelection: import('./methods.ts').MethodSelection
+}> {
+  const modelConfig = options.modelConfig ?? resolveTaskConfig(await loadModelConfig(root), 'writing')
+  const { materials, sampleSelection, methodSelection, withheld } = await collectMaterialBundle(root, contract, {
+    authorSamples: options.authorSamples,
+  })
+  const assembled = assembleContext(contract, materials, modelConfig, {
+    ...(options.beatText ? { beatText: options.beatText } : {}),
+    withheld,
+  })
+  return { decision: assembled.decision, context: assembled.context, sampleSelection, methodSelection }
 }
 
 
