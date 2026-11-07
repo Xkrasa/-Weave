@@ -236,6 +236,57 @@ test('cockpit returns contract, draft, gates, findings and revisions in one requ
   }
 })
 
+test('cockpit context budget lists included materials with tokens, purpose and required flags', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-context-budget-'))
+  await initProject(dir, {
+    title: '预算测试',
+    model: 'fake-model',
+    baseUrl: 'http://127.0.0.1:1/v1',
+    workflowVersion: 2,
+  })
+  await saveContract(dir, contract())
+  await mkdir(path.join(dir, 'canon'), { recursive: true })
+  await writeFile(path.join(dir, 'canon', 'characters.json'), `${JSON.stringify({
+    characters: [{ name: '林岚', status: 'alive', introducedIn: 1 }],
+  })}\n`)
+  const server = await startUiServer(dir)
+  try {
+    const budget = await (await fetch(`${server.url}/api/chapters/1/context/budget`)).json() as {
+      chapter: number
+      capacityTokens: number
+      usedTokens: number
+      remainingTokens: number
+      charsPerToken: number
+      included: Array<{ sourceId: string; purpose: string; tokens: number; required: boolean }>
+      error?: string
+    }
+    assert.equal(budget.chapter, 1)
+    assert.equal(budget.error, undefined)
+    assert.ok(budget.capacityTokens > 0)
+    assert.ok(budget.charsPerToken > 0)
+    assert.equal(budget.remainingTokens, Math.max(0, budget.capacityTokens - budget.usedTokens))
+    assert.ok(budget.included.length > 0, '至少包含一个人物材料')
+    for (const item of budget.included) {
+      assert.equal(typeof item.sourceId, 'string')
+      assert.equal(typeof item.purpose, 'string')
+      assert.equal(typeof item.tokens, 'number')
+      assert.equal(typeof item.required, 'boolean')
+    }
+
+    const cockpit = await (await fetch(`${server.url}/api/chapters/1/cockpit`)).json() as {
+      context: {
+        remainingTokens: number
+        included: Array<{ sourceId: string; tokens: number }>
+      }
+    }
+    assert.equal(cockpit.context.remainingTokens, budget.remainingTokens)
+    assert.equal(cockpit.context.included.length, budget.included.length)
+  } finally {
+    await server.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('cockpit truncates very large finding lists and flags it', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-cockpit-truncate-'))
   const draft = DRAFT

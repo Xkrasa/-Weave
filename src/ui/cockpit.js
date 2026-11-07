@@ -325,22 +325,30 @@ export function renderContext(payload, escapeHtml) {
   const context = payload?.context ?? {}
   const capacity = Number(context.capacityTokens) || 0
   const used = Number(context.usedTokens) || 0
+  const remaining = Number(context.remainingTokens) || Math.max(0, capacity - used)
   const percent = capacity > 0 ? Math.min(100, Math.round((used / capacity) * 100)) : 0
   const list = (title, items) => items?.length
     ? `<div class="section-label">${esc(title)}</div>${items.map(item => `<div class="card compact"><p>${esc(item.sourceId)}</p><p class="small muted">${esc(item.reason)}</p></div>`).join('')}`
+    : ''
+  const included = Array.isArray(context.included) && context.included.length
+    ? `<div class="section-label">已纳入（${context.included.length}）</div>${context.included.map(item => `<div class="card compact">
+        <p>${esc(item.sourceId)}${item.required ? ' <span class="status-tag status-pending">必需</span>' : ''}</p>
+        <p class="small muted">${esc(item.purpose || item.label || '')} · ${esc(item.category ?? '')} · ${Number(item.tokens) || 0} tokens</p>
+      </div>`).join('')}`
     : ''
   return `
     <div class="section-label">上下文预算</div>
     <div class="card">
       <p><b>${esc(context.model || '未配置模型')}</b> · chars/token ${esc(context.charsPerToken ?? '—')}</p>
-      <p>有效窗口 ${formatTokens(context.effectiveWindow)} · 输入预算 ${formatTokens(capacity)}</p>
+      <p>有效窗口 ${formatTokens(context.effectiveWindow)} · 输入预算 ${formatTokens(capacity)} · 剩余 ${formatTokens(remaining)}</p>
       <div class="budget-meter wide"><span class="budget-bar"><i style="width:${percent}%"></i></span><span class="muted small">${used}/${capacity} · ${percent}%</span></div>
       <p class="muted small">1M 窗口是能力上限，不是填充目标；超出预算的材料会被省略或降级。</p>
       ${context.error ? `<p class="text-danger small">${esc(context.error)}</p>` : ''}
     </div>
-    ${list('被省略', context.omitted)}
+    ${included}
+    ${list('被省略（预算）', context.omitted)}
     ${list('按披露扣留', context.withheld)}
-    ${list('已降级', context.degraded)}`
+    ${list('已降级（预算）', context.degraded)}`
 }
 
 export function renderStages(payload, escapeHtml) {

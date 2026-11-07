@@ -51,7 +51,7 @@ import {
   reviewPreferenceCandidates,
 } from './preferences.ts'
 import { readCommit, readMainline } from './ledger.ts'
-import { buildChapterCockpit, buildChapterGates, latestWritingRuns } from './cockpit.ts'
+import { buildChapterCockpit, buildChapterGates, buildContextBudget, latestWritingRuns } from './cockpit.ts'
 import { compareChapterWithCommit } from './compare.ts'
 import { readBeatCandidate, generateBeatCandidate, approveBeatCandidate, parseDraftingStrategy } from './beats.ts'
 import { readSegmentPlan, planSegments, approveSegmentPlan } from './segments.ts'
@@ -228,6 +228,10 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
   }
   if (chapter && request.method === 'GET' && parts[3] === 'cockpit') {
     sendJson(response, 200, await buildChapterCockpit(root, chapter))
+    return
+  }
+  if (chapter && request.method === 'GET' && parts[3] === 'context' && parts[4] === 'budget') {
+    sendJson(response, 200, await buildContextBudget(root, chapter))
     return
   }
   if (chapter && request.method === 'GET' && parts[3] === 'compare') {

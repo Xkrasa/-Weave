@@ -15,6 +15,7 @@ import { listFiles, readJsonIfExists, readTextIfExists } from './io.ts'
 import { projectPaths, loadModelConfig } from './project.ts'
 import { contextCapacityTokens, effectiveContextWindow } from './config.ts'
 import { assembleChapterContext } from './materials.ts'
+import { estimateTokens } from './context.ts'
 import { readSegmentPlan, segmentTextPath, type SegmentPlanView, type ChapterSegment } from './segments.ts'
 import { readBeatCandidate, type BeatCandidateView } from './beats.ts'
 import { countProseChars } from './segment-checks.ts'
@@ -78,12 +79,23 @@ export interface RevisionSummary {
   matched?: boolean
 }
 
+export interface CockpitContextItem {
+  sourceId: string
+  label: string
+  purpose: string
+  category: string
+  tokens: number
+  required: boolean
+}
+
 export interface CockpitContext {
   model: string
   charsPerToken: number
   effectiveWindow: number
   capacityTokens: number
   usedTokens: number
+  remainingTokens: number
+  included: CockpitContextItem[]
   omitted: Array<{ sourceId: string; reason: string }>
   withheld: Array<{ sourceId: string; reason: string }>
   degraded: Array<{ sourceId: string; reason: string }>
@@ -432,6 +444,8 @@ async function buildContext(
     effectiveWindow: config ? effectiveContextWindow(config) : 0,
     capacityTokens: config ? contextCapacityTokens(config) : 0,
     usedTokens: 0,
+    remainingTokens: config ? contextCapacityTokens(config) : 0,
+    included: [],
     omitted: [],
     withheld: [],
     degraded: [],
@@ -440,9 +454,23 @@ async function buildContext(
   try {
     const assembled = await assembleChapterContext(root, contract, { modelConfig: config })
     const decision: MaterialDecision = assembled.decision
+    const charsPerToken = assembled.context?.charsPerToken ?? config.charsPerToken
+    const usedTokens = assembled.context?.estimatedTokens ?? decision.requiredTokens
+    const capacityTokens = assembled.context ? decision.capacityTokens : fallback.capacityTokens
     return {
       ...fallback,
-      usedTokens: assembled.context?.estimatedTokens ?? decision.requiredTokens,
+      capacityTokens,
+      charsPerToken,
+      usedTokens,
+      remainingTokens: Math.max(0, capacityTokens - usedTokens),
+      included: (assembled.context?.included ?? []).map(item => ({
+        sourceId: item.sourceId,
+        label: item.label,
+        purpose: item.purpose,
+        category: item.category,
+        tokens: estimateTokens(item.text, charsPerToken),
+        required: item.required,
+      })),
       omitted: assembled.context?.omitted
         ?? (decision.decision === 'ready' ? decision.omitted : decision.omissions),
       withheld: assembled.context?.withheld ?? [],
@@ -454,6 +482,19 @@ async function buildContext(
       error: error instanceof WeaveError ? error.message : error instanceof Error ? error.message : String(error),
     }
   }
+}
+
+/** `/api/context/budget`: the same assembly the cockpit uses, scoped to one chapter. */
+export interface ContextBudgetView extends CockpitContext {
+  chapter: number
+}
+
+export async function buildContextBudget(root: string, chapter: number): Promise<ContextBudgetView> {
+  const [contract, config] = await Promise.all([
+    loadContract(root, chapter).catch(() => null),
+    loadModelConfig(root).catch(() => null),
+  ])
+  return { chapter, ...(await buildContext(root, contract, config)) }
 }
 
 function neighborsOf(status: ProjectStatus, chapter: number): { prev: number | null; next: number | null } {
