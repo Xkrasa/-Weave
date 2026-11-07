@@ -42,6 +42,10 @@ tags:
 - 构造三章测试，第二章结余故意错 5，`weave audit` 必出 `quantity-break`；正确数据不出 finding。
 - 基线不明的 delta 记 `unverified`，不产生凑数 balance。
 
+## 已知限制（2026-11-07 交付）
+
+归并键仍是 `subject + predicate + unit` 字符串：同一人物用别名（林岚/林姑娘）会被当成两个账户，「稳定 id 而非别名」未实现，待出现真实别名错账案例再引入 registry 映射，不预做。
+
 ## 非目标
 
 - 不做汇率、单位换算、浮点数量。

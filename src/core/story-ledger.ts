@@ -347,6 +347,11 @@ export async function checkBalances(
   return breaks
 }
 
+/** audit 警告与 CLI 输出共用同一条文案，避免两处口径漂移。 */
+export function formatQuantityBreak(item: QuantityBreak): string {
+  return `数值总账对不上：${item.subject} 的 ${item.unit}（第 ${item.chapter} 章）上章 ${item.previousBalance} + 变化 ${item.delta} 应为 ${item.expectedBalance}，正文写 ${item.statedBalance}`
+}
+
 export function effectiveFacts(facts: LedgerFact[], chapter: number): LedgerFact[] {
   const active = facts.filter(fact =>
     fact.origin !== 'candidate'

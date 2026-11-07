@@ -42,6 +42,12 @@ tags:
 - 构造「正文写角色已死、账本记录存活」的章节：抽取产出 `pending` 而非 `rejected`；裁决后 `rebuild` 与手工修正一致。
 - 存在同 subject 未决 pending 时写下一章，status / 装配报告出现 warning。
 
+## 交付裁决（2026-11-07）
+
+- **分流范围收窄为单值状态谓词**（status/condition/injury/health/alive/dead）：location、possession 每章合法变化，纳入会把队列灌满；数量类冲突由 `quantity-ledger-balances` 的 `quantity-break` 覆盖。与「合同」的冲突暂不进队列（合同检查另有门禁）。
+- **待裁决事实计入维度覆盖**：否则被扣下的状态变化会让 audit 的必检维度判定失败、间接阻断定稿，违反「pending 不阻断」。裁决只决定入账与否，不扣覆盖。
+- 未决冲突在 `weave status`、`weave context` 装配报告与 write 输出三处以 warning 呈现，裁决后消警；不进 prompt、不影响 contextHash。
+
 ## 非目标
 
 - 不自动裁决、不根据 pending 改写 canon 或正文。

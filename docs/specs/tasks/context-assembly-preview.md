@@ -40,6 +40,10 @@ tags:
 - 预览显示的 `contextHash` 与实际写入 run 记录的一致。
 - 三类清单（含被各自任务填充的 `withheld` / `degraded`）在预览中可见。
 
+## 交付裁决（2026-11-07）
+
+CLI（`weave context`）与 `/api/context/preview` 已交付并验证 contextHash 一致；`src/ui/app.js` 的写作区展示（token 条、三类清单）**未做**——端点已就绪，显示层并入 planning-authoring-ui 的后续迭代，不单独立项。
+
 ## 非目标
 
 - 不在预览里改配置——预设切换属于 `context-assembly-profiles`。

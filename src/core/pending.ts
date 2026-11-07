@@ -37,6 +37,15 @@ export async function loadPendingDecisions(root: string): Promise<PendingDecisio
   return store?.decisions ?? []
 }
 
+/** 某章已裁决的 pendingId 集合；audit 与列表共用。 */
+export async function decidedPendingIds(root: string, chapter: number): Promise<Set<string>> {
+  const decided = new Set<string>()
+  for (const decision of await loadPendingDecisions(root)) {
+    if (decision.chapter === chapter) decided.add(decision.pendingId)
+  }
+  return decided
+}
+
 async function saveDecisions(root: string, decisions: PendingDecision[]): Promise<void> {
   await atomicWriteJson(storePath(root), { schemaVersion: 1, decisions })
 }
@@ -52,9 +61,7 @@ export async function listPending(
 ): Promise<{ unresolved: PendingRecord[]; resolved: PendingRecord[] }> {
   const report = await loadStage<ExtractionReport>(root, 'extraction', chapter)
   if (!report) throw validationError(`第 ${chapter} 章没有抽取报告`)
-  const decided = new Set((await loadPendingDecisions(root))
-    .filter(decision => decision.chapter === chapter)
-    .map(decision => decision.pendingId))
+  const decided = await decidedPendingIds(root, chapter)
   const records = report.pending ?? []
   return {
     unresolved: records.filter(record => !decided.has(record.pendingId)),

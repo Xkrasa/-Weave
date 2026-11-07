@@ -40,6 +40,10 @@ tags:
 - 把预算压到只够 required：装配报告出现 `degraded` 列表，prompt 保留角色名但无完整卡；提高预算后恢复完整注入。
 - 现有容量冲突测试语义不变。
 
+## 交付裁决（2026-11-07）
+
+compact 落点从决策篇的「canon 角色/设定」移到了可选材料 `plan:character-arcs` / `plan:volume` / `plan:rolling`：canon 材料全部是 `required`，而 required 永不降级——给它们配 compact 是死代码。降级档只对 non-required 有意义，人物弧/卷弧/滚动章纲正是「角色/设定」类信息中可选的部分。伏笔没有独立注入材料，不在本轮范围。
+
 ## 非目标
 
 - 不做总开关二元降级（马良方案的「关 = 精简装配」已被否决）。

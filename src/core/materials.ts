@@ -16,6 +16,7 @@ import { rebuildSearchIndex, searchBook, searchIndexHealth } from './search.ts'
 import { listPlans, readApprovedPlan, type CharacterArc, type RollingPlan, type StoryPromise, type VolumeArc } from './planning.ts'
 import { ensureStoryMemory, povMemory } from './memory.ts'
 import { preferenceMaterial, readApprovedPreferences } from './preferences.ts'
+import { listUnresolvedPending } from './pending.ts'
 
 interface ReferenceManifestEntry {
   id: string
@@ -406,6 +407,8 @@ export async function assembleChapterContext(
   context: import('./context.ts').AssembledContext | null
   sampleSelection: import('./style.ts').AuthorSampleSelection
   methodSelection: import('./methods.ts').MethodSelection
+  /** 作者可见警告：涉及本章角色的未裁决账本冲突。不进 prompt、不影响 contextHash。 */
+  conflictWarnings: string[]
 }> {
   const modelConfig = options.modelConfig ?? resolveTaskConfig(await loadModelConfig(root), 'writing')
   const { materials, sampleSelection, methodSelection, withheld } = await collectMaterialBundle(root, contract, {
@@ -415,7 +418,16 @@ export async function assembleChapterContext(
     ...(options.beatText ? { beatText: options.beatText } : {}),
     withheld,
   })
-  return { decision: assembled.decision, context: assembled.context, sampleSelection, methodSelection }
+  const conflictWarnings: string[] = []
+  const head = await readMainline(root)
+  const chaptersWithStages = [...Object.keys(head.selectedCommitByChapter).map(Number), contract.chapter]
+  for (const record of await listUnresolvedPending(root, chaptersWithStages)) {
+    if (!contract.characters.includes(record.subject)) continue
+    conflictWarnings.push(
+      `第 ${record.chapter} 章未裁决冲突：${record.subject} 的 ${record.predicate} 账本为「${record.priorObject}」，正文写「${record.object}」；执行 weave pending ${record.chapter} 裁决`,
+    )
+  }
+  return { decision: assembled.decision, context: assembled.context, sampleSelection, methodSelection, conflictWarnings }
 }
 
 

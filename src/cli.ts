@@ -29,7 +29,7 @@ import {
 } from './core/beats.ts'
 import { findRecoverableRun } from './core/runs.ts'
 import { createImpactReport, loadImpactReport, resolveImpact } from './core/impact.ts'
-import { currentCommit, readMainline } from './core/ledger.ts'
+import { currentCommit, finalPath, readMainline } from './core/ledger.ts'
 import {
   doctor,
   exportBook,
@@ -121,6 +121,7 @@ import {
   effectiveFacts,
   entityState,
   collectLoopState,
+  formatQuantityBreak,
   knowledgeState,
   seriesTimeline,
 } from './core/story-ledger.ts'
@@ -1025,7 +1026,7 @@ async function finalizedStyleSamples(root: string): Promise<Array<{ id: string; 
   const chapters = Object.keys(head.selectedCommitByChapter).map(Number).sort((a, b) => a - b).slice(-6)
   const samples: Array<{ id: string; text: string }> = []
   for (const chapter of chapters) {
-    const text = await readTextIfExists(path.join(root, 'chapters', 'final', `${String(chapter).padStart(3, '0')}.md`))
+    const text = await readTextIfExists(finalPath(root, chapter))
     if (text?.trim()) samples.push({ id: `chapter:${chapter}`, text })
   }
   return samples
@@ -1034,7 +1035,7 @@ async function finalizedStyleSamples(root: string): Promise<Array<{ id: string; 
 async function commandContext(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const chapter = parseChapter(parsed.positionals[0])
   const contract = await loadContract(root, chapter)
-  const { decision, context } = await assembleChapterContext(root, contract)
+  const { decision, context, conflictWarnings } = await assembleChapterContext(root, contract)
   if (decision.decision !== 'ready' || !context) {
     const message = decision.decision === 'ready' ? '上下文装配失败' : decision.message
     if (json) outputJson({ ok: false, decision })
@@ -1054,6 +1055,7 @@ async function commandContext(root: string, parsed: Parsed, json: boolean): Prom
       omitted: context.omitted,
       withheld: context.withheld,
       degraded: context.degraded,
+      conflictWarnings,
     })
   } else {
     console.log(`第 ${chapter} 章装配预览：估算 ${context.estimatedTokens} token；contextHash ${context.contextHash.slice(0, 12)}…`)
@@ -1062,6 +1064,7 @@ async function commandContext(root: string, parsed: Parsed, json: boolean): Prom
     if (context.withheld.length > 0) console.log(`未披露（披露未到，非省略）：${context.withheld.map(item => item.sourceId).join('、')}`)
     if (context.degraded.length > 0) console.log(`降级：${context.degraded.map(item => item.sourceId).join('、')}`)
     if (context.omitted.length > 0) console.log(`省略：${context.omitted.map(item => `${item.sourceId}(${item.reason})`).join('、')}`)
+    for (const warning of conflictWarnings) console.log(`- ${warning}`)
   }
   return 0
 }
@@ -1279,7 +1282,7 @@ async function commandAudit(root: string, parsed: Parsed, json: boolean): Promis
     for (const missed of report.contract.missed) console.log(`- 未覆盖：${missed}`)
     for (const error of report.timeline.errors) console.log(`- 时间线：${error}`)
     for (const item of report.quantityBreaks) {
-      console.log(`- 数值总账：${item.subject} 的 ${item.unit}（第 ${item.chapter} 章）上章 ${item.previousBalance} + ${item.delta} 应为 ${item.expectedBalance}，正文写 ${item.statedBalance}`)
+      console.log(`- ${formatQuantityBreak(item)}`)
     }
   }
   return report.passed ? 0 : 3
@@ -1537,6 +1540,7 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
         omitted: result.omitted,
         withheld: result.withheld,
         degraded: result.degraded,
+        conflictWarnings: result.conflictWarnings,
         usage: result.run.usage ?? {},
         attempts: result.run.attempts ?? [],
         recovery: result.run.recovery,
@@ -1554,6 +1558,7 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
       if (result.degraded.length > 0) {
         console.log(`降级材料：${result.degraded.map(item => `${item.sourceId}(${item.reason})`).join('、')}`)
       }
+      for (const warning of result.conflictWarnings) console.log(`- ${warning}`)
       for (const group of result.keyCandidates) {
         console.log(`关键段落候选（${group.focus} / ${group.paragraphId}）：${group.revisionIds.join('、')}`)
       }

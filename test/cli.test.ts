@@ -1204,6 +1204,12 @@ test('ledger conflicts park as pending for adjudication instead of vanishing', a
     )
     assert.ok(status.pendingConflicts?.some(item => item.chapter === 2 && item.subject === '林岚'))
 
+    const conflictedPreview = parseJson<{ conflictWarnings: string[] }>(
+      (await runCli(dir, ['context', '2', '--json'])).stdout,
+    )
+    assert.equal(conflictedPreview.conflictWarnings.length, 1, 'assembly report must warn on unresolved conflicts')
+    assert.match(conflictedPreview.conflictWarnings[0]!, /林岚.*status/)
+
     const audited = await runCli(dir, ['audit', '2', '--json'])
     assert.equal(audited.code, 0, audited.stdout + audited.stderr)
     const auditPayload = parseJson<{ warnings: string[]; passed: boolean }>(audited.stdout)
@@ -1220,6 +1226,10 @@ test('ledger conflicts park as pending for adjudication instead of vanishing', a
       'pending', 'decide', '2', pending.pendingId, '--as', 'text', '--reason', '正文为准：火场殉职', '--json',
     ])
     assert.equal(decided.code, 0, decided.stdout + decided.stderr)
+    const clearedPreview = parseJson<{ conflictWarnings: string[] }>(
+      (await runCli(dir, ['context', '2', '--json'])).stdout,
+    )
+    assert.deepEqual(clearedPreview.conflictWarnings, [], 'warnings must clear after adjudication')
     const relisted = parseJson<{ unresolved: unknown[]; resolved: Array<{ pendingId: string }> }>(
       (await runCli(dir, ['pending', '2', '--json'])).stdout,
     )

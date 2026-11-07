@@ -91,6 +91,7 @@ export interface WriteResult {
   omitted: Array<{ sourceId: string; reason: string }>
   withheld: Array<{ sourceId: string; reason: string }>
   degraded: Array<{ sourceId: string; reason: string }>
+  conflictWarnings: string[]
 }
 
 export async function writeChapter(
@@ -139,7 +140,7 @@ export async function writeChapter(
   const beatCandidate = draftingStrategy === 'beat-first'
     ? await requireApprovedBeats(root, chapter, { allowBenchmarkDraft: options.benchmark === true })
     : null
-  const { decision, context, sampleSelection, methodSelection } = await assembleChapterContext(root, contract, {
+  const { decision, context, sampleSelection, methodSelection, conflictWarnings } = await assembleChapterContext(root, contract, {
     authorSamples: options.authorSamples,
     ...(beatCandidate ? { beatText: formatBeats(beatCandidate) } : {}),
     modelConfig,
@@ -224,6 +225,7 @@ export async function writeChapter(
       omitted: context.omitted,
       withheld: context.withheld,
       degraded: context.degraded,
+      conflictWarnings,
     }
   } catch (error) {
     const cancelled = options.signal.aborted

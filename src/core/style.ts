@@ -167,6 +167,12 @@ function metadataValues(metadata: string, names: string[]): string[] {
   return value.split(',').map(item => item.trim()).filter(Boolean)
 }
 
+/** 破折号频率：deriveStyleRange 与 styleCheck 共用同一口径。 */
+export function dashRatio(text: string): number {
+  const chars = [...text].length
+  return chars === 0 ? 0 : (text.match(/——|—/g) ?? []).length / chars
+}
+
 function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0
   if (sorted.length === 1) return sorted[0]!
@@ -203,7 +209,7 @@ export function deriveStyleRange(samples: Array<{ id: string; text: string }>): 
     const chars = [...text].length
     const dialogueText = (text.match(/“[^”]*”|"[^"]*"/g) ?? []).join('')
     dialogue.push([...dialogueText].length / chars)
-    dash.push((text.match(/——|—/g) ?? []).length / chars)
+    dash.push(dashRatio(text))
     question.push((text.match(/？|\?/g) ?? []).length / chars)
   }
   return {
