@@ -2,7 +2,7 @@
 id: extraction-pending-adjudication
 type: task-spec
 title: 抽取冲突进待裁决队列而非静默丢弃
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - extraction-grounding-rules

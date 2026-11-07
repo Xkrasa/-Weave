@@ -2,7 +2,7 @@
 id: volume-progressive-disclosure
 type: task-spec
 title: 设定按卷渐进披露
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - assembled-context-report

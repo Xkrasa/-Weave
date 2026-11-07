@@ -2,7 +2,7 @@
 id: style-range-derivation
 type: task-spec
 title: 文风区间从作者定稿反推
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on: []
 references:

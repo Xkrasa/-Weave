@@ -2,7 +2,7 @@
 id: ledger-chapter-renumber-resilience
 type: task-spec
 title: 账本对章节重编号的重放韧性
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on: []
 references:
@@ -18,6 +18,10 @@ tags:
 ## 任务目标
 
 验证并（如有必要）修复：插入、移动、删除章节导致重编号后，账本与伏笔的引用链仍能正确重放，不产生孤儿引用或错位事实。这是马良第 4 条抽取规矩（「章节被修改后档案标记过期并重整；拆/并/插/跨卷移动时引用跟着走」）的结构半边，未进入原方案批次，作为独立缺口补上。
+
+## 结论（2026-11-07 交付）
+
+韧性测试落地于 `test/cli.test.ts`（"ledger survives chapter deletion loudly rejects renumbering"）：删章后重放干净收敛，剩余章节的事实可解析、被删章节的事实退出主线视图；把提交挪到重编号章名下会被既有「正式正文完整性」守卫以 CONFLICT 显式拦下，不发生静默错位。**无需修复分支**——`eventIdFor` 的章号内嵌在现有守卫之下是安全的；若未来引入真正的重编号工具，须先迁移 id 或解耦引用，本 spec 的测试是回归底线。
 
 ## 现状与风险
 

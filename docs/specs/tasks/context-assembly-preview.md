@@ -2,7 +2,7 @@
 id: context-assembly-preview
 type: task-spec
 title: 写作前的本章装配预览
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - assembled-context-report

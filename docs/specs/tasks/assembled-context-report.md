@@ -2,7 +2,7 @@
 id: assembled-context-report
 type: task-spec
 title: 装配报告三分类字段一次定型
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on: []
 references:

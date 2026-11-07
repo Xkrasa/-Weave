@@ -2,7 +2,7 @@
 id: quantity-ledger-balances
 type: task-spec
 title: 数值总账：变化到结余逐章累计
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - extraction-grounding-rules

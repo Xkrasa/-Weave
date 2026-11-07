@@ -2,7 +2,7 @@
 id: context-degradation-tiers
 type: task-spec
 title: 可选材料的「仅名称」降级档
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - assembled-context-report

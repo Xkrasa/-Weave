@@ -2,7 +2,7 @@
 id: extraction-grounding-rules
 type: task-spec
 title: 抽取与审计提示固化四条依据规矩
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on: []
 references:
