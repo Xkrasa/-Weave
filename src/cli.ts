@@ -2380,7 +2380,7 @@ function printHelp(): void {
   weave config show|set [--context-window <n>] [--context-budget <n>] [--max-output <n>] [--safety-margin <n>] [--chars-per-token <n>]|migrate
   weave idea add "<正文>" [--title <text>] [--tag <tag>]... [--scope chapter:N|volume:N|book|character:名字|world|mechanic] [--priority high|normal|low] [--spoiler none|hint|reveal] [--after <chapter>]
   weave idea list [--status inbox|promoted|archived] [--tag <tag>] | show <id> | edit <id> [--title <text>] [--body <text>] ... | archive <id>
-  weave idea promote <id> --to plan|contract|outline|canon|promise [--target <path>] | apply <id> | stale | feedback --chapter <n>
+  weave idea promote <id> --to plan|contract|outline|canon|promise [--target <path>] | apply <id> | pending | dismiss <id> --reason <text> | stale | feedback --chapter <n>
   weave context --chapter <n> [--show-ideas] [--include-book-ideas]
   weave status
   weave contract show|set <chapter> [--file <path>]

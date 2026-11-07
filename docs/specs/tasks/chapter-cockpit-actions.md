@@ -70,11 +70,12 @@ export function nextAction(payload: CockpitPayload): NextAction
 
 ## 上下文预算页
 
-右栏新增“上下文”页签，数据来自 `/cockpit` 与 `/api/context/budget`：
+右栏新增“上下文”页签，数据来自 `/cockpit` 与 `GET /api/chapters/:n/context/budget`：
 
-- 显示 `effectiveWindow`、`capacityTokens`、`usedTokens`、剩余；
+- 显示 `effectiveWindow`、`capacityTokens`、`usedTokens`、`remainingTokens`；
 - 分组列出 included / omitted(budget) / withheld(not-yet-revealed) / degraded(budget)；
-- 每项显示来源 id、用途、token、是否 required；
+- `included[]` 每项携带 `sourceId`、`label`、`purpose`、`category`、`tokens`、`required`；
+- `/api/chapters/:n/context/budget` 返回与 `/cockpit` 同一份装配结果（含 `chapter`），避免前端重算；
 - 点击来源打开抽屉预览，只读，不修改材料准入。
 
 ## 分段页签

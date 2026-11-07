@@ -5,6 +5,9 @@ Weave 是本地优先的长篇中文网文创作工作台。正文、设定、�
 ## 当前状态
 
 - 已接入合同与章纲、正文起草、可信审查、独立阅读效果审查、局部修订、长篇记忆、检索、方法卡、作者偏好和本地 UI。
+- 1M 窗口是模型能力上限，项目用自己的 `contextBudgetTokens`（默认 120k）决定实际输入；`weave config show|set|migrate` 可查看与调整，`weave doctor` 会用服务商 usage 校准 `charsPerToken` 并在偏差超过 20% 时提示。
+- 想法收件箱保存在 `ideas/`；`weave idea promote` 只生成候选或草稿，经 pending 裁决后才走目标现有保存路径，任何时候都不会自动写 `ledger/` 或正式 canon。
+- 驾驶舱提供下一步状态机、上下文预算页与分段页；`/api/chapters/:n/context/budget` 列出 included/omitted/withheld/degraded 及每项 token 与是否 required。
 - 番茄平台档案、热点快照和发布资料属于外部参考，不会自动改写 Canon 或故事计划。
 - 工程测试只证明接线、数据边界和门禁行为，**不证明正文更受读者欢迎**。真实模型基线与盲评状态见 `bench/BASELINE.md`；番茄 holdout 的真实复跑和人工评分仍未完成。
 - 产品目标见 `goal-and-requirements.md`，跨任务约束见 `docs/specs/effect-first/SPEC.md`，外部工具调研见 `docs/research/fanqie-tooling-and-skill-components.md`。
@@ -57,7 +60,7 @@ weave --root ../my-book segments approve 1
 weave --root ../my-book write 1 --strategy segmented
 ```
 
-分段失败时可从段边界恢复（`write --strategy segmented --resume <runId>`）；定稿门禁不变。效果基线与放量门槛见 `bench/BASELINE.md`，当前真实数据未采集，默认仍是 `prose-first`。
+分段失败时可从段边界恢复（`write --strategy segmented --resume <runId>`）；定稿门禁不变。效果基线与放量门槛见 `bench/BASELINE.md`，当前真实数据未采集，默认仍是 `prose-first`。基线脚本默认 `--repeat 3`，顶层报告取中位数；冒烟时可显式 `--repeat 1`。
 
 ## 外部 story-deslop 组件
 

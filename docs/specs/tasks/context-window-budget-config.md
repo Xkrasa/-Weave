@@ -61,12 +61,13 @@ weave config migrate
 - `config show` 输出模型、窗口、软预算、输出预留、剩余输入容量。
 - `config migrate` 只对当前项目显式执行，打印变更前后值；不得在读取配置时自动升级。
 
-### 中文 token 校准（建议同批做）
+### 中文 token 校准
 
-- 每次 run 记录 `usage.prompt_tokens` 与估算字符数。
-- 新增 `.weave/token-calibration.json`，用 EWMA 保存 `observedCharsPerToken`。
-- 装配估算取 `Math.min(config.charsPerToken, observed)`（更保守值）；没有观测时退回配置值。
-- `weave doctor` 输出“估算 vs 实际”偏差，偏差超过 20% 时提示作者调整 `charsPerToken`。
+- 实现于 `src/core/token-calibration.ts`：每次 run 把 `usage.promptTokens` 与实际发送字符数写入 `.weave/token-calibration.json`。
+- `observedCharsPerToken` 用 EWMA（`alpha = 0.3`）更新，并夹在 `0.25–8` 之间，避免单次异常值污染估算；文件同时保存 `samples`、`updatedAt` 与最近一次 `{ promptChars, estimatedTokens, promptTokens }`。
+- 装配估算取 `Math.min(config.charsPerToken, observed)`（更保守值）；没有观测时退回配置值。`assembledContext` 暴露本次使用的 `promptChars` 与 `charsPerToken`，分段 run 累加各段字符数写入 `RunRecord.estimatedPromptChars`。
+- `weave doctor` 在文本与 `--json` 输出中都给出“估算 vs 实际”偏差（`calibration.deviation`，负数表示少估），偏差绝对值超过 20% 时提示作者调整 `charsPerToken`。
+- 估算只基于服务商返回的 usage，不引入精确 tokenizer 依赖。
 
 ## 必须遵守
 
@@ -80,7 +81,7 @@ weave config migrate
 - 把软预算压到 32k 后，可选材料按现有 `relevance → priority` 规则裁剪，报告出现 `omitted` / `degraded`；`required` 超限仍是 `split-required` / `capacity-conflict`。
 - 老项目不执行 `config migrate` 时，行为与变更前一致；执行后值被原子写入且可回读。
 - 非法 `config set`（如输出预留大于窗口）被拒绝，原配置不变。
-- `weave doctor` 能显示窗口、软预算、实际用量与估算偏差。
+- `weave doctor` 能显示窗口、软预算、实际用量、最近一次 token 估算偏差；超过 20% 时出现警告。
 - `npm run typecheck` 与现有测试全绿。
 
 ## 非目标
