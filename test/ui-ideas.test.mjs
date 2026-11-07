@@ -66,7 +66,7 @@ test('idea, scope and diff text are escaped', () => {
   const proposal = renderPromotionProposal({
     ideaId: 'idea-1',
     target: 'plan',
-    targetPath: 'plans/idea-promotions/<x>.md',
+    targetPath: 'plans/rolling.json',
     currentHash: 'sha256:x',
     proposedText: '',
     diff: '+新增 <bad>\n-删除',

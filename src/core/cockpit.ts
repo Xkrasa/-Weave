@@ -484,7 +484,7 @@ async function buildContext(
   }
 }
 
-/** `/api/context/budget`: the same assembly the cockpit uses, scoped to one chapter. */
+/** `/api/chapters/:n/context/budget`: the same assembly the cockpit uses, scoped to one chapter. */
 export interface ContextBudgetView extends CockpitContext {
   chapter: number
 }
