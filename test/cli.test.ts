@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { strToU8, zipSync } from 'fflate'
 import os from 'node:os'
 import path from 'node:path'
@@ -1313,6 +1313,74 @@ test('context preview matches the hash actually sent', async () => {
     assert.equal(preview.contextHash, written.contextHash, 'preview must hash exactly what write sends')
     assert.deepEqual(preview.included, written.included)
     assert.ok(preview.estimatedTokens > 0)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('ledger survives chapter deletion loudly rejects renumbering', async () => {
+  const model = new FakeModel([
+    Q1_DRAFT, quantityExtraction(1, '林岚清点银元', '数出一百五十枚', 0, 150), coveragePayload(), warningReviewFor('数出一百五十枚'),
+    Q2_DRAFT, quantityExtraction(2, '林岚交出银元', '交给船老大二十枚银元', -20, 130), coveragePayload(), warningReviewFor('交给船老大二十枚银元'),
+    Q3_DRAFT, quantityExtraction(3, '林岚再付银元', '付给码头苦力十五枚银元', -15, 120), coveragePayload(), warningReviewFor('付给码头苦力十五枚银元'),
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  const mustHappen = ['林岚清点银元', '林岚交出银元', '林岚再付银元']
+  try {
+    await setCharacters(dir, [{
+      name: '林岚',
+      status: 'alive',
+      introducedIn: 1,
+      knows: [{ fact: '账本缺页', fromChapter: 1 }],
+    }])
+    for (const chapter of [1, 2, 3]) {
+      await setContract(dir, chapter, { mustHappen: [mustHappen[chapter - 1]!] })
+      assert.equal((await checkContract(dir, chapter)).code, 0)
+      assert.equal((await runCli(dir, ['write', String(chapter), '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+      assert.equal((await runCli(dir, ['check', String(chapter), '--json'])).code, 0)
+      assert.equal((await runCli(dir, ['extract', String(chapter), '--json'])).code, 0)
+      assert.equal((await runCli(dir, ['timeline', String(chapter), '--json'])).code, 0)
+      assert.equal((await runCli(dir, ['audit', String(chapter), '--json'])).code, 0)
+      assert.equal((await runCli(dir, ['review', String(chapter), '--json'])).code, 0)
+      assert.equal((await runCli(dir, ['finalize', String(chapter), '--json'])).code, 0)
+    }
+
+    const mainlinePath = path.join(dir, 'ledger', 'mainline.jsonl')
+    const head = async () => {
+      const lines = (await readFile(mainlinePath, 'utf8')).trim().split('\n')
+      return JSON.parse(lines[lines.length - 1]!) as {
+        mainlineRevision: number
+        selectedCommitByChapter: Record<string, string>
+      }
+    }
+    const appendHead = async (chapters: Record<string, string>): Promise<void> => {
+      const current = await head()
+      await appendFile(mainlinePath, `${JSON.stringify({
+        mainlineRevision: current.mainlineRevision + 1,
+        selectedCommitByChapter: chapters,
+        previousHead: null,
+        updatedAt: new Date().toISOString(),
+      })}\n`, 'utf8')
+    }
+    const original = (await head()).selectedCommitByChapter
+
+    // 删一章：第 2 章退出主线后，重放必须干净收敛，留下的章节引用不悬空。
+    const afterDelete = { ...original }
+    delete afterDelete['2']
+    await appendHead(afterDelete)
+    const rebuilt = await runCli(dir, ['rebuild', '--projection', 'ledger', '--json'])
+    assert.equal(rebuilt.code, 0, rebuilt.stdout + rebuilt.stderr)
+    assert.equal((await runCli(dir, ['ledger', 'fact', 'fact-yinyuan-1', '--json'])).code, 0)
+    assert.notEqual((await runCli(dir, ['ledger', 'fact', 'fact-yinyuan-2', '--json'])).code, 0, 'deleted chapter facts must leave the mainline view')
+    assert.equal((await runCli(dir, ['ledger', 'fact', 'fact-yinyuan-3', '--json'])).code, 0)
+
+    // 移章（重编号）：把第 2 章的提交挪到第 4 章名下，必须显式失败而不是静默错位。
+    await appendHead({ '1': original['1']!, '3': original['3']!, '4': original['2']! })
+    const mislabeled = await runCli(dir, ['rebuild', '--projection', 'ledger', '--json'])
+    assert.notEqual(mislabeled.code, 0, 'renumbered commit must fail loudly')
+    assert.match(mislabeled.stdout + mislabeled.stderr, /第 4 章/, 'failure must name the mismatched chapter')
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })
