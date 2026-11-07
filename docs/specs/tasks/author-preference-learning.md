@@ -2,7 +2,7 @@
 id: author-preference-learning
 type: task-spec
 title: 从作者修订沉淀创作偏好
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - revision-context-enrichment

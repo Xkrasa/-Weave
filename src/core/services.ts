@@ -1,15 +1,18 @@
 import path from 'node:path'
 import { readFile, rm } from 'node:fs/promises'
 import type { ProjectionState } from './types.ts'
-import { atomicWrite, ensureDir, listFiles, readTextIfExists } from './io.ts'
+import { atomicWrite, ensureDir, listFiles, normalizeText, readTextIfExists } from './io.ts'
 import { hashFileBytes, objectHash } from './hash.ts'
 import { projectPaths, loadProject, loadModelConfig } from './project.ts'
 import { loadDraftMeta } from './runs.ts'
 import { textAtSpan } from './stages.ts'
 import { assertFinalIntegrity, currentCommit, finalPath, listCommits, readCommit, readMainline } from './ledger.ts'
-import { loadContract } from './contract.ts'
+import { chapterFileStem, loadContract } from './contract.ts'
 import { withheldForChapter } from './materials.ts'
 import { listUnresolvedPending } from './pending.ts'
+import { draftHash, loadStage } from './stages.ts'
+import type { ContentCheckReport, CoverageAudit, ExtractionReport, ReviewReport } from './stage-types.ts'
+import type { EffectReviewReport } from './effect-review.ts'
 import { impactSummary, pendingImpactItems } from './impact.ts'
 import {
   assertProjectionCurrent,
@@ -30,6 +33,7 @@ import {
 import { conflictError } from './errors.ts'
 import { rebuildSearchIndex, searchIndexHealth, type SearchIndexState } from './search.ts'
 import { loadStoryMemory, memoryIsCurrent } from './memory.ts'
+import { modelBudgetSummary, type ModelBudgetSummary } from './config.ts'
 
 export interface ChapterStatus {
   chapter: number
@@ -38,6 +42,15 @@ export interface ChapterStatus {
   commitId: string
   contentHash: string
   finalizedAt: string
+}
+
+export interface DraftStageSummary {
+  chapter: number
+  phase: 'polishing' | 'frozen-verification' | 'ready-to-finalize'
+  currentStages: Array<'check' | 'effect-review' | 'extract' | 'audit' | 'review'>
+  staleStages: Array<'check' | 'effect-review' | 'extract' | 'audit' | 'review'>
+  nextCommand: string
+  note: string
 }
 
 export interface ProjectStatus {
@@ -49,6 +62,7 @@ export interface ProjectStatus {
   mainlineRevision: number
   chapters: ChapterStatus[]
   drafts: number[]
+  draftStages?: DraftStageSummary[]
   projection: ProjectionState | null
   ledgerProjection: LedgerProjectionState | null
   ledgerProjections: LedgerProjectionState[]
@@ -140,6 +154,131 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
     memory: await memoryStatus(root),
     ...(disclosure ? { disclosure } : {}),
     ...(pendingConflicts.length > 0 ? { pendingConflicts } : {}),
+    ...(drafts.length > 0 ? { draftStages: await Promise.all(drafts.sort((a, b) => a - b).map(ch => summarizeDraftStage(root, ch, project.workflowVersion))) } : {}),
+  }
+}
+
+export async function summarizeDraftStage(
+  root: string,
+  chapter: number,
+  workflowVersion: number,
+): Promise<DraftStageSummary> {
+  const raw = await readTextIfExists(path.join(projectPaths(root).draftsDir, `${chapterFileStem(chapter)}.md`))
+  const currentHash = raw ? draftHash(normalizeText(raw)) : ''
+  const check = await loadStage<ContentCheckReport>(root, 'content-check', chapter).catch(() => null)
+  const effect = await loadStage<EffectReviewReport>(root, 'effect-review', chapter).catch(() => null)
+  const extraction = await loadStage<ExtractionReport>(root, 'extraction', chapter).catch(() => null)
+  const audit = await loadStage<CoverageAudit>(root, 'audit', chapter).catch(() => null)
+  const review = await loadStage<ReviewReport>(root, 'review', chapter).catch(() => null)
+
+  const currentStages: DraftStageSummary['currentStages'] = []
+  const staleStages: DraftStageSummary['staleStages'] = []
+  const classify = (name: DraftStageSummary['currentStages'][number], report: { draftHash: string } | null) => {
+    if (!report) return
+    if (report.draftHash === currentHash) currentStages.push(name)
+    else staleStages.push(name)
+  }
+  classify('check', check)
+  classify('effect-review', effect)
+  classify('extract', extraction)
+  classify('audit', audit)
+  classify('review', review)
+
+  if (workflowVersion !== 2) {
+    if (!check || check.draftHash !== currentHash || !check.passed) {
+      return {
+        chapter,
+        phase: 'polishing',
+        currentStages,
+        staleStages,
+        nextCommand: `weave check ${chapter}`,
+        note: '先运行确定性内容检查，通过后可 effect-review 打磨或直接 finalize',
+      }
+    }
+    return {
+      chapter,
+      phase: 'ready-to-finalize',
+      currentStages,
+      staleStages,
+      nextCommand: `weave finalize ${chapter}`,
+      note: '内容检查已通过；如需打磨可运行 weave effect-review ' + chapter,
+    }
+  }
+
+  // Two-phase recommended flow for p05:
+  // Phase 1 (polishing): check -> effect-review (optional revise loop)
+  // Phase 2 (frozen verification): extract -> audit -> review -> finalize
+  if (!check || check.draftHash !== currentHash || !check.passed) {
+    return {
+      chapter,
+      phase: 'polishing',
+      currentStages,
+      staleStages,
+      nextCommand: `weave check ${chapter}`,
+      note: '打磨段：先过确定性内容检查',
+    }
+  }
+  const inFrozenChain = Boolean(
+    (extraction && extraction.draftHash === currentHash)
+    || (audit && audit.draftHash === currentHash)
+    || (review && review.draftHash === currentHash),
+  )
+  if (!inFrozenChain && (!effect || effect.draftHash !== currentHash)) {
+    return {
+      chapter,
+      phase: 'polishing',
+      currentStages,
+      staleStages,
+      nextCommand: `weave effect-review ${chapter}`,
+      note: '打磨段：建议先做效果审查并完成修订，再进入 extract/audit/review 冻结验证链（减少重跑成本）',
+    }
+  }
+  if (!extraction || extraction.draftHash !== currentHash || !extraction.passed) {
+    return {
+      chapter,
+      phase: 'frozen-verification',
+      currentStages,
+      staleStages,
+      nextCommand: `weave extract ${chapter}`,
+      note: '冻结段：正文打磨完成后执行抽取',
+    }
+  }
+  if (!audit || audit.draftHash !== currentHash || !audit.passed) {
+    const unresolvedMissed = audit && audit.draftHash === currentHash ? audit.secondPass.missed.length : 0
+    return {
+      chapter,
+      phase: 'frozen-verification',
+      currentStages,
+      staleStages,
+      nextCommand: unresolvedMissed > 0
+        ? `weave audit decide ${chapter} --missed <id> --decision rerun|dismiss --reason <理由>`
+        : `weave audit ${chapter}`,
+      note: unresolvedMissed > 0
+        ? `冻结段：覆盖审计有 ${unresolvedMissed} 条第二遍疑似遗漏待裁决`
+        : '冻结段：运行覆盖审计',
+    }
+  }
+  if (!review || review.draftHash !== currentHash || !review.passed) {
+    return {
+      chapter,
+      phase: 'frozen-verification',
+      currentStages,
+      staleStages,
+      nextCommand: review && review.draftHash === currentHash && !review.passed
+        ? `weave revise ${chapter} --findings <id>`
+        : `weave review ${chapter}`,
+      note: review && review.draftHash === currentHash && !review.passed
+        ? `冻结段：有 ${review.blockingCount} 条 blocking 审稿意见待处理`
+        : '冻结段：运行可信审稿',
+    }
+  }
+  return {
+    chapter,
+    phase: 'ready-to-finalize',
+    currentStages,
+    staleStages,
+    nextCommand: `weave finalize ${chapter}`,
+    note: '所有可信门禁已通过，可定稿',
   }
 }
 
@@ -148,6 +287,7 @@ export interface DoctorResult {
   errors: string[]
   warnings: string[]
   checkedCommits: number
+  budget?: ModelBudgetSummary
 }
 
 async function memoryStatus(root: string): Promise<{
@@ -177,9 +317,10 @@ export async function doctor(root: string): Promise<DoctorResult> {
   const errors: string[] = []
   const warnings: string[] = []
   let checkedCommits = 0
+  let budget: ModelBudgetSummary | undefined
   try {
     await loadProject(root)
-    await loadModelConfig(root)
+    budget = modelBudgetSummary(await loadModelConfig(root))
   } catch (error) {
     errors.push(error instanceof Error ? error.message : String(error))
   }
@@ -309,7 +450,7 @@ export async function doctor(root: string): Promise<DoctorResult> {
     }
   }
 
-  return { ok: errors.length === 0, errors, warnings, checkedCommits }
+  return { ok: errors.length === 0, errors, warnings, checkedCommits, ...(budget ? { budget } : {}) }
 }
 
 export interface RebuildResult {

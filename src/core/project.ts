@@ -28,6 +28,9 @@ export interface ProjectPaths {
   exports: string
   references: string
   plans: string
+  segments: string
+  ideas: string
+  ideaProposals: string
 }
 
 export function projectPaths(root: string): ProjectPaths {
@@ -58,6 +61,9 @@ export function projectPaths(root: string): ProjectPaths {
     exports: path.join(root, 'exports'),
     references: path.join(root, 'references'),
     plans: path.join(root, 'plans'),
+    segments: path.join(metadata, 'segments'),
+    ideas: path.join(root, 'ideas'),
+    ideaProposals: path.join(metadata, 'idea-proposals'),
   }
 }
 
@@ -102,11 +108,18 @@ export interface InitOptions {
   model?: string
   baseUrl?: string
   contextWindow?: number
+  contextBudgetTokens?: number
   maxOutputTokens?: number
   snapshotEvery?: number
   platform?: 'fanqie' | 'qidian' | 'generic'
   workflowVersion?: 1 | 2
 }
+
+export const DEFAULT_CONTEXT_WINDOW = 1_000_000
+export const DEFAULT_CONTEXT_BUDGET_TOKENS = 120_000
+export const DEFAULT_MAX_OUTPUT_TOKENS = 8_192
+export const DEFAULT_SAFETY_MARGIN_TOKENS = 512
+export const DEFAULT_CHARS_PER_TOKEN = 1.6
 
 export async function initProject(dir: string, options: InitOptions = {}): Promise<{ root: string; project: ProjectConfig; config: ModelConfig }> {
   const root = path.resolve(dir)
@@ -130,10 +143,11 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
   const config: ModelConfig = {
     model: options.model?.trim() || 'gpt-4o-mini',
     baseUrl: options.baseUrl?.trim() || 'https://api.openai.com/v1',
-    contextWindow: positiveInt(options.contextWindow, 32_768, 'contextWindow'),
-    maxOutputTokens: positiveInt(options.maxOutputTokens, 4096, 'maxOutputTokens'),
-    safetyMarginTokens: 512,
-    charsPerToken: 1.6,
+    contextWindow: positiveInt(options.contextWindow, DEFAULT_CONTEXT_WINDOW, 'contextWindow'),
+    contextBudgetTokens: positiveInt(options.contextBudgetTokens, DEFAULT_CONTEXT_BUDGET_TOKENS, 'contextBudgetTokens'),
+    maxOutputTokens: positiveInt(options.maxOutputTokens, DEFAULT_MAX_OUTPUT_TOKENS, 'maxOutputTokens'),
+    safetyMarginTokens: DEFAULT_SAFETY_MARGIN_TOKENS,
+    charsPerToken: DEFAULT_CHARS_PER_TOKEN,
     temperature: 0.8,
     timeoutMs: 120_000,
     snapshotEvery: positiveInt(options.snapshotEvery, 10, 'snapshotEvery'),
@@ -160,6 +174,9 @@ export async function initProject(dir: string, options: InitOptions = {}): Promi
     paths.references,
     paths.plans,
     path.join(paths.plans, 'volumes'),
+    paths.segments,
+    paths.ideas,
+    paths.ideaProposals,
   ]) {
     await ensureDir(dirPath)
   }

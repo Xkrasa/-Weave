@@ -2,7 +2,7 @@
 id: revision-context-enrichment
 type: task-spec
 title: 补全局部修稿的创作上下文
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - effect-evaluation-harness

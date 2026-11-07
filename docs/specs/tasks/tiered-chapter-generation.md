@@ -2,7 +2,7 @@
 id: tiered-chapter-generation
 type: task-spec
 title: 实现普通章与关键章分级生成
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - task-model-policies

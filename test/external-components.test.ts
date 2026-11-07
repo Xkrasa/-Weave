@@ -94,6 +94,9 @@ test('external CLI inspects components and runs test-deslop with an independent 
   const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-external-cli-'))
   try {
     assert.equal((await runCli(dir, ['init', '.', '--title', '外部组件 CLI', '--model', 'fake', '--base-url', 'http://127.0.0.1:1/v1', '--workflow', 'p0'])).code, 0)
+    const missingRoot = await runCli(dir, ['external', 'inspect', '--json'])
+    assert.equal(missingRoot.code, 2)
+    assert.match(missingRoot.stdout, /缺少 --component-root/)
     const inspected = await runCli(dir, ['external', 'inspect', '--component-root', FIXTURE_ROOT, '--json'])
     assert.equal(inspected.code, 0, inspected.stdout + inspected.stderr)
     assert.equal(json<{ candidates: Array<{ component: string; present: boolean }> }>(inspected.stdout).candidates.find(item => item.component === 'story-deslop')?.present, true)

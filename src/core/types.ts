@@ -13,10 +13,15 @@ export interface ProjectConfig {
   createdAt: string
 }
 
+/** Targets an idea may be promoted into; ledger is deliberately excluded. */
+export type IdeaPromotionTarget = 'plan' | 'contract' | 'outline' | 'canon' | 'promise'
+
 export interface ModelConfig {
   model: string
   baseUrl: string
   contextWindow: number
+  /** Soft writing budget; defaults to the model window when absent. */
+  contextBudgetTokens?: number
   maxOutputTokens: number
   safetyMarginTokens: number
   charsPerToken: number
@@ -35,6 +40,7 @@ export interface ModelConfig {
     temperature?: number
     maxOutputTokens?: number
     contextWindow?: number
+    contextBudgetTokens?: number
   }>>
   /** Transparent retries allowed only before the first streamed delta. */
   maxRetries?: number
@@ -154,6 +160,8 @@ export type MaterialDecision =
       omitted: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
       requiredTokens: number
       capacityTokens: number
+      /** min(contextWindow, contextBudgetTokens); the window actually used for budgeting. */
+      effectiveWindow: number
     }
   | {
       decision: 'split-required'
@@ -161,6 +169,7 @@ export type MaterialDecision =
       omissions: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
       requiredTokens: number
       capacityTokens: number
+      effectiveWindow: number
       message: string
     }
   | {
@@ -169,14 +178,28 @@ export type MaterialDecision =
       omissions: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
       requiredTokens: number
       capacityTokens: number
+      effectiveWindow: number
       message: string
     }
 
 export interface GenerationEvent {
-  type: 'started' | 'delta' | 'usage' | 'completed' | 'failed' | 'cancelled'
+  type:
+    | 'started'
+    | 'delta'
+    | 'usage'
+    | 'completed'
+    | 'failed'
+    | 'cancelled'
+    | 'segment-started'
+    | 'segment-completed'
+    | 'segment-retry'
   seq: number
   runId: string
   chapter: number
+  segmentId?: string
+  attempt?: number
+  reason?: string
+  contentHash?: string
   text?: string
   usage?: RunUsage
   draft?: string
@@ -359,7 +382,9 @@ export interface StreamAttempt {
 export interface RunRecovery {
   fromRunId: string
   partialPath: string
-  strategy: 'regenerate'
+  strategy: 'regenerate' | 'resume-segments'
+  completedSegments?: string[]
+  nextSegmentId?: string
 }
 
 export interface RunRecord {
@@ -375,7 +400,7 @@ export interface RunRecord {
   contextHash?: string
   promptHash?: string
   materialSourceIds: string[]
-  draftingStrategy?: 'prose-first' | 'beat-first'
+  draftingStrategy?: 'prose-first' | 'beat-first' | 'segmented'
   beatContentHash?: string
   sampleSelection?: {
     samples: Array<{ id: string }>
@@ -394,6 +419,14 @@ export interface RunRecord {
   usage?: RunUsage
   attempts?: StreamAttempt[]
   recovery?: RunRecovery
+  segments?: SegmentRunRecord[]
+}
+
+export interface SegmentRunRecord {
+  segmentId: string
+  status: 'planned' | 'generating' | 'draft' | 'checked' | 'approved' | 'failed'
+  contentHash?: string
+  usage?: RunUsage
 }
 
 export interface ProjectionState {

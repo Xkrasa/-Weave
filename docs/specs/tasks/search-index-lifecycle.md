@@ -2,7 +2,7 @@
 id: search-index-lifecycle
 type: task-spec
 title: 将检索索引纳入主线水位
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - effect-evaluation-harness
@@ -39,7 +39,7 @@ tags:
 - 索引同步失败时提交仍完整，状态明确，自动检索写作被阻断并提示恢复方式。
 - 删除索引后全量重建的结果与删除前一致。
 - 150 章回归项目中，单章定稿不执行全量索引重建。
-- 现有 CLI/UI 搜索和 54 项工程测试不回归。
+- 现有 CLI/UI 搜索不回归，`npm run check` 的完整类型检查与工程测试通过。
 
 ## 非目标
 

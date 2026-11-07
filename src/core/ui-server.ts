@@ -9,6 +9,8 @@ import {
   saveContract,
   writeContractCheck,
   requirePassingContractCheck,
+  checkPath,
+  contractHash,
 } from './contract.ts'
 import { runContentCheck } from './content-check.ts'
 import { runExtraction } from './extraction.ts'
@@ -48,10 +50,15 @@ import {
   readApprovedPreferences,
   reviewPreferenceCandidates,
 } from './preferences.ts'
-import { assertProjectionCurrent } from './projections.ts'
-import { assertNoPendingImpacts } from './impact.ts'
-import { assertLedgerProjectionCurrent } from './ledger-projection.ts'
 import { readCommit, readMainline } from './ledger.ts'
+import { buildChapterCockpit, buildChapterGates, latestWritingRuns } from './cockpit.ts'
+import { compareChapterWithCommit } from './compare.ts'
+import { readBeatCandidate, generateBeatCandidate, approveBeatCandidate } from './beats.ts'
+import { readSegmentPlan, planSegments, approveSegmentPlan } from './segments.ts'
+import { archiveIdea, captureIdea, listIdeas, readIdea, updateIdea, markIdeaUsed, clearIdeaUsage, promoteIdea, savePromotionProposal, loadPromotionProposal, applyPromotion, type IdeaPatch, type IdeaScope, type IdeaStatus, type IdeaLinks } from './ideas.ts'
+import type { IdeaPromotionTarget } from './types.ts'
+import { buildIdeaMap } from './idea-map.ts'
+import type { ContractCheckRecord } from './contract.ts'
 import { WeaveError, conflictError, usageError, validationError } from './errors.ts'
 import type {
   ContentCheckReport,
@@ -177,21 +184,59 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
     sendJson(response, 200, check)
     return
   }
+  if (chapter && request.method === 'POST' && parts[3] === 'beats' && parts[4] === 'generate') {
+    sendJson(response, 200, await generateBeatCandidate(root, chapter, await loadModelConfig(root), new AbortController().signal))
+    return
+  }
+  if (chapter && request.method === 'POST' && parts[3] === 'beats' && parts[4] === 'approve') {
+    sendJson(response, 200, await approveBeatCandidate(root, chapter))
+    return
+  }
+  if (chapter && request.method === 'POST' && parts[3] === 'segments' && parts[4] === 'plan') {
+    sendJson(response, 200, await planSegments(root, chapter))
+    return
+  }
+  if (chapter && request.method === 'POST' && parts[3] === 'segments' && parts[4] === 'approve') {
+    sendJson(response, 200, await approveSegmentPlan(root, chapter))
+    return
+  }
   if (chapter && request.method === 'POST' && parts[3] === 'stage' && parts[4]) {
     sendJson(response, 200, await runStage(root, chapter, parts[4]))
     return
   }
   if (chapter && request.method === 'POST' && parts[3] === 'write' && parts[4] === 'stream') {
-    await streamWrite(root, chapter, request, response)
+    await streamWrite(root, chapter, request, response, {
+      ...(url.searchParams.get('strategy') ? { strategy: url.searchParams.get('strategy')! } : {}),
+      ...(url.searchParams.get('resume') ? { resume: url.searchParams.get('resume')! } : {}),
+    })
     return
   }
   if (chapter && request.method === 'POST' && parts[3] === 'write') {
-    const result = await writeChapter(root, chapter, { signal: new AbortController().signal })
+    const strategy = url.searchParams.get('strategy')
+    const draftingStrategy = strategy === 'segmented' || strategy === 'beat-first' || strategy === 'prose-first'
+      ? strategy
+      : undefined
+    const resume = url.searchParams.get('resume')
+    const result = await writeChapter(root, chapter, {
+      signal: new AbortController().signal,
+      ...(draftingStrategy ? { draftingStrategy } : {}),
+      ...(resume ? { resumeFromRunId: resume } : {}),
+    })
     sendJson(response, 200, result)
     return
   }
   if (chapter && request.method === 'GET' && parts[3] === 'gates') {
-    sendJson(response, 200, await chapterGates(root, chapter))
+    sendJson(response, 200, await buildChapterGates(root, chapter))
+    return
+  }
+  if (chapter && request.method === 'GET' && parts[3] === 'cockpit') {
+    sendJson(response, 200, await buildChapterCockpit(root, chapter))
+    return
+  }
+  if (chapter && request.method === 'GET' && parts[3] === 'compare') {
+    const base = url.searchParams.get('base') ?? 'commit'
+    if (base !== 'commit') throw usageError('compare 目前只支持 base=commit')
+    sendJson(response, 200, await compareChapterWithCommit(root, chapter))
     return
   }
   if (chapter && url.pathname === `/api/chapters/${chapter}/effect-review`) {
@@ -235,6 +280,98 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
   if (request.method === 'GET' && url.pathname === '/api/plans') {
     sendJson(response, 200, { plans: await listPlans(root) })
     return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/ideas/map') {
+    sendJson(response, 200, await buildIdeaMap(root))
+    return
+  }
+  if (url.pathname === '/api/ideas') {
+    if (request.method === 'GET') {
+      const status = url.searchParams.get('status')
+      if (status && !['inbox', 'promoted', 'archived'].includes(status)) {
+        throw usageError('status 只能是 inbox、promoted 或 archived')
+      }
+      const ideas = await listIdeas(root, {
+        ...(status ? { status: status as IdeaStatus } : {}),
+        ...(url.searchParams.get('tag') ? { tag: url.searchParams.get('tag')! } : {}),
+      })
+      sendJson(response, 200, { ideas })
+      return
+    }
+    if (request.method === 'POST') {
+      const body = await readJsonBody<Record<string, unknown>>(request)
+      if (typeof body.body !== 'string') throw usageError('缺少想法正文 body')
+      const idea = await captureIdea(root, {
+        body: body.body,
+        ...(typeof body.title === 'string' ? { title: body.title } : {}),
+        ...(Array.isArray(body.tags) ? { tags: body.tags.map(String) } : {}),
+        ...(body.scope !== undefined ? { scope: body.scope as IdeaScope } : {}),
+        ...(typeof body.priority === 'string' ? { priority: body.priority } : {}),
+        ...(typeof body.spoilerLevel === 'string' ? { spoilerLevel: body.spoilerLevel } : {}),
+        ...(typeof body.revealAfterChapter === 'number' ? { revealAfterChapter: body.revealAfterChapter } : {}),
+        ...(body.links && typeof body.links === 'object' ? { links: body.links as Partial<IdeaLinks> } : {}),
+      })
+      sendJson(response, 200, { idea })
+      return
+    }
+  }
+  if (parts[1] === 'ideas' && parts[2]) {
+    const ideaId = decodeURIComponent(parts[2])
+    if (parts[3] === 'used') {
+      if (request.method === 'POST') {
+        const body = await readJsonBody<{ chapters?: number[] }>(request)
+        const chapters = Array.isArray(body.chapters) ? body.chapters.map(Number) : []
+        sendJson(response, 200, { idea: await markIdeaUsed(root, ideaId, chapters) })
+        return
+      }
+      if (request.method === 'DELETE') {
+        sendJson(response, 200, { idea: await clearIdeaUsage(root, ideaId) })
+        return
+      }
+    }
+    if (parts[3] === 'promote' && request.method === 'POST') {
+      const body = await readJsonBody<{ target?: string; targetPath?: string }>(request)
+      const target = body.target
+      if (!target || !['plan', 'contract', 'outline', 'canon', 'promise'].includes(target)) {
+        throw usageError('target 只能是 plan、contract、outline、canon 或 promise')
+      }
+      const proposal = await promoteIdea(root, ideaId, target as IdeaPromotionTarget, {
+        ...(typeof body.targetPath === 'string' ? { targetPath: body.targetPath } : {}),
+      })
+      await savePromotionProposal(root, proposal)
+      sendJson(response, 200, { proposal })
+      return
+    }
+    if (parts[3] === 'apply' && request.method === 'POST') {
+      const proposal = await loadPromotionProposal(root, ideaId)
+      if (!proposal) throw usageError(`没有待应用的晋升提案：${ideaId}`)
+      sendJson(response, 200, { idea: await applyPromotion(root, ideaId, proposal) })
+      return
+    }
+    if (request.method === 'GET') {
+      sendJson(response, 200, await readIdea(root, ideaId))
+      return
+    }
+    if (request.method === 'PATCH') {
+      const body = await readJsonBody<Record<string, unknown>>(request)
+      const patch: IdeaPatch = {}
+      if (typeof body.title === 'string') patch.title = body.title
+      if (typeof body.body === 'string') patch.body = body.body
+      if (Array.isArray(body.tags)) patch.tags = body.tags.map(String)
+      if (body.scope !== undefined) patch.scope = body.scope as IdeaScope
+      if (typeof body.priority === 'string') patch.priority = body.priority
+      if (typeof body.spoilerLevel === 'string') patch.spoilerLevel = body.spoilerLevel
+      if (body.revealAfterChapter === null) patch.revealAfterChapter = null
+      else if (typeof body.revealAfterChapter === 'number') patch.revealAfterChapter = body.revealAfterChapter
+      if (body.links && typeof body.links === 'object') patch.links = body.links as Partial<IdeaLinks>
+      if (Object.keys(patch).length === 0) throw usageError('没有要修改的字段')
+      sendJson(response, 200, { idea: await updateIdea(root, ideaId, patch) })
+      return
+    }
+    if (request.method === 'DELETE') {
+      sendJson(response, 200, { idea: await archiveIdea(root, ideaId) })
+      return
+    }
   }
   if (request.method === 'POST' && url.pathname === '/api/plans/approve') {
     const body = await readJsonBody<{ kind?: string; volume?: number }>(request)
@@ -415,10 +552,13 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
     const chapterParam = numberParam(url.searchParams.get('chapter'))
     if (chapterParam === undefined) throw usageError('缺少 chapter')
     const contract = await loadContract(root, chapterParam)
-    const assembled = await assembleChapterContext(root, contract)
+    const assembled = await assembleChapterContext(root, contract, {
+      includeBookIdeas: url.searchParams.get('includeBookIdeas') === '1',
+    })
     sendJson(response, 200, {
       chapter: chapterParam,
       decision: assembled.decision,
+      conflictWarnings: assembled.conflictWarnings,
       context: assembled.context && {
         contextHash: assembled.context.contextHash,
         estimatedTokens: assembled.context.estimatedTokens,
@@ -519,6 +659,19 @@ async function chapterList(root: string): Promise<{
     blocking: number
     revision: number
     status: string
+    stages: {
+      contract: boolean
+      contractCheck: boolean
+      beats: boolean
+      segments: boolean
+      draft: boolean
+      check: boolean
+      final: boolean
+    }
+    beatStatus: string
+    segmentStatus: string
+    runStatus?: string
+    recoverable: boolean
   }>
   mainlineRevision: number
 }> {
@@ -529,20 +682,49 @@ async function chapterList(root: string): Promise<{
     ...status.drafts,
     ...contractFiles.filter(name => name.endsWith('.json')).map(name => Number(name.slice(0, 3))),
   ])
+  const latestRuns = await latestWritingRuns(root)
   const chapters = []
   for (const number of [...numbers].filter(item => item > 0).sort((a, b) => a - b)) {
     const contract = await loadContract(root, number).catch(() => null)
     const finalized = status.chapters.find(item => item.chapter === number)
     const review = await loadStage<ReviewReport>(root, 'review', number)
     const blocking = review?.findings.filter(finding => finding.severity === 'blocking' && finding.status !== 'waived').length ?? 0
+    const check = contract
+      ? await readJsonIfExists<ContractCheckRecord>(checkPath(root, number))
+      : null
+    const contractChecked = Boolean(contract && check?.ok && check.contractHash === contractHash(contract))
+    const beatView = await readBeatCandidate(root, number).catch(() => ({ status: 'missing' as const }))
+    const planView = await readSegmentPlan(root, number).catch(() => ({ status: 'missing' as const }))
+    const draft = await readDraft(root, number).catch(() => '')
+    const contentCheck = await loadStage<ContentCheckReport>(root, 'content-check', number)
+    const checkPassed = Boolean(contentCheck && contentCheck.passed && contentCheck.draftHash === draftHash(draft))
+    const latestRun = latestRuns.get(number)
+    const recoverable = Boolean(
+      latestRun
+      && (latestRun.status === 'failed' || latestRun.status === 'cancelled')
+      && (latestRun.partialPath || latestRun.draftingStrategy === 'segmented'),
+    )
     chapters.push({
       chapter: number,
       title: contract?.title ?? '',
       finalized: Boolean(finalized),
-      draft: status.drafts.includes(number),
+      draft: status.drafts.includes(number) || Boolean(draft.trim()),
       blocking,
       revision: finalized?.revision ?? 0,
       status: finalized ? 'finalized' : blocking > 0 ? 'blocking' : review?.passed ? 'reviewed' : status.drafts.includes(number) ? 'draft' : 'planned',
+      stages: {
+        contract: Boolean(contract),
+        contractCheck: contractChecked,
+        beats: beatView.status === 'approved',
+        segments: planView.status === 'approved',
+        draft: status.drafts.includes(number) || Boolean(draft.trim()),
+        check: checkPassed,
+        final: Boolean(finalized),
+      },
+      beatStatus: beatView.status,
+      segmentStatus: planView.status,
+      ...(latestRun ? { runStatus: latestRun.status } : {}),
+      recoverable,
     })
   }
   return { chapters, mainlineRevision: status.mainlineRevision }
@@ -692,65 +874,12 @@ async function chapterHistory(root: string, chapter: number): Promise<{
   return { chapter, commits }
 }
 
-async function chapterGates(root: string, chapter: number): Promise<{
-  chapter: number
-  ready: boolean
-  gates: Array<{ id: string; label: string; ok: boolean; detail: string }>
-}> {
-  const gates: Array<{ id: string; label: string; ok: boolean; detail: string }> = []
-  const add = (id: string, label: string, ok: boolean, detail: string) => gates.push({ id, label, ok, detail })
-  const contract = await loadContract(root, chapter).catch(error => {
-    add('contract', '合同存在', false, error instanceof Error ? error.message : String(error))
-    return null
-  })
-  if (contract) add('contract', '合同存在', true, contract.title)
-  if (contract) {
-    try {
-      await requirePassingContractCheck(root, contract)
-      add('contract-check', '合同检查', true, '通过且未过期')
-    } catch (error) {
-      add('contract-check', '合同检查', false, error instanceof Error ? error.message : String(error))
-    }
-  }
-  const draft = await readDraft(root, chapter).catch(() => '')
-  const hash = draftHash(draft)
-  add('draft', '草稿存在', Boolean(draft.trim()), `${[...draft.replace(/\s/g, '')].length} 字`)
-  const [contentCheck, extraction, audit, review] = await Promise.all([
-    loadStage<ContentCheckReport>(root, 'content-check', chapter),
-    loadStage<ExtractionReport>(root, 'extraction', chapter),
-    loadStage<CoverageAudit>(root, 'audit', chapter),
-    loadStage<ReviewReport>(root, 'review', chapter),
-  ])
-  add('content-check', '内容检查', Boolean(contentCheck && contentCheck.draftHash === hash && contentCheck.passed), contentCheck ? `draft ${contentCheck.draftHash.slice(0, 8)}` : '缺失')
-  add('extraction', '证据抽取', Boolean(extraction && extraction.draftHash === hash && extraction.passed), extraction ? `${extraction.records.length} 条记录` : '缺失')
-  add('audit', '覆盖审计', Boolean(audit && audit.draftHash === hash && audit.passed), audit ? `覆盖 ${audit.contract.covered.length} 项` : '缺失')
-  add('review', '审查', Boolean(review && review.draftHash === hash && review.passed), review ? `${review.findings.length} 条意见` : '缺失')
-  try {
-    await assertNoPendingImpacts(root)
-    add('impact', '影响面', true, '没有未处理影响')
-  } catch (error) {
-    add('impact', '影响面', false, error instanceof Error ? error.message : String(error))
-  }
-  try {
-    await assertProjectionCurrent(root)
-    add('content-projection', '内容投影', true, 'current')
-  } catch (error) {
-    add('content-projection', '内容投影', false, error instanceof Error ? error.message : String(error))
-  }
-  try {
-    await assertLedgerProjectionCurrent(root)
-    add('ledger-projection', '账本投影', true, 'current')
-  } catch (error) {
-    add('ledger-projection', '账本投影', false, error instanceof Error ? error.message : String(error))
-  }
-  return { chapter, ready: gates.every(gate => gate.ok), gates }
-}
-
 async function streamWrite(
   root: string,
   chapter: number,
   request: IncomingMessage,
   response: ServerResponse,
+  options: { strategy?: string; resume?: string } = {},
 ): Promise<void> {
   response.writeHead(200, {
     'content-type': 'text/event-stream; charset=utf-8',
@@ -766,10 +895,16 @@ async function streamWrite(
     if (!response.writableEnded) controller.abort()
   })
   try {
+    const strategy = options.strategy
+    const draftingStrategy = strategy === 'segmented' || strategy === 'beat-first' || strategy === 'prose-first'
+      ? strategy
+      : undefined
     const result = await writeChapter(root, chapter, {
       signal: controller.signal,
       onDelta: delta => send({ type: 'delta', delta }),
       onEvent: event => send({ type: 'event', event }),
+      ...(draftingStrategy ? { draftingStrategy } : {}),
+      ...(options.resume ? { resumeFromRunId: options.resume } : {}),
     })
     send({ type: 'done', result })
   } catch (error) {

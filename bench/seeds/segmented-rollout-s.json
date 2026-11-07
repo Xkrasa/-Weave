@@ -1,0 +1,41 @@
+{
+  "id": "segmented-rollout-s",
+  "kind": "segmented-rollout",
+  "title": "分段放量 · 短章",
+  "genre": "悬疑 / 中篇",
+  "audience": "追更型读者",
+  "promise": "每一件旧物都指向同一场被抹去的火灾。",
+  "premise": "档案修复师沈停在一场火灾的卷宗里发现自己的名字。",
+  "world": "旧城档案馆按火灾年份分区，卷宗修复需要原档人和见证人同时在场。",
+  "style": "克制、以物写人；每段推进一条具体线索；段末留下可执行的动作。",
+  "prohibitions": ["不要用巧合解决线索"],
+  "characters": [
+    { "name": "沈停", "introducedIn": 1 },
+    { "name": "陆伯", "introducedIn": 1 }
+  ],
+  "chapters": [
+    {
+      "chapter": 1,
+      "title": "第七码",
+      "pov": "沈停",
+      "time": "第一日",
+      "location": "旧城档案馆",
+      "openingState": "沈停把烧焦的卷宗摊在修复台上",
+      "endingState": "沈停确认火灾卷宗里出现了自己的名字",
+      "goal": "修复火灾卷宗并确认失踪者名单",
+      "obstacle": "陆伯不肯交出原档人的签字",
+      "mustHappen": [
+        "沈停比对两页残卷的纸张纹路",
+        "陆伯承认第七码卷宗曾经被调走",
+        "沈停在名单末尾看见自己的名字"
+      ],
+      "mayHappen": ["档案室的灯在修复台上方闪了一下"],
+      "mustNotHappen": ["沈停当场找到纵火者"],
+      "characters": ["沈停", "陆伯"],
+      "threads": ["火灾卷宗", "失踪者名单"],
+      "targetWords": 3000,
+      "previousLink": "开篇",
+      "nextLink": "她要去调第七码卷宗的调阅记录"
+    }
+  ]
+}

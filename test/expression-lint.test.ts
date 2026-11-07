@@ -1,17 +1,20 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer, type Server } from 'node:http'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { initProject, loadModelConfig } from '../src/core/project.ts'
 import { runEffectReview } from '../src/core/effect-review.ts'
+import { loadStage } from '../src/core/stages.ts'
 import {
   loadExpressionLintConfig,
   runExpressionLint,
   type ExpressionLintConfig,
 } from '../src/core/expression-lint.ts'
 import type { ChapterContract } from '../src/core/types.ts'
+
+const DESLOP_FIXTURE_ROOT = path.resolve('test/fixtures/oh-story')
 
 function contract(overrides: Record<string, unknown> = {}): ChapterContract {
   return {
@@ -124,8 +127,61 @@ test('effect review carries lint rule identity and soft evidence into the report
     assert.equal(finding.evidence?.sourceId, 'draft:1')
     assert.equal(finding.evidence?.occurrence, 1)
     assert.equal(report.passed, true)
+    assert.equal(report.findings.some(item => item.source === 'external'), false)
   } finally {
     await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('effect review explicitly opts into external deslop findings without changing the draft', async () => {
+  const model = new FakeModel()
+  await model.start()
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-expression-external-'))
+  try {
+    await initProject(dir, { title: '外部表达审查', model: 'fake', baseUrl: model.baseUrl, workflowVersion: 2 })
+    const draft = '不是账本缺页，而是有人换掉了它。'
+    const input = path.join(dir, 'chapters', 'drafts', '001.md')
+    await writeFile(input, draft)
+    const before = await readFile(input)
+    const report = await runEffectReview(
+      dir, 1, contract(), draft, await loadModelConfig(dir), new AbortController().signal,
+      { externalDeslopRoot: DESLOP_FIXTURE_ROOT },
+    )
+    const native = report.findings.find(item => item.source === 'lint' && item.ruleId === 'not-is-comparison')
+    const external = report.findings.find(item => item.source === 'external' && item.ruleId === 'not-is-comparison')
+    assert.ok(native)
+    assert.ok(external)
+    assert.equal(native.severity, 'info')
+    assert.equal(external.severity, 'warning')
+    assert.equal(external.upstreamSeverity, 'blocking')
+    assert.equal(external.ruleVersion, 1)
+    assert.equal(external.review, 'mechanical')
+    assert.equal(external.evidence?.sourceId, 'draft:1')
+    assert.equal(external.evidence?.quote, external.quote)
+    assert.ok(external.quote && draft.includes(external.quote))
+    assert.equal(new Set(report.findings.map(item => item.findingId)).size, report.findings.length)
+    assert.equal(report.passed, true)
+    assert.deepEqual(await loadStage(dir, 'effect-review', 1), report)
+    assert.deepEqual(await readFile(input), before)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('enabled external deslop failure does not save an effect review report', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-expression-external-failure-'))
+  try {
+    await initProject(dir, { title: '外部组件失败', model: 'fake', baseUrl: 'http://127.0.0.1:1/v1', workflowVersion: 2 })
+    const draft = '不是账本缺页，而是有人换掉了它。'
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), draft)
+    await assert.rejects(runEffectReview(
+      dir, 1, contract(), draft, await loadModelConfig(dir), new AbortController().signal,
+      { externalDeslopRoot: path.join(dir, 'missing-component') },
+    ), /缺少 story-deslop/)
+    assert.equal(await loadStage(dir, 'effect-review', 1), null)
+  } finally {
     await rm(dir, { recursive: true, force: true })
   }
 })

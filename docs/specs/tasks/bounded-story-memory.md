@@ -2,7 +2,7 @@
 id: bounded-story-memory
 type: task-spec
 title: 建立有界卷级与 POV 记忆
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - story-planning-model

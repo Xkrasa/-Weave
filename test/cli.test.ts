@@ -3199,6 +3199,33 @@ test('effect review stays advisory and downgrades blocking severity', async () =
   }
 })
 
+test('effect review CLI enables external deslop only with an explicit component root', async () => {
+  const effect = JSON.stringify({ summary: '外部结果只作为软建议。', findings: [] })
+  const model = new FakeModel([effect])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), '不是账本缺页，而是有人换掉了它。\n')
+    const reviewed = await runCli(dir, [
+      'effect-review', '1', '--external-deslop-root', path.join(REPO_ROOT, 'test', 'fixtures', 'oh-story'), '--json',
+    ])
+    assert.equal(reviewed.code, 0, reviewed.stderr)
+    const payload = parseJson<{ findings: Array<{ source: string; severity: string; upstreamSeverity?: string }> }>(reviewed.stdout)
+    const external = payload.findings.find(item => item.source === 'external')
+    assert.ok(external)
+    assert.equal(external.severity, 'warning')
+    assert.equal(external.upstreamSeverity, 'blocking')
+
+    const missingRoot = await runCli(dir, ['effect-review', '1', '--external-deslop-root', '--json'])
+    assert.equal(missingRoot.code, 2)
+    assert.match(missingRoot.stdout, /缺少 --external-deslop-root/)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('effect review lints overdue loops from the real ledger', async () => {
   const effect = JSON.stringify({ summary: '本章没有明显效果问题。', findings: [] })
   const model = new FakeModel([
@@ -3586,6 +3613,268 @@ test('content check warns when a chapter opens with an environment block', async
     assert.equal(clean.code, 0, clean.stderr)
     const cleanPayload = parseJson<{ findings: Array<{ code: string }> }>(clean.stdout)
     assert.equal(cleanPayload.findings.some(item => item.code === 'ENVIRONMENT_OPENING'), false)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('p0 finalize runs the deterministic content check and blocks truncated prose', async () => {
+  const model = new FakeModel(['林岚把账本摊在桌上，缺页的边缘还留着新鲜折痕，她伸手去摸那道'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await contract1(dir)
+    const written = await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(written.code, 0, written.stderr)
+    const blocked = await runCli(dir, ['finalize', '1', '--json'])
+    assert.notEqual(blocked.code, 0)
+    const payload = parseJson<{ error: { message: string; details: Array<{ code: string }> } }>(blocked.stdout)
+    assert.match(payload.error.message, /内容检查未通过/)
+    assert.ok(payload.error.details.some(finding => finding.code === 'TRUNCATED_ENDING'))
+    assert.equal(await readFile(path.join(dir, 'chapters', 'final', '001.md'), 'utf8').catch(() => null), null)
+
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), '林岚把账本摊在桌上，缺页的边缘还留着新鲜折痕。\n')
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 0, finalized.stdout + finalized.stderr)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Stage A: second-pass audit missed items can be dismissed with reason or ignored when quote is unresolvable', async () => {
+  const missedWithBadQuote = JSON.stringify({
+    summary: '第二遍发现遗漏但含一条坏引文',
+    missed: [
+      {
+        summary: '林岚其实已经把信交给了港务局',
+        quote: '她发现缺页上留着港务局的印。',
+        occurrence: 1,
+      },
+      {
+        summary: '模型幻觉出的不存在事件',
+        quote: '这段话在正文里根本不存在。',
+        occurrence: 1,
+      },
+    ],
+  })
+  const model = new FakeModel([P05_DRAFT, extractionPayload(), missedWithBadQuote, reviewPayload()])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    const audited = await runCli(dir, ['audit', '1', '--json'])
+    assert.equal(audited.code, 3)
+    const auditPayload = parseJson<{
+      passed: boolean
+      secondPass: {
+        missed: string[]
+        missedItems: Array<{ missedId: string; summary: string }>
+        rejected: string[]
+      }
+      warnings: string[]
+    }>(audited.stdout)
+    assert.equal(auditPayload.passed, false)
+    assert.deepEqual(auditPayload.secondPass.missed, ['林岚其实已经把信交给了港务局'])
+    assert.equal(auditPayload.secondPass.missedItems.length, 1)
+    assert.equal(auditPayload.secondPass.rejected.length, 1)
+    assert.ok(auditPayload.warnings.some(w => w.includes('作为噪声忽略')))
+
+    const missedId = auditPayload.secondPass.missedItems[0]!.missedId
+    const decided = await runCli(dir, [
+      'audit', 'decide', '1', '--missed', missedId, '--decision', 'dismiss', '--reason', '只是背景修辞，非遗漏事件', '--json',
+    ])
+    assert.equal(decided.code, 0, decided.stdout + decided.stderr)
+    const decidedPayload = parseJson<{ ok: boolean; audit: { passed: boolean; secondPass: { missed: string[] } } }>(decided.stdout)
+    assert.equal(decidedPayload.ok, true)
+    assert.equal(decidedPayload.audit.passed, true)
+    assert.deepEqual(decidedPayload.audit.secondPass.missed, [])
+
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['finalize', '1', '--json'])).code, 0)
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Stage B: recheck includes manual edits in non-target paragraphs and blocks >30% manual rewrites', async () => {
+  const fourParaDraft = [
+    '林岚在码头翻开账本。海风吹得纸页哗哗作响，她把每一行数字都核对了一遍。',
+    '她发现缺页上留着港务局的印。',
+    '远处仓库的灯还亮着，守夜人正在巡逻，脚步声在石板路上回荡了很久。',
+    '林岚合上账本，决定明天一早再去档案室核查底单与货运编号。',
+  ].join('\n\n')
+  const revision = JSON.stringify({
+    paragraphs: [{
+      paragraphId: 'p002',
+      text: '第二段：她发现缺页上留着港务局的印，决定追查下去。',
+      findingIds: ['f1'],
+    }],
+  })
+  const recheck = JSON.stringify({
+    summary: '复检通过且检查了手改段',
+    findings: [{
+      findingId: 'f1',
+      resolved: true,
+      note: '已补充动机',
+      quote: '她发现缺页上留着港务局的印，决定追查下去。',
+    }],
+    newFindings: [],
+  })
+  const model = new FakeModel([
+    fourParaDraft,
+    extractionPayload('她发现缺页上留着港务局的印。'),
+    coveragePayload(),
+    reviewPayload(true),
+    revision,
+    extractionPayload('她发现缺页上留着港务局的印'),
+    coveragePayload(),
+    recheck,
+  ])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 7)
+    const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
+    assert.equal(revised.code, 0, revised.stderr)
+    const { revisionId } = parseJson<{ revisionId: string }>(revised.stdout)
+
+    // Small manual edit in p004 (<30% of chapter) before merge:
+    const smallManual = [
+      '林岚在码头翻开账本。海风吹得纸页哗哗作响，她把每一行数字都核对了一遍。',
+      '她发现缺页上留着港务局的印。',
+      '远处仓库的灯还亮着，守夜人正在巡逻，脚步声在石板路上回荡了很久。',
+      '林岚合上账本，顺手记下值班表编号。',
+    ].join('\n\n')
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), smallManual)
+
+    const merged = await runCli(dir, ['merge', '1', '--revision', revisionId, '--json'])
+    assert.equal(merged.code, 0, merged.stdout + merged.stderr)
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    const rechecked = await runCli(dir, ['recheck', '1', '--json'])
+    assert.equal(rechecked.code, 0, rechecked.stdout + rechecked.stderr)
+    const recheckPrompt = JSON.stringify(model.requests[7])
+    assert.ok(recheckPrompt.includes('顺手记下值班表编号'), 'recheck prompt must include manually edited p004')
+    assert.ok(recheckPrompt.includes('作者在修订目标之外手动修改'))
+
+    // Now test >30% manual edits: rewrite both p001 and p003 manually (>60% of chapter) and recheck must block
+    const SecondReview = reviewPayload(true)
+    model.requests.length = 0
+    const heavyManual = [
+      '林岚在码头翻开账本。她把整本册子从头到尾重新抄录在防水纸上，又核对了三遍船期。',
+      '第二段：她发现缺页上留着港务局的印，决定追查下去。',
+      '远处仓库的灯已经熄了，整条栈桥空无一人，只有海水拍打缆桩的闷响。',
+      '林岚合上账本，顺手记下值班表编号。',
+    ].join('\n\n')
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), heavyManual)
+    const mergeReportPath = path.join(dir, '.weave', 'revisions', '001', `${revisionId}.merge.json`)
+    const mergeData = JSON.parse(await readFile(mergeReportPath, 'utf8')) as { mergedDraftHash: string }
+    const { hashText } = await import('../src/core/hash.ts')
+    mergeData.mergedDraftHash = hashText(heavyManual)
+    await writeFile(mergeReportPath, JSON.stringify(mergeData, null, 2))
+    const reviewStagePath = path.join(dir, '.weave', 'stages', 'review', '001.json')
+    const reviewStage = JSON.parse(await readFile(reviewStagePath, 'utf8')) as { findings: Array<{ status: string }> }
+    reviewStage.findings[0]!.status = 'applied'
+    await writeFile(reviewStagePath, JSON.stringify(reviewStage, null, 2))
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    // Push extraction + audit responses for heavyManual
+    ;(model as unknown as { texts: string[] }).texts.push(
+      extractionPayload('她发现缺页上留着港务局的印'),
+      coveragePayload(),
+    )
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    const blockedRecheck = await runCli(dir, ['recheck', '1', '--json'])
+    assert.equal(blockedRecheck.code, 4)
+    assert.match(parseJson<{ error: { message: string } }>(blockedRecheck.stdout).error.message, /超过 30% 阈值/)
+    void SecondReview
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Stage B: merge detects paragraph count changes as conflict instead of silently shifting IDs', async () => {
+  const revision = JSON.stringify({
+    paragraphs: [{
+      paragraphId: 'p002',
+      text: '她发现缺页上留着港务局的印，决定追查下去。',
+      findingIds: ['f1'],
+    }],
+  })
+  const model = new FakeModel([
+    P05_DRAFT,
+    extractionPayload(),
+    coveragePayload(),
+    reviewPayload(true),
+    revision,
+  ])
+  await model.start()
+  const dir = await prepareP05(model)
+  try {
+    assert.equal((await runCli(dir, ['extract', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['audit', '1', '--json'])).code, 0)
+    assert.equal((await runCli(dir, ['review', '1', '--json'])).code, 7)
+    const revised = await runCli(dir, ['revise', '1', '--findings', 'f1', '--json'])
+    const { revisionId } = parseJson<{ revisionId: string }>(revised.stdout)
+
+    // Author inserts a new paragraph at the top, shifting p001/p002
+    await writeFile(path.join(dir, 'chapters', 'drafts', '001.md'), `新插入的开头段。\n\n${P05_DRAFT}\n`)
+    const merged = await runCli(dir, ['merge', '1', '--revision', revisionId, '--json'])
+    assert.equal(merged.code, 3)
+    const payload = parseJson<{ report: { status: string } }>(merged.stdout)
+    assert.equal(payload.report.status, 'conflict')
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('Stage C & D: status reports two-phase next step and key-candidates command generates passage candidates', async () => {
+  const longDraft = [
+    '林岚站在三号泊位的探照灯下，手里的潮汐账本已经被雨水泡软了边角。她盯着被撕掉的那一页编号，心里清楚今晚必须拿到货单。港区巡逻队的哨声从栈桥另一头逼近，留给她翻找底档的时间只剩不到十分钟。',
+    '守门的老谭把钥匙压在铁盒下面，低声警告她港务局的人刚刚来过。如果她现在推门进去，不管是谁都会被当成夜盗扣下；可如果她退回去，明早这批货就会随着早潮彻底消失在公海。',
+    '她没有再犹豫，直接用袖口垫着拧开了生锈的挂锁。冷库里的寒气扑面而来，最里侧的货架上整齐码着十二只本该已经沉海的木箱，每只木箱侧面都烙着同一个编号。',
+    '就在她举起相机拍下编号的瞬间，冷库大门在身后轰然合拢，门外传来周砚冷静的声音：“林会计，账算到这一页就够了。”',
+  ].join('\n\n')
+  const model = new FakeModel([
+    longDraft,
+    JSON.stringify({ text: '门外传来周砚贴着铁门的声音：“林岚，你翻开的那一页，正是我今晚要烧掉的。”\n\n冷库的排风扇同时停转，温度表开始往下掉。' }),
+    JSON.stringify({ text: '手电筒的光柱从观察窗外直直打在她脸上，周砚隔着厚玻璃举起了那页失踪的底单。' }),
+  ])
+  await model.start()
+  const dir = await initBook(model.baseUrl, [], 'p05')
+  try {
+    await contract1(dir)
+    assert.equal((await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })).code, 0)
+    const status1 = parseJson<{ draftStages: Array<{ phase: string; nextCommand: string }> }>(
+      (await runCli(dir, ['status', '--json'])).stdout,
+    )
+    assert.equal(status1.draftStages[0]?.phase, 'polishing')
+    assert.equal(status1.draftStages[0]?.nextCommand, 'weave check 1')
+
+    assert.equal((await runCli(dir, ['check', '1', '--json'])).code, 0)
+    const status2 = parseJson<{ draftStages: Array<{ phase: string; nextCommand: string }> }>(
+      (await runCli(dir, ['status', '--json'])).stdout,
+    )
+    assert.equal(status2.draftStages[0]?.phase, 'polishing')
+    assert.equal(status2.draftStages[0]?.nextCommand, 'weave effect-review 1')
+
+    const kc = await runCli(dir, ['key-candidates', '1', '--focus', 'ending', '--json'])
+    assert.equal(kc.code, 0, kc.stdout + kc.stderr)
+    const kcPayload = parseJson<{
+      keyCandidates: Array<{ focus: string; paragraphIds: string[]; revisionIds: string[] }>
+    }>(kc.stdout)
+    assert.equal(kcPayload.keyCandidates.length, 1)
+    assert.equal(kcPayload.keyCandidates[0]?.focus, 'ending')
+    assert.ok((kcPayload.keyCandidates[0]?.paragraphIds.length ?? 0) >= 2, 'should select a multi-paragraph passage')
+    assert.equal(kcPayload.keyCandidates[0]?.revisionIds.length, 2)
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })

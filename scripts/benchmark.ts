@@ -9,8 +9,8 @@
  *           claim about how a chapter reads.
  *
  * Usage:
- *   node scripts/benchmark.ts run --suite craft|longitudinal|all [--seed <id>] [--config baseline]
- *                                 [--ablation retrieval=off] [--strategy prose-first|beat-first] [--mode fake|real]
+ *   node scripts/benchmark.ts run --suite craft|longitudinal|segmented-rollout|all [--seed <id>] [--config baseline]
+ *                                 [--ablation retrieval=off] [--strategy prose-first|beat-first|segmented] [--mode fake|real]
  *                                 [--base-url <url>] [--model <id>] [--out <dir>]
  *   node scripts/benchmark.ts pairs --a <runDir> --b <runDir> [--out <dir>]
  *   node scripts/benchmark.ts score --pairs <pairs.json> --scores <scores.jsonl>
@@ -66,7 +66,7 @@ interface SeedEvaluation {
 
 interface Seed {
   id: string
-  kind: 'craft' | 'longitudinal'
+  kind: 'craft' | 'longitudinal' | 'segmented-rollout'
   title: string
   genre: string
   audience: string
@@ -93,6 +93,8 @@ interface CliResult {
   stderr: string
   elapsedMs: number
 }
+
+type BenchStrategy = 'prose-first' | 'beat-first' | 'segmented'
 
 function parseFlags(argv: string[]): { positionals: string[]; flags: Record<string, string | true> } {
   const positionals: string[] = []
@@ -163,7 +165,7 @@ function parseJson<T>(stdout: string): T {
 }
 
 /** Deterministic scaffold prose: exercises the pipeline, never claims to read well. */
-function scaffoldProse(seed: Seed, chapter: SeedChapter, salt: string): string {
+function scaffoldProse(seed: Seed, chapter: SeedChapter, salt: string, targetWords = chapter.targetWords): string {
   const beats = [
     chapter.openingState,
     chapter.goal ? `她只想要一件事：${chapter.goal}。` : '',
@@ -181,7 +183,7 @@ function scaffoldProse(seed: Seed, chapter: SeedChapter, salt: string): string {
   ]
   let characters = [...lines.join('\n')].length
   let index = 0
-  while (characters < Math.max(1200, Math.floor(chapter.targetWords * 0.8))) {
+  while (characters < Math.max(1200, Math.floor(targetWords * 0.9))) {
     const sentence = `${filler[index % filler.length]}\n\n`
     lines.push(sentence)
     characters += [...sentence].length
@@ -226,17 +228,26 @@ class FakeModel {
     this.requests.push(body)
     const messages = Array.isArray(body.messages) ? body.messages as Array<Record<string, unknown>> : []
     const user = String(messages.find(message => message.role === 'user')?.content ?? '')
+    const serialized = JSON.stringify(messages)
     const chapter = this.chapterFromPrompt(user)
-    const prose = JSON.stringify(messages).includes('场景节拍规划器')
-      ? JSON.stringify({ beats: [{
-          goal: chapter.goal,
+    let prose: string
+    if (serialized.includes('场景节拍规划器')) {
+      const beatCount = chapter.targetWords >= 8000 ? 6 : chapter.targetWords >= 5000 ? 4 : 2
+      prose = JSON.stringify({
+        beats: Array.from({ length: beatCount }, (_, index) => ({
+          goal: `${chapter.goal}（第 ${index + 1} 段）`,
           obstacle: chapter.obstacle,
           turn: '行动获得新的证据或代价',
           infoRelease: '本章只释放合同允许的信息',
           emotionalLanding: '人物根据新局势作出选择',
           endingState: chapter.endingState,
-        }] })
-      : scaffoldProse(this.seed, chapter, this.salt)
+        })),
+      })
+    } else {
+      const segmentTargets = [...user.matchAll(/(?:目标约|本段目标字数仍为约)\s*(\d+)\s*字/g)]
+      const target = segmentTargets.length > 0 ? Number(segmentTargets[segmentTargets.length - 1]![1]) : chapter.targetWords
+      prose = scaffoldProse(this.seed, chapter, this.salt, target)
+    }
     response.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache',
@@ -340,6 +351,7 @@ interface ChapterRecord {
   estimatedTokens?: number
   included?: string[]
   omitted?: Array<{ sourceId: string; reason: string }>
+  segments?: Array<{ segmentId: string; status: string }>
   usage?: Record<string, number>
   elapsedMs: number
   exitCode: number
@@ -351,7 +363,7 @@ interface SeedRun {
   kind: Seed['kind']
   platform?: Seed['platform']
   evaluation?: SeedEvaluation
-  draftingStrategy: 'prose-first' | 'beat-first'
+  draftingStrategy: BenchStrategy
   config: string
   ablations: Record<string, string>
   mode: 'fake' | 'real'
@@ -457,7 +469,7 @@ async function runSeed(
     timeoutMs?: number
     maxOutputTokens?: number
     renderer?: 'json' | 'mission'
-    draftingStrategy: 'prose-first' | 'beat-first'
+    draftingStrategy: BenchStrategy
   },
 ): Promise<SeedRun> {
   const startedAt = Date.now()
@@ -535,7 +547,7 @@ async function runSeed(
       })
       continue
     }
-    if (options.draftingStrategy === 'beat-first') {
+    if (options.draftingStrategy === 'beat-first' || options.draftingStrategy === 'segmented') {
       const generated = await runCli(projectDir, ['beats', 'generate', String(chapter.chapter), '--json'], env)
       record.durations.planningMs += generated.elapsedMs
       if (generated.code !== 0) {
@@ -543,6 +555,38 @@ async function runSeed(
         record.chapters.push({
           chapter: chapter.chapter, mode: 'generated', draftPath: '', characters: 0,
           elapsedMs: generated.elapsedMs, exitCode: generated.code,
+        })
+        continue
+      }
+    }
+    if (options.draftingStrategy === 'segmented') {
+      // Segmented writes re-check the approved plan hash on every run, so the harness must
+      // approve beats and the segment plan before writing. There is no bypass in production code.
+      const approvedBeats = await runCli(projectDir, ['beats', 'approve', String(chapter.chapter), '--json'], env)
+      if (approvedBeats.code !== 0) {
+        errors.push(`beats approve ${chapter.chapter}: ${errorText(approvedBeats)}`)
+        record.chapters.push({
+          chapter: chapter.chapter, mode: 'generated', draftPath: '', characters: 0,
+          elapsedMs: approvedBeats.elapsedMs, exitCode: approvedBeats.code,
+        })
+        continue
+      }
+      const planned = await runCli(projectDir, ['segments', 'plan', String(chapter.chapter), '--json'], env)
+      record.durations.planningMs += planned.elapsedMs
+      if (planned.code !== 0) {
+        errors.push(`segments plan ${chapter.chapter}: ${errorText(planned)}`)
+        record.chapters.push({
+          chapter: chapter.chapter, mode: 'generated', draftPath: '', characters: 0,
+          elapsedMs: planned.elapsedMs, exitCode: planned.code,
+        })
+        continue
+      }
+      const approvedPlan = await runCli(projectDir, ['segments', 'approve', String(chapter.chapter), '--json'], env)
+      if (approvedPlan.code !== 0) {
+        errors.push(`segments approve ${chapter.chapter}: ${errorText(approvedPlan)}`)
+        record.chapters.push({
+          chapter: chapter.chapter, mode: 'generated', draftPath: '', characters: 0,
+          elapsedMs: approvedPlan.elapsedMs, exitCode: approvedPlan.code,
         })
         continue
       }
@@ -578,6 +622,9 @@ async function runSeed(
     const omitted = Array.isArray(payload.omitted)
       ? payload.omitted as Array<{ sourceId: string; reason: string }>
       : undefined
+    const segments = Array.isArray(payload.segments)
+      ? payload.segments as Array<{ segmentId: string; status: string }>
+      : undefined
     record.chapters.push({
       chapter: chapter.chapter,
       mode: 'generated',
@@ -586,6 +633,7 @@ async function runSeed(
       estimatedTokens: typeof payload.estimatedTokens === 'number' ? payload.estimatedTokens : undefined,
       included,
       omitted,
+      segments,
       usage: (payload.usage && typeof payload.usage === 'object') ? payload.usage as Record<string, number> : undefined,
       elapsedMs: write.elapsedMs,
       exitCode: write.code,
@@ -623,8 +671,10 @@ async function commandRun(flags: Record<string, string | true>): Promise<number>
   }
   const renderer = rendererRaw as 'json' | 'mission' | undefined
   const strategyRaw = flagString(flags, 'strategy') ?? 'prose-first'
-  if (strategyRaw !== 'prose-first' && strategyRaw !== 'beat-first') throw new Error('--strategy must be prose-first or beat-first')
-  const draftingStrategy = strategyRaw as 'prose-first' | 'beat-first'
+  if (strategyRaw !== 'prose-first' && strategyRaw !== 'beat-first' && strategyRaw !== 'segmented') {
+    throw new Error('--strategy must be prose-first, beat-first or segmented')
+  }
+  const draftingStrategy = strategyRaw as BenchStrategy
   const maxOutputTokens = flagString(flags, 'max-output') ? Number(flagString(flags, 'max-output')) : undefined
   if (maxOutputTokens !== undefined && (!Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 256)) {
     throw new Error('--max-output must be an integer >= 256')
@@ -698,10 +748,10 @@ interface BenchReport {
   ablations: Record<string, string>
   mode: 'fake' | 'real'
   model: string
-  draftingStrategy: 'prose-first' | 'beat-first'
+  draftingStrategy: BenchStrategy
   createdAt: string
   note: string
-  totals: { seeds: number; chapters: number; writeMs: number; totalMs: number; planningMs: number; characters: number }
+  totals: { seeds: number; chapters: number; writeMs: number; totalMs: number; planningMs: number; characters: number; segments: number; segmentsFailed: number }
   recall: { expectations: number; matchedTerms: number; missedTerms: number }
   seeds: Array<{
     seed: string
@@ -715,6 +765,8 @@ interface BenchReport {
     characters: number
     estimatedTokens: number
     omitted: number
+    segments: number
+    segmentsFailed: number
     errors: number
     retried: number
     recallMissed: string[]
@@ -724,7 +776,7 @@ interface BenchReport {
 
 function buildReport(
   runs: SeedRun[],
-  meta: { suite: string; config: string; ablations: Record<string, string>; mode: 'fake' | 'real'; model: string; draftingStrategy: 'prose-first' | 'beat-first' },
+  meta: { suite: string; config: string; ablations: Record<string, string>; mode: 'fake' | 'real'; model: string; draftingStrategy: BenchStrategy },
 ): BenchReport {
   const errors = runs.flatMap(run => run.errors.map(error => ({ seed: run.seed, error })))
   const recall = runs.flatMap(run => run.recall ?? [])
@@ -750,6 +802,10 @@ function buildReport(
       totalMs: runs.reduce((sum, run) => sum + run.durations.totalMs, 0),
       planningMs: runs.reduce((sum, run) => sum + run.durations.planningMs, 0),
       characters: runs.reduce((sum, run) => sum + run.chapters.reduce((inner, item) => inner + item.characters, 0), 0),
+      segments: runs.reduce((sum, run) => sum + run.chapters.reduce((inner, item) => inner + (item.segments?.length ?? 0), 0), 0),
+      segmentsFailed: runs.reduce((sum, run) => sum + run.chapters.reduce(
+        (inner, item) => inner + (item.segments ?? []).filter(segment => segment.status === 'failed').length, 0,
+      ), 0),
     },
     recall: { expectations, matchedTerms, missedTerms },
     seeds: runs.map(run => ({
@@ -764,6 +820,10 @@ function buildReport(
       characters: run.chapters.reduce((sum, item) => sum + item.characters, 0),
       estimatedTokens: run.chapters.reduce((sum, item) => sum + (item.estimatedTokens ?? 0), 0),
       omitted: run.chapters.reduce((sum, item) => sum + (item.omitted?.length ?? 0), 0),
+      segments: run.chapters.reduce((sum, item) => sum + (item.segments?.length ?? 0), 0),
+      segmentsFailed: run.chapters.reduce(
+        (sum, item) => sum + (item.segments ?? []).filter(segment => segment.status === 'failed').length, 0,
+      ),
       errors: run.errors.length,
       retried: run.chapters.filter(item => item.retried).length,
       recallMissed: (run.recall ?? []).flatMap(item => item.missed),
@@ -787,13 +847,14 @@ function renderReport(report: BenchReport): string {
     `- seeds: ${report.totals.seeds} · chapters: ${report.totals.chapters}`,
     `- generated characters: ${report.totals.characters}`,
     `- write time: ${report.totals.writeMs} ms · planning: ${report.totals.planningMs} ms · total: ${report.totals.totalMs} ms`,
+    `- segments: ${report.totals.segments} · failed: ${report.totals.segmentsFailed}`,
     `- recall terms matched/missed: ${report.recall.matchedTerms}/${report.recall.missedTerms}`,
     '',
     '## Seeds',
     '',
-    '| seed | platform | kind | chapters | chars | tokens | write ms | errors | retried |',
-    '| --- | --- | --- | --- | --- | --- | --- | --- | --- |',
-    ...report.seeds.map(seed => `| ${seed.seed} | ${seed.platform ?? 'generic'} | ${seed.kind} | ${seed.chapters} | ${seed.characters} | ${seed.estimatedTokens} | ${seed.writeMs} | ${seed.errors} | ${seed.retried} |`),
+    '| seed | platform | kind | chapters | chars | tokens | segments | failed | write ms | errors | retried |',
+    '| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |',
+    ...report.seeds.map(seed => `| ${seed.seed} | ${seed.platform ?? 'generic'} | ${seed.kind} | ${seed.chapters} | ${seed.characters} | ${seed.estimatedTokens} | ${seed.segments} | ${seed.segmentsFailed} | ${seed.writeMs} | ${seed.errors} | ${seed.retried} |`),
     '',
   ]
   for (const seed of report.seeds.filter(item => item.evaluation)) {

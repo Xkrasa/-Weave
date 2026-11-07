@@ -14,7 +14,6 @@ date: 2026-11-07
 
 > **状态（2026-11-07）**：批 0–3 已全部交付，批 4（章尾画像）按裁决保持 deferred。各项拆分为独立 task-spec 并落地：
 > 批 0 → `extraction-grounding-rules` / `assembled-context-report`；批 1 → `volume-progressive-disclosure` / `quantity-ledger-balances`；批 2 → `context-degradation-tiers` / `extraction-pending-adjudication`；批 3 → `style-range-derivation` / `context-assembly-preview`；补充缺口 → `ledger-chapter-renumber-resilience`（已验证无需修复）。批 4 → `chapter-ending-profile`、后续可选 → `context-assembly-profiles`，均留在 docs/specs/tasks/ 带「启动条件」。
-> **勘误**：批 0 的报告字段定型落点是 `src/core/context.ts`（`AssembledContext` 定义处），不是本文初稿所写的 `stage-types.ts`。
 >
 > **输入**：`docs/research/maliangwriter-competitive-analysis.md`（事实篇，主要取 §4.2 抽取规矩与 §4.3 装配表）、`docs/research/borrowable-designs-from-maliangwriter.md`（决策篇，7 个借鉴点含落点/风险/验收）。
 >
@@ -34,7 +33,7 @@ date: 2026-11-07
 | 4 | 抽取冲突进「待裁决」 | 决策篇 §4 | 采纳 | 批 2 | 无 |
 | 5 | 文风区间从定稿反推 | 决策篇 §5 | 采纳 | 批 3 | 无 |
 | 6 | 「本章装配可见」预览 | 决策篇 §6 | 采纳 | 批 3 | 0b |
-| 7 | 章尾类型按题材建议 | 决策篇 §7 | **待验证**（观察型，不做生成约束） | 批 4 | 需拆书样本 |
+| 7 | 章尾类型按题材建议 | 决策篇 §7 | **deferred**（观察型，不做生成约束；启动条件见 task-spec） | 批 4 | 需拆书样本 |
 | — | 多 Agent / 积分制 / 原文注入 / 静默压缩 / 过检测承诺 / 仿写四入口 | 决策篇「不借鉴」 | **否决**（理由见 §五） | — | — |
 
 顺序依据决策篇自己的优先级表：收益高且无依赖的先做；1/3/6 都改 `AssembledContext` 报告字段，故 0b 先把三分类一次定好，避免三次改同一处结构。
@@ -50,7 +49,7 @@ date: 2026-11-07
    - 推不出来的数不编，宁缺不凑；
    - 与既有账本/设定冲突时引用双方原句，不擅自裁决；
    - 每条记录的证据引文必须能在正文逐字定位。
-2. `src/core/stage-types.ts`：`AssembledContext` 报告三分类定型——`included` / `omitted`（预算不足丢弃）/ `withheld`（披露未到，`reason: 'not-yet-revealed'`）+ 预留 `degraded`（降级档，批 2 启用）。字段结构一次定好，批 1/2/3 只填值。
+2. `src/core/context.ts`（`AssembledContext` 定义处）：报告三分类定型——`included` / `omitted`（预算不足丢弃）/ `withheld`（披露未到，`reason: 'not-yet-revealed'`）+ 预留 `degraded`（降级档，批 2 启用）。字段结构一次定好，批 1/2/3 只填值。
 
 **验收**：构造「正文未写某事实」的样章，抽取不产出该记录；引文不匹配的证据进 `rejected`。现有测试全绿。
 
@@ -90,7 +89,7 @@ date: 2026-11-07
 
 **验收**：决策篇 §5/§6 原文（adopt 前 canon 不变；预览 contextHash 与 run 记录一致）。
 
-### 批 4：章尾画像（待验证，观察型）
+### 批 4：章尾画像（deferred，观察型）
 
 `deconstruct.ts` 增章尾分类统计（悬念揭示/关系反转/目标受阻/情绪落地/信息差），按题材聚合，**只出观察报告**：不进生成约束、不进 review 门禁、不影响定稿判定。积累足够拆书样本后再评估是否升级为方法卡素材。决策篇 §7 的风险成立（题材标签与样本偏差），故本批默认搁置，仅在前六项全部交付且 bench 有余力时启动。
 
@@ -103,11 +102,21 @@ date: 2026-11-07
 5. 批 1 的披露需要长篇种子验证（现有 `bench/seeds/long-sect`、`long-harbor` 可复用）；数值总账用三章专用测试构造，不加新 seed。
 6. 所有 finding（quantity-break、降级、待裁决）默认 warning/info，不阻断定稿。
 
-## 四、验证方式
+## 四、验证方式与执行记录
 
-- 每批开工前开一条 issue（锚定本方案对应批次）；按项目规则，交付后结论收割进 `docs/adr/`（尚未建立时先随代码注释落位）与相关模块注释，然后关闭并清理 issue 记录，不留过期 spec。
+计划口径（保留备查）：
+
 - 批 0/2 属可信性改动，走测试验收为主；批 1/3 涉及生成行为，加盲评对比（`blind-eval`）小样本留痕。
 - 全部批次完成后，本文 `status` 改为 `delivered` 并在顶部注明各批去向；若届时已建 `docs/adr/`，则收割进 ADR 后按规则处置本文。
+
+执行记录（2026-11-07 收尾核对）：
+
+- 实际承载方式与计划不同：未开 GitHub issue，改用 `docs/specs/tasks/` 的 task-spec（`parent: weave-effect-first-architecture`，`references` 指回本方案）+ 提交序列承载；结论随代码注释落位。`CONTEXT.md` 与 `docs/adr/` 至今未建立（`AGENTS.md` 已声明缺失是允许的）。
+- 交付提交：批 0 `fb192fe`；批 1a `eded416`；批 1b `d41bfac`；批 2 `3502469` + `758f601`；批 3 `5647f07` + `36ac739`；补充缺口（账本重编号韧性）`237eea2`；spec 状态收尾 `3d05b1f` + `52186f9`。
+- 收尾验证：`npm run check`（typecheck + 140 测试）全绿；`.scratch/` 无遗留工作项。
+- task-spec 处置：9 份 `implemented` 保留在 `docs/specs/tasks/`——因同目录仍有 3 份 `deferred` 未结任务（`chapter-ending-profile`、`context-assembly-profiles`、`optional-semantic-retrieval`），按仓库规则保留目录与状态标记，不删除。
+- **遗留验收欠账（效果层）**：批 1/3 的盲评留痕未做——`bench/BASELINE.md` 最后更新仍是 `4e8f7ca`（Fanqie 基线），需真实模型经 `scripts/benchmark.ts` 复跑后再更新；在此之前，批 1/3 的交付只证明接线与门禁行为，不证明阅读效果（与 `README.md` 的口径一致）。
+- **文档欠账**：`docs/research/` 下 6 篇文档（含 `craft-knowledge-reference.md`，以及被 task-spec `references` 引用的两篇马良文档）尚未提交入库；提交前 task-spec 的 `references` 指向未入库文件。
 
 ## 五、拒绝清单（维持决策篇裁决，不再重议）
 

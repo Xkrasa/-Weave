@@ -317,8 +317,14 @@ test('generated outlines stay candidates until applied, checked and approved', a
     assert.equal(blocked.code, 4)
     assert.match(parseJson<{ error: { message: string } }>(blocked.stdout).error.message, /章纲候选/)
 
+    // The author edits the candidate before applying it; the edited version must stay approvable.
+    const candidateFile = path.join(dir, 'plans', 'candidates', 'chapters', '001.json')
+    const editable = JSON.parse(await readFile(candidateFile, 'utf8')) as { contract: { title: string } }
+    editable.contract.title = '潮位（作者改）'
+    await writeFile(candidateFile, `${JSON.stringify(editable, null, 2)}\n`)
+
     assert.equal((await runCli(dir, ['outline', 'apply', '1', '--json'])).code, 0)
-    assert.match(await readFile(path.join(dir, 'outlines', 'chapters', '001.json'), 'utf8'), /潮位/)
+    assert.match(await readFile(path.join(dir, 'outlines', 'chapters', '001.json'), 'utf8'), /潮位（作者改）/)
 
     const premature = await runCli(dir, ['outline', 'approve', '1', '--json'])
     assert.equal(premature.code, 4)
@@ -328,6 +334,19 @@ test('generated outlines stay candidates until applied, checked and approved', a
     const approved = await runCli(dir, ['outline', 'approve', '1', '--json'])
     assert.equal(approved.code, 0, approved.stderr)
     assert.equal(parseJson<{ status: string }>(approved.stdout).status, 'approved')
+
+    // Editing the formal contract after approval requires a fresh check and approval, not a re-apply.
+    const contractFile = path.join(dir, 'outlines', 'chapters', '001.json')
+    const formal = JSON.parse(await readFile(contractFile, 'utf8')) as { goal: string }
+    formal.goal = '查出这票货最后落在谁手里'
+    await writeFile(contractFile, `${JSON.stringify(formal, null, 2)}\n`)
+    const stale = await runCli(dir, ['write', '1', '--json'])
+    assert.equal(stale.code, 4)
+    assert.match(parseJson<{ error: { message: string } }>(stale.stdout).error.message, /批准后已变化/)
+    assert.equal((await runCli(dir, ['contract', 'check', '1', '--json'])).code, 0)
+    const reapproved = await runCli(dir, ['outline', 'approve', '1', '--json'])
+    assert.equal(reapproved.code, 0, reapproved.stdout + reapproved.stderr)
+    assert.match(await readFile(contractFile, 'utf8'), /最后落在谁手里/)
 
     const written = await runCli(dir, ['write', '1', '--json'])
     assert.equal(written.code, 0, written.stdout + written.stderr)

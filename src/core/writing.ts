@@ -8,11 +8,23 @@ import type {
   ProjectionState,
   RunRecord,
   RunRecovery,
+  RunUsage,
+  SegmentRunRecord,
 } from './types.ts'
 import { assertNoPendingImpacts, createImpactReport } from './impact.ts'
 import { loadCharacters, loadContract, contractHash, requirePassingContractCheck } from './contract.ts'
-import { assembleChapterContext } from './materials.ts'
+import { assembleChapterContext, prepareChapterContextInputs } from './materials.ts'
 import { formatBeats, requireApprovedBeats, type DraftingStrategy } from './beats.ts'
+import {
+  markSegmentStatus,
+  requireApprovedSegmentPlan,
+  resetSegmentRun,
+  saveSegmentOutput,
+  segmentTextPath,
+  type ChapterSegmentPlan,
+} from './segments.ts'
+import type { SegmentPromptContext } from './context.ts'
+import { assembleContext } from './context.ts'
 import type { AuthorSampleSelection } from './style.ts'
 import { streamChapter } from './model.ts'
 import { loadModelConfig, loadProject } from './project.ts'
@@ -54,7 +66,9 @@ import {
   replayLedgerProjectionFrom,
 } from './ledger-projection.ts'
 import { conflictError, modelError, reviewBlockedError, validationError, WeaveError } from './errors.ts'
-import { loadStage, requireStage } from './stages.ts'
+import { checkSegment } from './segment-checks.ts'
+import { loadStage, requireStage, saveStage } from './stages.ts'
+import { runContentCheck } from './content-check.ts'
 import { applyFinalizedChapter, markSearchIndexFailed } from './search.ts'
 import { assertOutlineApproved } from './outline.ts'
 import { ensureStoryMemory } from './memory.ts'
@@ -92,6 +106,7 @@ export interface WriteResult {
   withheld: Array<{ sourceId: string; reason: string }>
   degraded: Array<{ sourceId: string; reason: string }>
   conflictWarnings: string[]
+  segments?: SegmentRunRecord[]
 }
 
 export async function writeChapter(
@@ -137,6 +152,22 @@ export async function writeChapter(
   }
 
   const draftingStrategy = options.draftingStrategy ?? 'prose-first'
+  if (draftingStrategy === 'segmented') {
+    const plan = await requireApprovedSegmentPlan(root, chapter)
+    const approvedBeats = await requireApprovedBeats(root, chapter, { allowBenchmarkDraft: options.benchmark === true })
+    const resume = options.resumeFromRunId
+      ? await resolveSegmentResume(root, chapter, plan, options.resumeFromRunId)
+      : undefined
+    return writeSegmentedChapter(root, chapter, {
+      contract,
+      modelConfig,
+      current,
+      options,
+      plan,
+      beatContentHash: approvedBeats.contentHash,
+      ...(resume ? { resume } : {}),
+    })
+  }
   const beatCandidate = draftingStrategy === 'beat-first'
     ? await requireApprovedBeats(root, chapter, { allowBenchmarkDraft: options.benchmark === true })
     : null
@@ -313,6 +344,18 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
   let reviewHash: string | undefined
   let ledger: CommitRecord['ledger']
   let commitEvidence: CommitRecord['evidence'] = []
+  if (project.workflowVersion !== 2) {
+    // p0 skips the model stages, but the deterministic content check is free and
+    // still catches empty, truncated or placeholder prose before it becomes canon.
+    const check = await runContentCheck(root, chapter, contract, draft)
+    await saveStage(root, 'content-check', chapter, check)
+    if (!check.passed) {
+      throw validationError(
+        `第 ${chapter} 章内容检查未通过；请修复后再定稿`,
+        check.findings.filter(finding => finding.severity === 'blocking'),
+      )
+    }
+  }
   if (project.workflowVersion === 2) {
     await requireStage<ContentCheckReport>(root, 'content-check', chapter, currentDraftHash)
     const extraction = await requireStage<ExtractionReport>(root, 'extraction', chapter, currentDraftHash)
@@ -454,6 +497,367 @@ export async function finalizeChapter(root: string, chapter: number): Promise<Fi
     impact,
     draftEdited,
   }
+}
+
+async function writeSegmentedChapter(
+  root: string,
+  chapter: number,
+  input: {
+    contract: Awaited<ReturnType<typeof loadContract>>
+    modelConfig: Awaited<ReturnType<typeof loadModelConfig>>
+    current: CommitRecord | null
+    options: {
+      signal: AbortSignal
+      onDelta?: (text: string) => void
+      onEvent?: (event: GenerationEvent) => void
+      key?: boolean
+      authorSamples?: 'scene' | 'legacy' | 'off'
+      benchmark?: boolean
+    }
+    plan: ChapterSegmentPlan
+    beatContentHash: string
+    resume?: SegmentResume
+  },
+): Promise<WriteResult> {
+  const prepared = await prepareChapterContextInputs(root, input.contract, {
+    authorSamples: input.options.authorSamples,
+    modelConfig: input.modelConfig,
+  })
+  const completed = input.resume?.completed ?? []
+  const completedIds = new Set(completed.map(segment => segment.segmentId))
+  const parts = [...(input.resume?.parts ?? [])]
+  const summaries: SegmentRunRecord[] = [...completed]
+  const usages: RunUsage[] = completed.flatMap(segment => segment.usage ? [segment.usage] : [])
+  let priorTail = parts.length > 0 ? [...parts.at(-1)!].slice(-400).join('') : ''
+  const recovery: RunRecovery | undefined = input.resume
+    ? {
+        fromRunId: input.resume.priorRunId,
+        partialPath: input.resume.partialPath ?? '',
+        strategy: 'resume-segments',
+        completedSegments: [...completedIds],
+        ...(input.resume.nextSegmentId ? { nextSegmentId: input.resume.nextSegmentId } : {}),
+      }
+    : undefined
+  const run: RunRecord = {
+    schemaVersion: 1,
+    runId: newRunId(),
+    chapter,
+    status: 'running',
+    task: 'writing',
+    model: input.modelConfig.model,
+    baseUrl: input.modelConfig.baseUrl,
+    startedAt: new Date().toISOString(),
+    contextHash: objectHash({ planHash: input.plan.planHash }),
+    promptHash: objectHash({ planHash: input.plan.planHash }),
+    materialSourceIds: [],
+    draftingStrategy: 'segmented',
+    beatContentHash: input.beatContentHash,
+    sampleSelection: prepared.sampleSelection,
+    methodSelection: prepared.methodSelection,
+    ...(recovery ? { recovery } : {}),
+    segments: input.plan.segments.map(segment => completedIds.has(segment.segmentId)
+      ? completed.find(item => item.segmentId === segment.segmentId)!
+      : { segmentId: segment.segmentId, status: 'planned' as const }),
+  }
+  await saveRun(root, run)
+  await resetSegmentRun(root, chapter, [...completedIds])
+  if (parts.length > 0) {
+    const partialPath = await savePartial(root, run.runId, mergeSegmentTexts(parts))
+    run.partialPath = path.relative(root, partialPath).split(path.sep).join('/')
+  }
+
+  let seq = 0
+  const emit = (event: Omit<GenerationEvent, 'seq' | 'runId' | 'chapter'>): void => {
+    input.options.onEvent?.({ ...event, seq: seq++, runId: run.runId, chapter })
+  }
+  emit({ type: 'started' })
+
+  const contextHashes: string[] = []
+  const included = new Set<string>()
+  const omitted = new Map<string, string>()
+  const degraded = new Map<string, string>()
+  let estimatedTokens = 0
+  let layers = { stable: '', volume: '', chapter: '', full: '' }
+  let renderer = 'json'
+
+  try {
+    for (const segment of input.plan.segments) {
+      if (completedIds.has(segment.segmentId)) continue
+      if (input.options.signal.aborted) throw modelError('生成已取消')
+      emit({ type: 'segment-started', segmentId: segment.segmentId })
+      await markSegmentStatus(root, chapter, segment.segmentId, 'generating')
+
+      const segmentConfig = segmentModelConfig(input.modelConfig, segment.targetWords)
+      let acceptedText = ''
+      let acceptedUsage: RunUsage | undefined
+      let lastRetryReasons: string[] = []
+      let acceptedContext: import('./context.ts').AssembledContext | null = null
+      for (let attempt = 1; attempt <= MAX_SEGMENT_ATTEMPTS; attempt += 1) {
+        const prompt = segmentPrompt(segment, input.plan.segments.length, priorTail, lastRetryReasons)
+        const assembled = assembleContext(input.contract, prepared.materials, segmentConfig, {
+          segment: prompt,
+          withheld: prepared.withheld,
+        })
+        if (assembled.decision.decision !== 'ready' || !assembled.context) {
+          throw validationError(
+            assembled.decision.decision === 'ready' ? '分段上下文装配失败' : assembled.decision.message,
+            assembled.decision,
+          )
+        }
+        const context = assembled.context
+        contextHashes.push(context.contextHash)
+        estimatedTokens += context.estimatedTokens
+        for (const item of context.included) included.add(item.sourceId)
+        for (const item of context.omitted) omitted.set(item.sourceId, item.reason)
+        for (const item of context.degraded) degraded.set(item.sourceId, item.reason)
+        layers = context.layers
+        renderer = context.renderer
+
+        let text = ''
+        const onDelta = (delta: string): void => {
+          text += delta
+          input.options.onDelta?.(delta)
+          emit({ type: 'delta', text: delta, segmentId: segment.segmentId })
+        }
+        const result = await streamChapter({
+          config: segmentConfig,
+          system: context.system,
+          user: context.user,
+          signal: input.options.signal,
+          onDelta,
+        })
+        const attemptText = normalizeText(text).trim()
+        if (!attemptText) throw modelError(`第 ${segment.segmentId} 段返回了空正文`)
+        if (result.usage) usages.push(result.usage)
+        emit({ type: 'usage', usage: result.usage, segmentId: segment.segmentId })
+        const checked = checkSegment({
+          text: attemptText,
+          targetWords: segment.targetWords,
+          previousTail: priorTail,
+          mustNotHappen: segment.mustNotHappen,
+          pov: input.contract.pov,
+          goal: segment.goal,
+          exitState: segment.exitState,
+        })
+        if (checked.passed) {
+          acceptedText = checked.text
+          acceptedUsage = result.usage
+          acceptedContext = context
+          break
+        }
+        emit({
+          type: 'segment-retry',
+          segmentId: segment.segmentId,
+          attempt,
+          reason: checked.retryReasons.join('；'),
+        })
+        lastRetryReasons = checked.retryReasons
+        if (attempt === MAX_SEGMENT_ATTEMPTS) {
+          await markSegmentStatus(root, chapter, segment.segmentId, 'failed')
+          throw validationError(
+            `第 ${segment.segmentId} 段连续 ${MAX_SEGMENT_ATTEMPTS} 次未通过校验：${checked.retryReasons.join('；')}`,
+          )
+        }
+      }
+      if (!acceptedContext) throw modelError(`第 ${segment.segmentId} 段没有可用正文`)
+
+      const saved = await saveSegmentOutput(root, chapter, segment.segmentId, acceptedText, run.runId)
+      const summary: SegmentRunRecord = {
+        segmentId: segment.segmentId,
+        status: 'draft',
+        contentHash: saved.contentHash,
+        ...(acceptedUsage ? { usage: acceptedUsage } : {}),
+      }
+      summaries.push(summary)
+      parts.push(acceptedText)
+      priorTail = [...acceptedText].slice(-400).join('')
+
+      const partialPath = await savePartial(root, run.runId, mergeSegmentTexts(parts))
+      run.partialPath = path.relative(root, partialPath).split(path.sep).join('/')
+      run.contextHash = objectHash({ planHash: input.plan.planHash, contexts: contextHashes })
+      run.promptHash = objectHash({ contexts: contextHashes })
+      run.materialSourceIds = [...included]
+      run.usage = sumUsage(usages)
+      run.segments = summaries
+      await saveRun(root, run)
+      emit({
+        type: 'segment-completed',
+        segmentId: segment.segmentId,
+        contentHash: saved.contentHash,
+        usage: acceptedUsage,
+      })
+    }
+
+    const merged = mergeSegmentTexts(parts)
+    if (!merged.trim()) throw modelError('分段合并后正文为空')
+    const draft = await saveDraft(root, chapter, merged)
+    const keyCandidates = input.options.key === true || input.contract.importance === 'key'
+      ? await generateKeyCandidates(root, chapter, input.contract, input.modelConfig, input.options.signal)
+      : []
+    const totalUsage = sumUsage(usages)
+    const nextMeta: DraftMeta = {
+      chapter,
+      contentHash: hashText(merged),
+      runId: run.runId,
+      baseCommit: input.current?.commitId ?? null,
+      createdAt: new Date().toISOString(),
+    }
+    await saveDraftMeta(root, nextMeta)
+    const finished = {
+      ...finishRun(run, 'completed', { usage: totalUsage }),
+      segments: summaries,
+    }
+    await saveRun(root, finished)
+    emit({ type: 'completed', draft })
+    return {
+      chapter,
+      run: finished,
+      draftPath: draft,
+      contextHash: run.contextHash ?? '',
+      keyCandidates,
+      layers,
+      renderer,
+      draftingStrategy: 'segmented',
+      beatContentHash: input.beatContentHash,
+      sampleSelection: prepared.sampleSelection,
+      estimatedTokens,
+      included: [...included],
+      omitted: [...omitted].map(([sourceId, reason]) => ({ sourceId, reason })),
+      withheld: prepared.withheld,
+      degraded: [...degraded].map(([sourceId, reason]) => ({ sourceId, reason })),
+      conflictWarnings: prepared.conflictWarnings,
+      segments: summaries,
+    }
+  } catch (error) {
+    const cancelled = input.options.signal.aborted
+    let savedPartial: string | undefined
+    if (parts.length > 0) savedPartial = await savePartial(root, run.runId, mergeSegmentTexts(parts))
+    const finished = {
+      ...finishRun(run, cancelled ? 'cancelled' : 'failed', {
+        error: error instanceof Error ? error.message : String(error),
+        partialPath: savedPartial ? path.relative(root, savedPartial).split(path.sep).join('/') : run.partialPath,
+        attempts: (error as { attempts?: RunRecord['attempts'] }).attempts,
+      }),
+      segments: summaries,
+    }
+    await saveRun(root, finished)
+    emit(
+      cancelled
+        ? { type: 'cancelled', error: '生成已取消' }
+        : { type: 'failed', error: error instanceof Error ? error.message : String(error) },
+    )
+    if (error instanceof WeaveError) throw error
+    throw modelError(`生成失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+interface SegmentResume {
+  priorRunId: string
+  partialPath?: string
+  completed: SegmentRunRecord[]
+  parts: string[]
+  nextSegmentId?: string
+}
+
+async function resolveSegmentResume(
+  root: string,
+  chapter: number,
+  plan: ChapterSegmentPlan,
+  runId: string,
+): Promise<SegmentResume> {
+  const prior = await loadRun(root, runId)
+  if (!prior) throw validationError(`未找到运行记录：${runId}`)
+  if (prior.chapter !== chapter) {
+    throw validationError(`运行 ${runId} 属于第 ${prior.chapter} 章，不能用于第 ${chapter} 章`)
+  }
+  if (prior.draftingStrategy !== 'segmented') {
+    throw validationError(`运行 ${runId} 不是分段生成，不能按段恢复`)
+  }
+  if (prior.status !== 'failed' && prior.status !== 'cancelled') {
+    throw validationError(`运行 ${runId} 状态为 ${prior.status}，只有失败或取消的运行可以恢复`)
+  }
+
+  const completed: SegmentRunRecord[] = []
+  const parts: string[] = []
+  for (const segment of plan.segments) {
+    const summary = prior.segments?.find(item => item.segmentId === segment.segmentId)
+    if (!summary || !summary.contentHash || !['draft', 'checked', 'approved'].includes(summary.status)) break
+    const text = await readTextIfExists(segmentTextPath(root, chapter, segment.segmentId))
+    if (!text?.trim()) throw validationError(`已完成段 ${segment.segmentId} 的正文缺失，不能恢复`)
+    const actual = objectHash({ segmentId: segment.segmentId, text: text.trim() })
+    if (actual !== summary.contentHash) {
+      throw validationError(`已完成段 ${segment.segmentId} 的正文在运行后被修改，不能恢复`)
+    }
+    completed.push(summary)
+    parts.push(text.trim())
+  }
+  const completedIds = new Set(completed.map(item => item.segmentId))
+  const next = plan.segments.find(segment => !completedIds.has(segment.segmentId))
+  return {
+    priorRunId: prior.runId,
+    ...(prior.partialPath ? { partialPath: prior.partialPath } : {}),
+    completed,
+    parts,
+    ...(next ? { nextSegmentId: next.segmentId } : {}),
+  }
+}
+
+function segmentModelConfig(
+  config: Awaited<ReturnType<typeof loadModelConfig>>,
+  targetWords: number,
+): Awaited<ReturnType<typeof loadModelConfig>> {
+  const estimated = Math.ceil((targetWords / config.charsPerToken) * 1.3 + 200)
+  return { ...config, maxOutputTokens: Math.min(config.maxOutputTokens, 4_096, Math.max(256, estimated)) }
+}
+
+function segmentPrompt(
+  segment: ChapterSegmentPlan['segments'][number],
+  total: number,
+  priorTail: string,
+  retryReasons: string[] = [],
+): SegmentPromptContext {
+  return {
+    index: segment.index,
+    total,
+    goal: segment.goal,
+    entryState: segment.entryState,
+    exitState: segment.exitState,
+    priorTail,
+    targetWords: segment.targetWords,
+    mustNotHappen: segment.mustNotHappen,
+    ...(retryReasons.length > 0 ? { retryReasons } : {}),
+  }
+}
+
+const MAX_SEGMENT_ATTEMPTS = 3
+
+/** Removes a 40+ character suffix/prefix overlap at a segment boundary. */
+export function mergeSegmentTexts(parts: string[]): string {
+  const normalized = parts.map(part => normalizeText(part).trim()).filter(part => part.length > 0)
+  let merged = ''
+  for (const part of normalized) {
+    if (!merged) {
+      merged = part
+      continue
+    }
+    let overlap = Math.min(merged.length, part.length, 600)
+    while (overlap >= MIN_OVERLAP && merged.slice(-overlap) !== part.slice(0, overlap)) overlap -= 1
+    const cut = overlap >= MIN_OVERLAP ? overlap : 0
+    merged = `${merged}\n\n${part.slice(cut)}`
+  }
+  return merged
+}
+
+const MIN_OVERLAP = 40
+
+function sumUsage(usages: RunUsage[]): RunUsage {
+  const total: RunUsage = {}
+  for (const usage of usages) {
+    if (usage.promptTokens !== undefined) total.promptTokens = (total.promptTokens ?? 0) + usage.promptTokens
+    if (usage.completionTokens !== undefined) total.completionTokens = (total.completionTokens ?? 0) + usage.completionTokens
+    if (usage.totalTokens !== undefined) total.totalTokens = (total.totalTokens ?? 0) + usage.totalTokens
+  }
+  return total
 }
 
 async function resolveRecovery(

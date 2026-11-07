@@ -6,7 +6,7 @@ import { loadCharacters, loadContract } from './contract.ts'
 import { projectPaths } from './project.ts'
 import { currentCommit, finalPath, readMainline } from './ledger.ts'
 import { collectLedger, collectLoopState, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
-import { assembleContext } from './context.ts'
+import { assembleContext, estimateTokens } from './context.ts'
 import { loadModelConfig } from './project.ts'
 import { resolveTaskConfig } from './model-policy.ts'
 import { loadMethods, methodText, selectMethods } from './methods.ts'
@@ -17,6 +17,7 @@ import { listPlans, readApprovedPlan, type CharacterArc, type RollingPlan, type 
 import { ensureStoryMemory, povMemory } from './memory.ts'
 import { preferenceMaterial, readApprovedPreferences } from './preferences.ts'
 import { listUnresolvedPending } from './pending.ts'
+import { listIdeas, readIdea } from './ideas.ts'
 
 interface ReferenceManifestEntry {
   id: string
@@ -32,7 +33,7 @@ interface ReferenceManifest {
 
 export interface WithheldMaterial {
   sourceId: string
-  reason: 'not-yet-revealed'
+  reason: 'not-yet-revealed' | 'idea-spoiler'
 }
 
 export interface DisclosureEntry {
@@ -92,15 +93,26 @@ export async function withheldForChapter(
   return entries
 }
 
+export const MAX_IDEA_MATERIALS = 6
+export const MAX_IDEA_TOKENS = 2_000
+
 export async function collectMaterialBundle(
   root: string,
   contract: ChapterContract,
-  options: { authorSamples?: 'scene' | 'legacy' | 'off' } = {},
+  options: {
+    authorSamples?: 'scene' | 'legacy' | 'off'
+    /** Book-scoped ideas are opt-in; chapter/volume/character scopes always match when they apply. */
+    includeBookIdeas?: boolean
+    charsPerToken?: number
+  } = {},
 ): Promise<{
   materials: Material[]
   methodSelection: import('./methods.ts').MethodSelection
   sampleSelection: import('./style.ts').AuthorSampleSelection
   withheld: WithheldMaterial[]
+  ideaOmitted: Array<{ sourceId: string; reason: 'budget' }>
+  ideaDegraded: Array<{ sourceId: string; reason: 'budget' }>
+  ideaWarnings: string[]
 }> {
   const paths = projectPaths(root)
   const materials: Material[] = []
@@ -378,7 +390,22 @@ export async function collectMaterialBundle(
     }
   }
 
-  return { materials, methodSelection, sampleSelection, withheld }
+  const ideaBundle = await collectIdeaMaterials(root, contract, reveals, {
+    ...(options.includeBookIdeas !== undefined ? { includeBookIdeas: options.includeBookIdeas } : {}),
+    ...(options.charsPerToken !== undefined ? { charsPerToken: options.charsPerToken } : {}),
+  })
+  materials.push(...ideaBundle.materials)
+  withheld.push(...ideaBundle.withheld)
+
+  return {
+    materials,
+    methodSelection,
+    sampleSelection,
+    withheld,
+    ideaOmitted: ideaBundle.omitted,
+    ideaDegraded: ideaBundle.degraded,
+    ideaWarnings: ideaBundle.warnings,
+  }
 }
 
 export async function collectMaterials(
@@ -387,6 +414,163 @@ export async function collectMaterials(
   options: { authorSamples?: 'scene' | 'legacy' | 'off' } = {},
 ): Promise<Material[]> {
   return (await collectMaterialBundle(root, contract, options)).materials
+}
+
+/**
+ * Promoted ideas become optional author-only materials. Inbox ideas never enter context.
+ * The 6-item / 2000-token caps are applied before assembly; overflow is reported as
+ * omitted or degraded instead of silently dropped.
+ */
+async function collectIdeaMaterials(
+  root: string,
+  contract: ChapterContract,
+  reveals: Map<string, number>,
+  options: { includeBookIdeas?: boolean; charsPerToken?: number } = {},
+): Promise<{
+  materials: Material[]
+  withheld: WithheldMaterial[]
+  omitted: Array<{ sourceId: string; reason: 'budget' }>
+  degraded: Array<{ sourceId: string; reason: 'budget' }>
+  warnings: string[]
+}> {
+  const materials: Material[] = []
+  const withheld: WithheldMaterial[] = []
+  const omitted: Array<{ sourceId: string; reason: 'budget' }> = []
+  const degraded: Array<{ sourceId: string; reason: 'budget' }> = []
+  const warnings: string[] = []
+  const charsPerToken = options.charsPerToken ?? 1.6
+  const candidates = (await listIdeas(root, { status: 'promoted' }))
+    .filter(idea => idea.promotionState === 'active' && ideaScopeMatches(idea, contract, options))
+    .sort((left, right) =>
+      ideaPriorityRank(left.priority) - ideaPriorityRank(right.priority)
+      || right.updatedAt.localeCompare(left.updatedAt)
+      || left.id.localeCompare(right.id))
+
+  let count = 0
+  let tokens = 0
+  for (const candidate of candidates) {
+    const sourceId = `idea:${candidate.id}`
+    const revealAt = Math.max(candidate.revealAfterChapter ?? 0, reveals.get(sourceId) ?? 0)
+    if (candidate.spoilerLevel === 'reveal' && revealAt > contract.chapter) {
+      withheld.push({ sourceId, reason: 'idea-spoiler' })
+      continue
+    }
+    if (count >= MAX_IDEA_MATERIALS) {
+      omitted.push({ sourceId, reason: 'budget' })
+      continue
+    }
+    const { meta, body } = await readIdea(root, candidate.id)
+    if (!body.trim()) {
+      warnings.push(`想法「${meta.title}」正文缺失，跳过回灌。`)
+      omitted.push({ sourceId, reason: 'budget' })
+      continue
+    }
+    const text = `作者意图（不是既成事实，不得写成已发生剧情）：\n${body.trim()}`
+    const compact = `${meta.title}（想法，未展开）`
+    const fullTokens = estimateTokens(text, charsPerToken)
+    if (tokens + fullTokens <= MAX_IDEA_TOKENS) {
+      materials.push(makeIdeaMaterial(meta, text, compact, false))
+      tokens += fullTokens
+      count += 1
+    } else if (tokens + estimateTokens(compact, charsPerToken) <= MAX_IDEA_TOKENS) {
+      materials.push(makeIdeaMaterial(meta, compact, compact, true))
+      tokens += estimateTokens(compact, charsPerToken)
+      count += 1
+      degraded.push({ sourceId, reason: 'budget' })
+    } else {
+      omitted.push({ sourceId, reason: 'budget' })
+      continue
+    }
+    for (const forbidden of contract.mustNotHappen ?? []) {
+      const needle = forbidden.trim()
+      if (!needle) continue
+      if (body.includes(needle) || meta.title.includes(needle)) {
+        warnings.push(`想法「${meta.title}」提到合同禁区「${needle}」；合同优先，想法不要写成已发生剧情。`)
+      }
+    }
+  }
+  return { materials, withheld, omitted, degraded, warnings }
+}
+
+function makeIdeaMaterial(
+  idea: import('./ideas.ts').IdeaView,
+  text: string,
+  compact: string,
+  compacted: boolean,
+): Material {
+  return {
+    sourceId: `idea:${idea.id}`,
+    category: 'author',
+    provenance: 'author',
+    required: false,
+    label: `作者想法：${idea.title}`,
+    text,
+    contentHash: hashText(text),
+    visibility: 'author-only',
+    purpose: '想法回灌',
+    priority: idea.priority === 'high' ? 10 : 50,
+    compact,
+    ...(compacted ? { relevance: 0 } : {}),
+  }
+}
+
+function ideaPriorityRank(priority: 'high' | 'normal' | 'low'): number {
+  return priority === 'high' ? 0 : priority === 'normal' ? 1 : 2
+}
+
+function ideaScopeMatches(
+  idea: import('./ideas.ts').IdeaView,
+  contract: ChapterContract,
+  options: { includeBookIdeas?: boolean },
+): boolean {
+  const scope = idea.scope
+  if (scope.kind === 'chapter') return scope.ref === contract.chapter
+  if (scope.kind === 'volume') return contract.volume !== undefined && scope.ref === contract.volume
+  if (scope.kind === 'character') return contract.characters.includes(scope.ref)
+  if (scope.kind === 'book') return options.includeBookIdeas === true
+  // World/mechanic ideas are global, but still capped and ranked like every other idea.
+  return true
+}
+
+/**
+ * Collects every chapter-level input once. Segmented generation reuses this bundle and only
+ * re-assembles the prompt per segment, so ledger/search reads are not repeated per segment.
+ */
+export async function prepareChapterContextInputs(
+  root: string,
+  contract: ChapterContract,
+  options: {
+    authorSamples?: 'scene' | 'legacy' | 'off'
+    modelConfig?: import('./types.ts').ModelConfig
+    /** Explicit author opt-in for book-scoped promoted ideas. */
+    includeBookIdeas?: boolean
+  } = {},
+): Promise<{
+  modelConfig: import('./types.ts').ModelConfig
+  materials: Material[]
+  sampleSelection: import('./style.ts').AuthorSampleSelection
+  methodSelection: import('./methods.ts').MethodSelection
+  withheld: WithheldMaterial[]
+  ideaOmitted: Array<{ sourceId: string; reason: 'budget' }>
+  ideaDegraded: Array<{ sourceId: string; reason: 'budget' }>
+  conflictWarnings: string[]
+}> {
+  const modelConfig = options.modelConfig ?? resolveTaskConfig(await loadModelConfig(root), 'writing')
+  const { materials, sampleSelection, methodSelection, withheld, ideaOmitted, ideaDegraded, ideaWarnings } = await collectMaterialBundle(root, contract, {
+    authorSamples: options.authorSamples,
+    includeBookIdeas: options.includeBookIdeas,
+    charsPerToken: modelConfig.charsPerToken,
+  })
+  const conflictWarnings: string[] = [...ideaWarnings]
+  const head = await readMainline(root)
+  const chaptersWithStages = [...Object.keys(head.selectedCommitByChapter).map(Number), contract.chapter]
+  for (const record of await listUnresolvedPending(root, chaptersWithStages)) {
+    if (!contract.characters.includes(record.subject)) continue
+    conflictWarnings.push(
+      `第 ${record.chapter} 章未裁决冲突：${record.subject} 的 ${record.predicate} 账本为「${record.priorObject}」，正文写「${record.object}」；执行 weave pending ${record.chapter} 裁决`,
+    )
+  }
+  return { modelConfig, materials, sampleSelection, methodSelection, withheld, ideaOmitted, ideaDegraded, conflictWarnings }
 }
 
 /**
@@ -399,8 +583,12 @@ export async function assembleChapterContext(
   options: {
     authorSamples?: 'scene' | 'legacy' | 'off'
     beatText?: string
+    /** Segmented generation: current segment task. */
+    segment?: import('./context.ts').SegmentPromptContext
     /** writeChapter 复用自己的写作任务配置；预览不传时由本函数加载同一配置。 */
     modelConfig?: import('./types.ts').ModelConfig
+    /** Explicit author opt-in for book-scoped promoted ideas. */
+    includeBookIdeas?: boolean
   } = {},
 ): Promise<{
   decision: import('./types.ts').MaterialDecision
@@ -410,24 +598,23 @@ export async function assembleChapterContext(
   /** 作者可见警告：涉及本章角色的未裁决账本冲突。不进 prompt、不影响 contextHash。 */
   conflictWarnings: string[]
 }> {
-  const modelConfig = options.modelConfig ?? resolveTaskConfig(await loadModelConfig(root), 'writing')
-  const { materials, sampleSelection, methodSelection, withheld } = await collectMaterialBundle(root, contract, {
-    authorSamples: options.authorSamples,
-  })
-  const assembled = assembleContext(contract, materials, modelConfig, {
+  const prepared = await prepareChapterContextInputs(root, contract, options)
+  const assembled = assembleContext(contract, prepared.materials, prepared.modelConfig, {
     ...(options.beatText ? { beatText: options.beatText } : {}),
-    withheld,
+    ...(options.segment ? { segment: options.segment } : {}),
+    withheld: prepared.withheld,
+    preOmitted: prepared.ideaOmitted,
   })
-  const conflictWarnings: string[] = []
-  const head = await readMainline(root)
-  const chaptersWithStages = [...Object.keys(head.selectedCommitByChapter).map(Number), contract.chapter]
-  for (const record of await listUnresolvedPending(root, chaptersWithStages)) {
-    if (!contract.characters.includes(record.subject)) continue
-    conflictWarnings.push(
-      `第 ${record.chapter} 章未裁决冲突：${record.subject} 的 ${record.predicate} 账本为「${record.priorObject}」，正文写「${record.object}」；执行 weave pending ${record.chapter} 裁决`,
-    )
+  if (assembled.context && prepared.ideaDegraded.length > 0) {
+    assembled.context.degraded = [...assembled.context.degraded, ...prepared.ideaDegraded]
   }
-  return { decision: assembled.decision, context: assembled.context, sampleSelection, methodSelection, conflictWarnings }
+  return {
+    decision: assembled.decision,
+    context: assembled.context,
+    sampleSelection: prepared.sampleSelection,
+    methodSelection: prepared.methodSelection,
+    conflictWarnings: prepared.conflictWarnings,
+  }
 }
 
 

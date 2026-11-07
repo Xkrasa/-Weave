@@ -2,7 +2,7 @@
 id: effect-evaluation-harness
 type: task-spec
 title: 建立正文与长篇效果评测基线
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 references:
   - weave-goal

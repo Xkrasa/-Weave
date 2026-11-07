@@ -2,7 +2,7 @@
 id: planning-authoring-ui
 type: task-spec
 title: 提供故事规划与候选创作界面
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - story-planning-model

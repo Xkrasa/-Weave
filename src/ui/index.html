@@ -14,9 +14,11 @@
         <strong id="project-title">加载中</strong>
         <span id="project-subtitle" class="muted"></span>
       </div>
+      <div id="top-badges" class="top-badges"></div>
       <div class="top-actions">
         <button class="ghost" id="btn-eval">盲评</button>
         <button class="ghost" id="btn-search">搜索</button>
+        <button class="ghost" id="btn-ideas-map">想法地图</button>
         <button class="ghost" id="btn-deconstruct">拆书</button>
         <button class="ghost" id="btn-doctor">体检</button>
         <button class="ghost" id="btn-export">导出</button>
@@ -30,9 +32,16 @@
           <span>章节</span>
           <span id="chapter-count" class="pill"></span>
         </div>
+        <div class="chapter-filters" id="chapter-filters">
+          <button data-filter="all" class="active">全部</button>
+          <button data-filter="blocking">有阻塞</button>
+          <button data-filter="failed">生成失败</button>
+          <button data-filter="recoverable">可恢复</button>
+        </div>
         <div id="chapter-list" class="chapter-list"></div>
         <div class="sidebar-foot">
           <div class="legend"><i class="dot finalized"></i>定稿 <i class="dot draft"></i>草稿 <i class="dot blocking"></i>阻断</div>
+          <div class="stage-legend small muted">合同 · 节拍 · 分段 · 草稿 · 检查 · 定稿</div>
           <div id="project-flags" class="muted small"></div>
         </div>
       </aside>
@@ -43,7 +52,15 @@
             <div class="eyebrow" id="chapter-eyebrow">选择章节</div>
             <h1 id="chapter-title">开始写作</h1>
           </div>
-          <div class="save-state" id="save-state">未打开</div>
+          <div class="head-actions">
+            <button id="btn-next" class="accent" title="Ctrl+Enter 执行驾驶舱推荐的下一步">下一步</button>
+            <button id="btn-mode" class="ghost" title="Ctrl+E 切换编辑/审阅">审阅模式</button>
+            <div class="save-state" id="save-state">未打开</div>
+          </div>
+        </div>
+
+        <div class="intent-strip" id="intent-strip">
+          <span class="muted">本章合同会显示在这里。</span>
         </div>
 
         <div class="stagebar" id="stagebar">
@@ -67,31 +84,39 @@
           <button data-selection-op="custom">自定义</button>
         </div>
 
-        <div class="editor-wrap">
+        <div class="editor-wrap" id="editor-wrap">
+          <div id="draft-view" class="draft-view hidden"></div>
           <textarea id="draft" spellcheck="false" placeholder="选择章节后开始写作，或使用“生成”创建草稿。"></textarea>
-          <div class="editor-foot">
-            <span id="word-count">0 字</span>
-            <span id="draft-hash" class="muted"></span>
-          </div>
         </div>
 
-        <div class="contract-strip" id="contract-strip">
-          <span class="muted">本章合同会显示在这里。</span>
-          <button id="btn-contract" class="ghost">编辑合同</button>
+        <div class="gate-bar" id="gate-bar"></div>
+
+        <div class="status-bar" id="status-bar">
+          <span id="word-count">0 字</span>
+          <span id="token-estimate" class="muted"></span>
+          <span id="save-time" class="muted"></span>
+          <span id="blocking-count" class="muted"></span>
+          <span id="context-usage" class="muted"></span>
+          <span id="draft-hash" class="muted"></span>
         </div>
       </section>
 
       <aside class="inspector">
         <div class="tabs" id="tabs">
-          <button data-tab="findings" class="active">意见</button>
+          <button data-tab="findings" class="active">问题</button>
+          <button data-tab="evidence">证据</button>
+          <button data-tab="ideas">想法</button>
+          <button data-tab="revisions">版本</button>
+          <button data-tab="beats">节拍</button>
+          <button data-tab="segments">分段</button>
+          <button data-tab="context">上下文</button>
           <button data-tab="plan">规划</button>
           <button data-tab="stages">阶段</button>
-          <button data-tab="revisions">修订</button>
-          <button data-tab="waivers">豁免</button>
           <button data-tab="methods">方法</button>
           <button data-tab="effect">效果</button>
           <button data-tab="style">风格</button>
           <button data-tab="history">历史</button>
+          <button data-tab="waivers">豁免</button>
           <button data-tab="contract">合同</button>
         </div>
         <div id="inspector-body" class="inspector-body">
@@ -149,6 +174,14 @@
         <button data-eval-winner="left" class="accent">更想继续读左边</button>
         <button data-eval-winner="tie">差不多</button>
         <button data-eval-winner="right" class="accent">更想继续读右边</button>
+      </div>
+    </div>
+
+    <div id="palette" class="palette hidden">
+      <div class="palette-card">
+        <input id="palette-q" autocomplete="off" placeholder="输入命令…（Ctrl+P）">
+        <div id="palette-list" class="palette-list"></div>
+        <div class="palette-foot muted small">↑↓ 选择 · Enter 执行 · Esc 关闭</div>
       </div>
     </div>
 

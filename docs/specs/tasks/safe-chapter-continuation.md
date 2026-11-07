@@ -2,7 +2,7 @@
 id: safe-chapter-continuation
 type: task-spec
 title: 恢复安全的上一章正文衔接
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - effect-evaluation-harness

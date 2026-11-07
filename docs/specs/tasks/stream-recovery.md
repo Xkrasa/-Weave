@@ -2,7 +2,7 @@
 id: stream-recovery
 type: task-spec
 title: 加固流式重试与恢复运行
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 tags:
   - streaming

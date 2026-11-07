@@ -20,6 +20,8 @@ export interface OutlineCandidate {
   contentHash: string
   contract: ChapterContract
   model?: string
+  /** Set once the candidate has been written into the formal contract. */
+  appliedAt?: string
   approvedAt?: string
 }
 
@@ -134,19 +136,41 @@ export async function generateOutlineCandidates(
   return candidates
 }
 
-/** Copies a candidate into the real chapter contract without approving it. */
+/**
+ * Copies a candidate into the real chapter contract without approving it.
+ * The author may have edited the candidate, so its hash is recomputed from the saved contract.
+ */
 export async function applyCandidate(root: string, chapter: number): Promise<OutlineCandidate> {
   const candidate = await accessCandidate(root, chapter)
-  await saveContract(root, candidate.contract)
-  return candidate
+  const contract = normalizeContract(candidate.contract)
+  if (contract.chapter !== chapter) {
+    throw validationError(`候选章号不一致：文件为第 ${chapter} 章，内容为第 ${contract.chapter} 章`)
+  }
+  await saveContract(root, contract)
+  const saved = await loadContract(root, chapter)
+  const { approvedAt: _approvedAt, ...rest } = candidate
+  const applied: OutlineCandidate = {
+    ...rest,
+    status: 'draft',
+    contract: saved,
+    contentHash: contractHash(saved),
+    appliedAt: new Date().toISOString(),
+  }
+  await atomicWriteJson(candidatePath(root, chapter), applied)
+  return applied
 }
 
+/**
+ * Approves the formal contract. Once a candidate has been applied (or approved before),
+ * the author may edit the formal contract directly and approve the edited version.
+ */
 export async function approveCandidate(root: string, chapter: number): Promise<OutlineCandidate> {
   const candidate = await accessCandidate(root, chapter)
   const saved = await loadContract(root, chapter).catch(() => null)
   if (!saved) throw conflictError(`第 ${chapter} 章还没有写入正式合同；请先执行 weave outline apply ${chapter}`)
-  if (contractHash(saved) !== candidate.contentHash) {
-    throw conflictError(`第 ${chapter} 章正式合同与候选不一致；请重新 apply 或重新检查`)
+  const applied = Boolean(candidate.appliedAt) || candidate.status === 'approved'
+  if (!applied && contractHash(saved) !== candidate.contentHash) {
+    throw conflictError(`第 ${chapter} 章候选尚未写入正式合同；请先执行 weave outline apply ${chapter}`)
   }
   const check = await readJsonIfExists<ContractCheckRecord>(checkPath(root, chapter))
   if (!check) throw conflictError(`第 ${chapter} 章还没有合同检查记录；请先执行 weave contract check ${chapter}`)
@@ -176,7 +200,7 @@ export async function assertOutlineApproved(root: string, chapter: number): Prom
   }
   const saved = await loadContract(root, chapter).catch(() => null)
   if (!saved || contractHash(saved) !== candidate.contentHash) {
-    throw conflictError(`第 ${chapter} 章合同在批准后已变化；请重新检查并批准`)
+    throw conflictError(`第 ${chapter} 章合同在批准后已变化；请执行 weave contract check ${chapter} 后重新 weave outline approve ${chapter}`)
   }
 }
 

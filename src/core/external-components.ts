@@ -143,7 +143,7 @@ export async function inspectExternalComponents(root: string): Promise<Array<{
       component: 'story-deslop', kind: 'lint' as const,
       entry: 'skills/story-deslop/scripts/check-ai-patterns.js',
       permissions: { subprocess: true, network: false, model: false, browser: false, writes: [] },
-      decision: '优先原生重写；脚本仅在隔离 fixture 中作为只读参考适配，不继承 blocking',
+      decision: '原生规则优先；固定来源脚本可由 effect-review 显式启用，默认关闭且不继承 blocking',
     },
     {
       component: 'story-publish', kind: 'publish-profile' as const,

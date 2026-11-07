@@ -2,7 +2,7 @@
 id: story-planning-model
 type: task-spec
 title: 建立故事承诺与卷弧规划模型
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - effect-evaluation-harness

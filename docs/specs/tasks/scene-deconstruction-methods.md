@@ -2,7 +2,7 @@
 id: scene-deconstruction-methods
 type: task-spec
 title: 将拆书升级为场景分析与方法卡
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - task-model-policies

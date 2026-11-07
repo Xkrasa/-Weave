@@ -2,7 +2,7 @@
 id: context-evidence-retrieval
 type: task-spec
 title: 把定稿证据检索接入写作上下文
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - effect-evaluation-harness

@@ -13,7 +13,7 @@ import { resolveTaskConfig } from './model-policy.ts'
 import { appendUsage } from './usage.ts'
 import { finishRun, newRunId, saveRun } from './runs.ts'
 
-export type DraftingStrategy = 'prose-first' | 'beat-first'
+export type DraftingStrategy = 'prose-first' | 'beat-first' | 'segmented'
 export type BeatCandidateStatus = 'draft' | 'approved' | 'modified' | 'skipped'
 
 export interface SceneBeat {
@@ -23,6 +23,10 @@ export interface SceneBeat {
   infoRelease?: string
   emotionalLanding?: string
   endingState: string
+  /** Author-assigned segment grouping hint; only used by the deterministic segment planner. */
+  segmentId?: string
+  /** Author-assigned target length, used as a weight when distributing the contract target. */
+  targetWords?: number
 }
 
 export interface BeatCandidate {
@@ -218,6 +222,8 @@ function normalizeBeats(value: unknown): SceneBeat[] {
       endingState,
       ...(typeof raw.infoRelease === 'string' && raw.infoRelease.trim() ? { infoRelease: raw.infoRelease.trim() } : {}),
       ...(typeof raw.emotionalLanding === 'string' && raw.emotionalLanding.trim() ? { emotionalLanding: raw.emotionalLanding.trim() } : {}),
+      ...(typeof raw.segmentId === 'string' && raw.segmentId.trim() ? { segmentId: raw.segmentId.trim() } : {}),
+      ...(Number.isSafeInteger(raw.targetWords) && Number(raw.targetWords) > 0 ? { targetWords: Number(raw.targetWords) } : {}),
     }
   })
 }

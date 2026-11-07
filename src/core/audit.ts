@@ -1,5 +1,6 @@
 import type { ChapterContract, ModelConfig } from './types.ts'
 import type {
+  AuditMissedItem,
   CoverageAudit,
   CoverageSegment,
   ExtractedRecord,
@@ -16,7 +17,7 @@ import { resolveTaskConfig } from './model-policy.ts'
 import { appendUsage } from './usage.ts'
 import { conflictError, validationError } from './errors.ts'
 import { checkBalances, formatQuantityBreak } from './story-ledger.ts'
-import { decidedPendingIds } from './pending.ts'
+import { decidedPendingIds, dismissedAuditMissedIds, missedFingerprint } from './pending.ts'
 
 const AUDIT_SYSTEM_PROMPT = [
   '你是覆盖审计器，只寻找第一遍抽取漏掉的重要事件、状态变化、时间表达和合同节点。',
@@ -65,7 +66,15 @@ export async function runCoverageAudit(
   )
   const registry = await loadCharacters(root)
   const timeline = validateTimeline(extraction.timeline ?? [], registry)
-  const secondPass = await runSecondPass(root, chapter, contract, draft, extraction, config, signal)
+  const rawSecondPass = await runSecondPass(root, chapter, contract, draft, extraction, config, signal)
+  const dismissedMissed = await dismissedAuditMissedIds(root, chapter)
+  const unresolvedMissedItems = rawSecondPass.missedItems.filter(item => !dismissedMissed.has(item.missedId))
+  const secondPass = {
+    summary: rawSecondPass.summary,
+    missed: unresolvedMissedItems.map(item => item.summary),
+    missedItems: rawSecondPass.missedItems,
+    rejected: rawSecondPass.rejected,
+  }
   const quantityBreaks = await checkBalances(root, chapter, extraction.facts)
   const warnings: string[] = []
   const decidedPending = await decidedPendingIds(root, chapter)
@@ -76,6 +85,12 @@ export async function runCoverageAudit(
   if (uncoveredSegments.length > 0) warnings.push(`有 ${uncoveredSegments.length} 个段落没有证据覆盖`)
   if (unplanned.length > 5) warnings.push(`有 ${unplanned.length} 条未列入合同的事件，需人工确认`)
   if (dimensions.missed.length > 0) warnings.push(`未交代必检维度：${dimensions.missed.join('、')}`)
+  if (secondPass.missed.length > 0) {
+    warnings.push(`第二遍审计发现 ${secondPass.missed.length} 条疑似遗漏；可执行 weave audit decide ${chapter} --missed <id> --decision rerun|dismiss --reason <理由>`)
+  }
+  if (secondPass.rejected.length > 0) {
+    warnings.push(`第二遍审计有 ${secondPass.rejected.length} 条返回未定位到原文引文，已作为噪声忽略`)
+  }
   warnings.push(...timeline.warnings)
   for (const item of quantityBreaks) warnings.push(formatQuantityBreak(item))
 
@@ -100,7 +115,6 @@ export async function runCoverageAudit(
       && dimensions.missed.length === 0
       && timeline.passed
       && secondPass.missed.length === 0
-      && secondPass.rejected.length === 0
       && (extraction.records.length > 0 || Boolean(extraction.noEventsReason)),
   }
   await saveStage(root, 'audit', chapter, audit)
@@ -115,10 +129,10 @@ async function runSecondPass(
   extraction: ExtractionReport,
   config: ModelConfig,
   signal: AbortSignal,
-): Promise<{ summary: string; missed: string[]; rejected: string[] }> {
+): Promise<{ summary: string; missed: string[]; missedItems: AuditMissedItem[]; rejected: string[] }> {
   const taskConfig = resolveTaskConfig(config, 'extraction')
   const model = taskConfig.model
-  const prompt = [
+  const basePrompt = [
     `第 ${chapter} 章合同：`,
     JSON.stringify(contract, null, 2),
     '',
@@ -138,39 +152,62 @@ async function runSecondPass(
       missed: [{ summary: '第一遍漏掉的事件', quote: '正文逐字引文', occurrence: 1 }],
     }, null, 2),
   ].join('\n')
-  const result = await completeJsonObject({
-    config: { ...taskConfig, model },
-    system: AUDIT_SYSTEM_PROMPT,
-    user: prompt,
-    signal,
-  })
-  await appendUsage(root, { task: 'extraction', model, usage: result.usage })
-  const raw = result.raw
-  const summary = typeof raw.summary === 'string' ? raw.summary.trim() : ''
-  if (!summary) throw validationError('覆盖审计结果缺少 summary')
-  const rawMissed = Array.isArray(raw.missed) ? raw.missed : []
-  const missed: string[] = []
-  const rejected: string[] = []
-  for (const item of rawMissed) {
-    const entry = item && typeof item === 'object' ? item as Record<string, unknown> : null
-    if (!entry || typeof entry.summary !== 'string' || typeof entry.quote !== 'string') {
-      rejected.push('第二遍返回了缺少 summary 或 quote 的遗漏项')
-      continue
+
+  const attemptOnce = async (extraPrompt?: string) => {
+    const result = await completeJsonObject({
+      config: { ...taskConfig, model },
+      system: AUDIT_SYSTEM_PROMPT,
+      user: extraPrompt ? `${basePrompt}\n\n${extraPrompt}` : basePrompt,
+      signal,
+    })
+    await appendUsage(root, { task: 'extraction', model, usage: result.usage })
+    const raw = result.raw
+    const summary = typeof raw.summary === 'string' ? raw.summary.trim() : ''
+    if (!summary) throw validationError('覆盖审计结果缺少 summary')
+    const rawMissed = Array.isArray(raw.missed) ? raw.missed : []
+    const missedItems: AuditMissedItem[] = []
+    const rejected: string[] = []
+    for (const item of rawMissed) {
+      const entry = item && typeof item === 'object' ? item as Record<string, unknown> : null
+      if (!entry || typeof entry.summary !== 'string' || typeof entry.quote !== 'string') {
+        rejected.push('第二遍返回了缺少 summary 或 quote 的遗漏项')
+        continue
+      }
+      try {
+        const evidence = resolveEvidence(
+          draft,
+          chapter,
+          entry.quote,
+          typeof entry.occurrence === 'number' ? entry.occurrence : undefined,
+        )
+        const trimmedSummary = entry.summary.trim()
+        missedItems.push({
+          missedId: missedFingerprint(chapter, { summary: trimmedSummary, quote: evidence.quote }),
+          summary: trimmedSummary,
+          quote: evidence.quote,
+          evidence,
+        })
+      } catch (error) {
+        rejected.push(error instanceof Error ? error.message : String(error))
+      }
     }
-    try {
-      resolveEvidence(
-        draft,
-        chapter,
-        entry.quote,
-        typeof entry.occurrence === 'number' ? entry.occurrence : undefined,
-      )
-    } catch (error) {
-      rejected.push(error instanceof Error ? error.message : String(error))
-      continue
-    }
-    missed.push(entry.summary.trim())
+    return { summary, missedItems, rejected }
   }
-  return { summary, missed, rejected }
+
+  let parsed = await attemptOnce()
+  if (parsed.rejected.length > 0 && parsed.missedItems.length === 0) {
+    try {
+      parsed = await attemptOnce('上一次返回的 quote 无法在正文中逐字定位。请只保留能够从正文逐字复制 quote 的遗漏项；若无则 missed 返回 []。')
+    } catch {
+      // Keep the first pass result if retry fails (e.g. fake model exhausted).
+    }
+  }
+  return {
+    summary: parsed.summary,
+    missed: parsed.missedItems.map(item => item.summary),
+    missedItems: parsed.missedItems,
+    rejected: parsed.rejected,
+  }
 }
 
 export async function runTimelineReport(

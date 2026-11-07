@@ -171,6 +171,7 @@ export async function runExtraction(
   draft: string,
   config: ModelConfig,
   signal: AbortSignal,
+  options: { hints?: string[] } = {},
 ): Promise<ExtractionReport> {
   const taskConfig = resolveTaskConfig(config, 'extraction')
   const model = taskConfig.model
@@ -184,6 +185,11 @@ export async function runExtraction(
     '',
     `本章必检维度（expectedDimensions）：${expectedDimensions.join('、')}`,
     '每个必检维度必须由 records/facts/beliefs/loops 中的记录覆盖，或在 dimensions 中显式声明 "unchanged: 原因"。',
+    ...(options.hints && options.hints.length > 0 ? [
+      '',
+      '覆盖审计指出的待核实遗漏提示（如正文确实存在对应逐字引文，请补入 records；如不存在请忽略，不得编造）：',
+      ...options.hints.map((hint, idx) => `${idx + 1}. ${hint}`),
+    ] : []),
     '',
     '正文：',
     draft,

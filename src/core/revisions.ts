@@ -593,10 +593,37 @@ export async function mergeRevision(
   const candidate = await loadRevision(root, chapter, revisionId)
   if ('selection' in candidate) return mergeSelectionRevision(root, chapter, candidate)
   const manualDraft = await readDraft(root, chapter)
-  const base = mapParagraphs(candidate.baseParagraphs)
+  const baseList = candidate.baseParagraphs
+  const manualList = paragraphsOf(manualDraft)
+  const base = mapParagraphs(baseList)
   const revision = mapParagraphs(candidate.paragraphs)
-  const manual = mapParagraphs(paragraphsOf(manualDraft))
+  const manual = mapParagraphs(manualList)
   const ids = [...new Set([...base.keys(), ...revision.keys(), ...manual.keys()])].sort()
+  if (manualList.length !== baseList.length && Object.keys(choices).length === 0) {
+    const hunks: MergeHunk[] = ids.map(paragraphId => ({
+      paragraphId,
+      base: base.get(paragraphId) ?? '',
+      revision: revision.get(paragraphId) ?? base.get(paragraphId) ?? '',
+      manual: manual.get(paragraphId) ?? '',
+      status: 'conflict',
+      findingIds: candidate.instructions
+        .filter(item => item.paragraphIds.includes(paragraphId))
+        .map(item => item.findingId),
+    }))
+    const report: MergeReport = {
+      schemaVersion: 1,
+      chapter,
+      revisionId,
+      createdAt: new Date().toISOString(),
+      status: 'conflict',
+      baseDraftHash: candidate.baseDraftHash,
+      mergedDraftHash: null,
+      hunks,
+    }
+    await ensureDir(revisionDir(root, chapter))
+    await atomicWriteJson(mergePath(root, chapter, revisionId), report)
+    return report
+  }
   for (const paragraphId of Object.keys(choices)) {
     if (!ids.includes(paragraphId)) throw validationError(`--choices 包含不存在的段落：${paragraphId}`)
   }
@@ -730,17 +757,48 @@ export async function recheckChapter(
   }
   const revisionIds = [...new Set(applied.map(finding => finding.revisionId).filter((id): id is string => Boolean(id)))]
   let merged = false
+  let baseParagraphs: DraftParagraph[] | null = null
   for (const revisionId of revisionIds) {
     const mergeReport = await readJsonIfExists<MergeReport>(mergePath(root, chapter, revisionId))
     if (mergeReport?.status === 'merged' && mergeReport.mergedDraftHash === currentHash) {
       merged = true
+      const candidate = await readJsonIfExists<RevisionCandidate>(candidatePath(root, chapter, revisionId))
+      if (candidate?.baseParagraphs) baseParagraphs = candidate.baseParagraphs
       break
     }
   }
   if (!merged) throw conflictError('修订尚未合并到当前草稿；请先执行 weave merge')
   const paragraphs = paragraphsOf(draft)
   const targetIds = new Set(applied.flatMap(finding => finding.paragraphIds ?? []))
-  const targets = paragraphs.filter(paragraph => targetIds.has(paragraph.paragraphId))
+  const manualChangedIds = new Set<string>()
+  if (reviewApplied.length > 0) {
+    if (!baseParagraphs) {
+      throw conflictError('缺少审稿基线段落，无法局部复检；请重新运行 weave review')
+    }
+    if (baseParagraphs.length !== paragraphs.length) {
+      throw conflictError('草稿段落数量已变化，局部复检无法对齐段落；请重新运行 weave review')
+    }
+    const baseMap = mapParagraphs(baseParagraphs)
+    let manualChangedChars = 0
+    let totalChars = 0
+    for (const paragraph of paragraphs) {
+      const len = [...paragraph.text].length
+      totalChars += len
+      const before = baseMap.get(paragraph.paragraphId)
+      if (before !== paragraph.text && !targetIds.has(paragraph.paragraphId)) {
+        manualChangedChars += len
+        manualChangedIds.add(paragraph.paragraphId)
+      }
+    }
+    if (totalChars > 0 && manualChangedChars / totalChars > 0.3) {
+      throw conflictError(
+        `手动改动段落占全章 ${Math.round((manualChangedChars / totalChars) * 100)}%（超过 30% 阈值）；请重新运行 weave review 进行完整审稿`,
+      )
+    }
+  }
+  const inspectIds = new Set([...targetIds, ...manualChangedIds])
+  const targets = paragraphs.filter(paragraph => inspectIds.has(paragraph.paragraphId))
+  const manualTargets = paragraphs.filter(paragraph => manualChangedIds.has(paragraph.paragraphId))
   const prompt = [
     `第 ${chapter} 章复检。`,
     '待复检 finding：',
@@ -753,6 +811,11 @@ export async function recheckChapter(
     '',
     '当前相关段落：',
     JSON.stringify(targets, null, 2),
+    ...(manualTargets.length > 0 ? [
+      '',
+      '以下段落由作者在修订目标之外手动修改，请一并检查是否引入新的事实、时间线、设定或人物行为问题（如有请放入 newFindings）：',
+      JSON.stringify(manualTargets, null, 2),
+    ] : []),
     '',
     '只输出：',
     JSON.stringify({

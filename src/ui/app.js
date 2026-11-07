@@ -1,17 +1,44 @@
+import { buildHighlights, findingHighlightId, renderDraftView, scrollToHighlight } from './evidence.js';
+import { renderIdeaDetail, renderIdeaMap, renderIdeaPanel, renderPromotionProposal } from './ideas.js';
+import {
+  renderBeats,
+  renderContext,
+  renderEvidence,
+  renderFindings,
+  renderGateBar,
+  renderIntentStrip,
+  renderRevisions,
+  renderStages,
+  renderStatusBar,
+  renderTopBadges,
+} from './cockpit.js';
+
 const state = {
   token: '',
   status: null,
   chapters: [],
   current: null,
-  detail: null,
+  cockpit: null,
   tab: 'findings',
   dirty: false,
+  offsetsStale: false,
   saveTimer: null,
   waivers: [],
   preferences: {},
   writeController: null,
   selectionBusy: false,
   eval: null,
+  mode: 'edit',
+  filter: 'all',
+  activeEvidence: null,
+  intentCollapsed: false,
+  reviewScrollRatio: 0,
+  lastIdeaCapture: null,
+  ideasBusy: false,
+  pendingProposal: null,
+  ideaUndoTimer: null,
+  inlineDiff: null,
+  compare: null,
 };
 
 const $ = selector => document.querySelector(selector);
@@ -48,12 +75,31 @@ function toast(message, isError = false) {
   toast.timer = setTimeout(() => node.classList.add('hidden'), 4200);
 }
 
-function statusLabel(chapter) {
-  if (chapter.finalized) return '定稿';
-  if (chapter.blocking) return '阻断';
-  if (chapter.status === 'reviewed') return '已审查';
-  if (chapter.draft) return '草稿';
-  return '计划';
+// ---- Chapter list -----------------------------------------------------------
+
+const STAGE_KEYS = ['contract', 'beats', 'segments', 'draft', 'check', 'final'];
+const STAGE_LABELS = ['合同', '节拍', '分段', '草稿', '检查', '定稿'];
+
+function stageDotClass(stages, key, index) {
+  if (stages?.[key]) return 'ok';
+  const later = STAGE_KEYS.slice(index + 1).some(item => stages?.[item]);
+  if (later) return 'blocked';
+  const earlier = STAGE_KEYS.slice(0, index).some(item => stages?.[item]);
+  return earlier ? 'running' : 'pending';
+}
+
+function chapterDots(chapter) {
+  return `<span class="stage-dots" aria-label="阶段进度">${STAGE_KEYS.map((key, index) => `
+    <i class="stage-dot ${stageDotClass(chapter.stages, key, index)}" title="${escapeHtml(`${STAGE_LABELS[index]}：${stageDotClass(chapter.stages, key, index)}`)}"></i>`).join('')}</span>`;
+}
+
+function visibleChapters() {
+  return state.chapters.filter(chapter => {
+    if (state.filter === 'blocking') return chapter.blocking > 0;
+    if (state.filter === 'failed') return chapter.runStatus === 'failed' || chapter.runStatus === 'cancelled';
+    if (state.filter === 'recoverable') return chapter.recoverable;
+    return true;
+  });
 }
 
 function renderShell() {
@@ -62,15 +108,25 @@ function renderShell() {
   $('#project-title').textContent = status.title;
   $('#project-subtitle').textContent = `主线 r${status.mainlineRevision} · ${status.chapters.length} 章定稿 · ${status.drafts.length} 草稿`;
   $('#project-flags').textContent = `内容投影 ${status.projection?.status ?? '无'} · 账本投影 ${status.ledgerProjection?.status ?? '无'} · 未处理影响 ${status.pendingImpacts}`;
-  $('#chapter-count').textContent = String(state.chapters.length);
-  $('#chapter-list').innerHTML = state.chapters.map(chapter => `
-    <div class="chapter-item ${state.current === chapter.chapter ? 'active' : ''}" data-chapter="${chapter.chapter}">
-      <span class="num">${String(chapter.chapter).padStart(3, '0')}</span>
-      <span class="name">${escapeHtml(chapter.title || `第 ${chapter.chapter} 章`)}</span>
-      <span>${chapter.blocking ? `<span class="badge">${chapter.blocking}</span>` : `<span class="dot ${chapter.finalized ? 'finalized' : chapter.draft ? 'draft' : ''}"></span>`}</span>
-    </div>
-  `).join('');
+  const list = visibleChapters();
+  $('#chapter-count').textContent = `${list.length}/${state.chapters.length}`;
+  $('#chapter-list').innerHTML = list.length
+    ? list.map(chapter => `
+      <div class="chapter-item ${state.current === chapter.chapter ? 'active' : ''}" data-chapter="${chapter.chapter}">
+        <span class="num">${String(chapter.chapter).padStart(3, '0')}</span>
+        <span class="chapter-main">
+          <span class="name">${escapeHtml(chapter.title || `第 ${chapter.chapter} 章`)}</span>
+          ${chapterDots(chapter)}
+        </span>
+        <span class="chapter-tail">${chapter.blocking
+          ? `<span class="badge">${chapter.blocking}</span>`
+          : chapter.runStatus === 'running'
+            ? '<span class="mini-run">生成中</span>'
+            : chapter.recoverable ? '<span class="mini-run">可恢复</span>' : ''}</span>
+      </div>`).join('')
+    : '<div class="empty">没有符合条件的章节。</div>';
   $$('.chapter-item').forEach(node => node.addEventListener('click', () => openChapter(Number(node.dataset.chapter))));
+  $$('#chapter-filters button').forEach(node => node.classList.toggle('active', node.dataset.filter === state.filter));
 }
 
 async function refresh() {
@@ -87,48 +143,158 @@ async function refresh() {
   if (state.current) await openChapter(state.current, true);
 }
 
+// ---- Cockpit ---------------------------------------------------------------
+
+function captureScroll() {
+  const editor = $('#draft');
+  const view = $('#draft-view');
+  return {
+    editor: editor.scrollTop / Math.max(1, editor.scrollHeight - editor.clientHeight),
+    view: view.scrollTop / Math.max(1, view.scrollHeight - view.clientHeight),
+  };
+}
+
+function currentScrollRatio() {
+  const node = state.mode === 'edit' ? $('#draft') : $('#draft-view');
+  return node.scrollTop / Math.max(1, node.scrollHeight - node.clientHeight);
+}
+
+function restoreScroll(ratios) {
+  const editor = $('#draft');
+  const view = $('#draft-view');
+  editor.scrollTop = ratios.editor * Math.max(1, editor.scrollHeight - editor.clientHeight);
+  view.scrollTop = ratios.view * Math.max(1, view.scrollHeight - view.clientHeight);
+}
+
+function renderCockpitPanels() {
+  const payload = state.cockpit;
+  if (!payload) return;
+  $('#top-badges').innerHTML = renderTopBadges(payload, escapeHtml);
+  $('#intent-strip').innerHTML = renderIntentStrip(payload, escapeHtml);
+  $('#intent-strip').classList.toggle('collapsed', state.intentCollapsed);
+  $('#gate-bar').innerHTML = renderGateBar(payload, escapeHtml);
+  renderNextAction();
+  updateStatusBar();
+  $('#btn-contract')?.addEventListener('click', showContractEditor);
+  $('#intent-toggle')?.addEventListener('click', () => {
+    state.intentCollapsed = !state.intentCollapsed;
+    $('#intent-strip').classList.toggle('collapsed', state.intentCollapsed);
+    const toggle = $('#intent-toggle');
+    if (toggle) toggle.textContent = state.intentCollapsed ? '展开' : '收起';
+  });
+  const toggle = $('#intent-toggle');
+  if (toggle) toggle.textContent = state.intentCollapsed ? '展开' : '收起';
+}
+
+function renderNextAction() {
+  const next = state.cockpit?.nextAction;
+  const button = $('#btn-next');
+  if (!button) return;
+  if (!next) {
+    button.disabled = true;
+    button.textContent = '下一步';
+    return;
+  }
+  button.disabled = next.kind === 'done';
+  button.textContent = next.kind === 'done' ? next.label : `下一步：${next.label}`;
+  button.dataset.actionKind = next.kind;
+}
+
+function updateStatusBar() {
+  if (!state.cockpit) {
+    $('#word-count').textContent = `${[...($('#draft').value || '').replace(/\s/g, '')].length} 字`;
+    return;
+  }
+  $('#status-bar').innerHTML = renderStatusBar(state.cockpit, $('#draft').value, escapeHtml);
+}
+
+function renderDraftViewMarkup() {
+  if (!state.cockpit) return;
+  const highlights = buildHighlights(state.cockpit);
+  $('#draft-view').innerHTML = renderDraftView(state.cockpit.draft.text, highlights, escapeHtml);
+  $$('#draft-view [data-highlight-id]').forEach(node => {
+    node.classList.add('clickable');
+    node.addEventListener('click', () => showEvidence(node.dataset.highlightId));
+  });
+}
+
+function applyMode(ratios = captureScroll()) {
+  const review = state.mode === 'review';
+  $('#draft').classList.toggle('hidden', review);
+  $('#draft-view').classList.toggle('hidden', !review);
+  $('#btn-mode').textContent = review ? '编辑模式' : '审阅模式';
+  if (review) renderDraftViewMarkup();
+  requestAnimationFrame(() => restoreScroll(ratios));
+}
+
+async function toggleMode() {
+  if (!state.current) return;
+  if (state.mode === 'edit') {
+    if (state.dirty) {
+      try {
+        await saveDraft();
+      } catch {
+        return;
+      }
+    }
+    if (state.offsetsStale) await refreshCockpit();
+    const ratio = currentScrollRatio();
+    state.mode = 'review';
+    applyMode({ editor: ratio, view: ratio });
+  } else {
+    const ratio = currentScrollRatio();
+    state.mode = 'edit';
+    applyMode({ editor: ratio, view: ratio });
+  }
+}
+
+async function ensureFreshOffsets() {
+  if (state.dirty) await saveDraft();
+  if (state.offsetsStale) await refreshCockpit();
+}
+
+async function refreshCockpit() {
+  if (!state.current) return;
+  const ratios = captureScroll();
+  state.cockpit = await api(`/api/chapters/${state.current}/cockpit`);
+  state.offsetsStale = false;
+  renderCockpitPanels();
+  if (state.mode === 'review') renderDraftViewMarkup();
+  requestAnimationFrame(() => restoreScroll(ratios));
+  if (['findings', 'evidence', 'revisions', 'segments', 'beats', 'context', 'stages', 'contract'].includes(state.tab)) {
+    await renderInspector();
+  }
+}
+
 async function openChapter(chapter, silent = false) {
   if (!silent && state.dirty && !confirm('当前草稿还有未保存修改，切换章节会丢失。继续？')) return;
   state.current = chapter;
-  state.detail = await api(`/api/chapters/${chapter}`);
+  state.cockpit = await api(`/api/chapters/${chapter}/cockpit`);
+  state.activeEvidence = null;
+  state.inlineDiff = null;
+  state.compare = null;
+  state.mode = 'edit';
+  state.offsetsStale = false;
   state.preferences.lastChapter = chapter;
   await persistPreferences();
-  const detail = state.detail;
-  const contract = detail.contract;
-  $('#chapter-eyebrow').textContent = `第 ${chapter} 章 · ${detail.stages.review?.passed ? '审查通过' : detail.stages.review ? '存在意见' : '未审查'}`;
+  const payload = state.cockpit;
+  const contract = payload.contract.data;
+  $('#chapter-eyebrow').textContent = `第 ${chapter} 章 · ${payload.stages.review?.passed ? '审查通过' : payload.stages.review ? '存在意见' : '未审查'}${payload.finalized ? ` · r${payload.revision}` : ''}`;
   $('#chapter-title').textContent = contract?.title || `第 ${chapter} 章`;
-  $('#draft').value = detail.draft || '';
-  updateSelectionTools();
-  $('#draft-hash').textContent = detail.hash ? detail.hash.slice(0, 18) : '';
+  $('#draft').value = payload.draft.text;
   clearTimeout(state.saveTimer);
   state.dirty = false;
   state.saveTimer = null;
   updateSave('已保存');
-  updateWords();
-  renderContract(contract);
+  updateSelectionTools();
+  renderCockpitPanels();
+  applyMode({ editor: 0, view: 0 });
   renderShell();
   await Promise.all([renderInspector(), loadWaivers()]);
 }
 
-function renderContract(contract) {
-  if (!contract) {
-    $('#contract-strip').innerHTML = '<span class="muted">本章还没有合同。请用 CLI 创建合同后再开始。</span>';
-    return;
-  }
-  $('#contract-strip').innerHTML = [
-    `目标：${escapeHtml(contract.goal)}`,
-    `阻力：${escapeHtml(contract.obstacle || '—')}`,
-    `视角：${escapeHtml(contract.pov)}`,
-    `地点：${escapeHtml(contract.location)}`,
-    `字数：${escapeHtml(contract.targetWords)}`,
-    `必须：${escapeHtml((contract.mustHappen || []).join('；') || '—')}`,
-    '<button id="btn-contract" class="ghost">编辑合同</button>',
-  ].map(text => text.startsWith('<button') ? text : `<span>${text}</span>`).join('');
-  $('#btn-contract').addEventListener('click', showContractEditor);
-}
-
 function showContractEditor() {
-  const contract = state.detail?.contract;
+  const contract = state.cockpit?.contract?.data;
   if (!contract) return;
   showModal('编辑合同', `<textarea id="contract-json" spellcheck="false">${escapeHtml(JSON.stringify(contract, null, 2))}</textarea>`, [
     { label: '取消', action: closeModal },
@@ -137,10 +303,9 @@ function showContractEditor() {
       action: async () => {
         try {
           const next = JSON.parse($('#contract-json').value);
-          const saved = await api(`/api/chapters/${state.current}/contract`, { method: 'PUT', body: next });
+          await api(`/api/chapters/${state.current}/contract`, { method: 'PUT', body: next });
           closeModal();
-          state.detail.contract = saved;
-          renderContract(saved);
+          await refreshCockpit();
           toast('合同已保存；请重新运行合同检查');
         } catch (error) {
           toast(error.message, true);
@@ -155,8 +320,7 @@ function updateSave(text) {
 }
 
 function updateWords() {
-  const text = $('#draft').value || '';
-  $('#word-count').textContent = `${[...text.replace(/\s/g, '')].length} 字`;
+  updateStatusBar();
 }
 
 async function saveDraft(force = false) {
@@ -167,13 +331,17 @@ async function saveDraft(force = false) {
   try {
     const payload = await api(`/api/chapters/${state.current}/draft`, {
       method: 'PUT',
-      body: { content: $('#draft').value, baseHash: force ? undefined : state.detail.hash },
+      body: { content: $('#draft').value, baseHash: force ? undefined : state.cockpit?.draft?.contentHash },
     });
-    state.detail.hash = payload.hash;
-    state.detail.draft = $('#draft').value;
+    if (state.cockpit) {
+      state.cockpit.draft.text = $('#draft').value;
+      state.cockpit.draft.contentHash = payload.hash;
+      const meta = state.cockpit.draft.meta;
+      if (meta) meta.contentHash = payload.hash;
+    }
     state.dirty = false;
-    $('#draft-hash').textContent = payload.hash.slice(0, 18);
     updateSave('已保存');
+    updateStatusBar();
     await refreshChapterBadge();
   } catch (error) {
     state.dirty = true;
@@ -194,35 +362,113 @@ async function loadWaivers() {
   state.waivers = payload.waivers;
 }
 
+// ---- Inspector tabs --------------------------------------------------------
+
+function switchTab(tab, persist = true) {
+  state.tab = tab;
+  if (persist) {
+    state.preferences.tab = tab;
+    persistPreferences();
+  }
+  $$('#tabs button').forEach(node => node.classList.toggle('active', node.dataset.tab === tab));
+}
+
+async function showEvidence(evidenceId) {
+  state.activeEvidence = evidenceId;
+  switchTab('evidence');
+  await renderInspector();
+}
+
+function bindFindingActions() {
+  $$('#inspector-body [data-focus-finding]').forEach(node => {
+    node.addEventListener('click', () => focusFinding(node.dataset.focusFinding));
+  });
+  $$('#inspector-body [data-show-evidence]').forEach(node => {
+    node.addEventListener('click', () => showEvidence(node.dataset.showEvidence));
+  });
+  $$('#inspector-body [data-waive]').forEach(node => {
+    node.addEventListener('click', () => waiveFinding(node.dataset.waive));
+  });
+  $$('#inspector-body [data-revise]').forEach(node => {
+    node.addEventListener('click', () => reviseFinding(node.dataset.revise));
+  });
+  $$('#inspector-body [data-ignore]').forEach(node => {
+    node.addEventListener('click', () => ignoreFinding(node.dataset.ignore));
+  });
+}
+
+function bindEvidenceActions() {
+  $$('#inspector-body [data-focus-finding]').forEach(node => {
+    node.addEventListener('click', () => focusFinding(node.dataset.focusFinding));
+  });
+  $$('#inspector-body [data-focus-highlight]').forEach(node => {
+    node.addEventListener('click', () => focusHighlight(node.dataset.focusHighlight));
+  });
+  $$('#inspector-body [data-tab-jump]').forEach(node => {
+    node.addEventListener('click', async () => {
+      switchTab(node.dataset.tabJump);
+      await renderInspector();
+    });
+  });
+  $$('#inspector-body [data-evidence-id]').forEach(node => {
+    node.addEventListener('click', () => showEvidence(node.dataset.evidenceId));
+  });
+}
+
+function bindRevisionActions() {
+  $$('#inspector-body [data-evidence-id]').forEach(node => {
+    node.addEventListener('click', () => showEvidence(node.dataset.evidenceId));
+  });
+  $$('#inspector-body [data-focus-highlight]').forEach(node => {
+    node.addEventListener('click', event => {
+      event.stopPropagation();
+      focusHighlight(node.dataset.focusHighlight);
+    });
+  });
+  $$('#inspector-body [data-merge]').forEach(node => {
+    node.addEventListener('click', event => {
+      event.stopPropagation();
+      mergeRevision(node.dataset.merge);
+    });
+  });
+  $$('#inspector-body [data-diff]').forEach(node => {
+    node.addEventListener('click', event => {
+      event.stopPropagation();
+      showDiff(node.dataset.diff);
+    });
+  });
+}
+
 async function renderInspector() {
-  const detail = state.detail;
-  if (!detail) {
+  const payload = state.cockpit;
+  if (state.tab === 'ideas') {
+    await renderIdeasTab();
+    return;
+  }
+  if (!payload) {
     $('#inspector-body').innerHTML = '<div class="empty">选择章节查看审查结果。</div>';
     return;
   }
+  const activeId = state.activeEvidence;
   if (state.tab === 'findings') {
-    const review = detail.stages.review;
-    const findings = review?.findings || [];
-    $('#inspector-body').innerHTML = findings.length
-      ? findings.map(finding => `
-        <div class="finding ${finding.severity}">
-          <div class="finding-head"><span>${escapeHtml(finding.dimension)} · ${escapeHtml(finding.severity)}</span><span>${escapeHtml(finding.status)}</span></div>
-          <p>${escapeHtml(finding.description)}</p>
-          ${finding.quote ? `<div class="quote">"${escapeHtml(finding.quote)}"</div>` : ''}
-          ${finding.waiveReason ? `<p class="small">豁免：${escapeHtml(finding.waiveReason)}</p>` : ''}
-          <div class="finding-actions">
-            ${finding.quote ? `<button data-locate="${escapeHtml(finding.quote)}">定位</button>` : ''}
-            ${finding.severity === 'warning' && finding.status !== 'waived' ? `<button data-waive="${escapeHtml(finding.findingId)}">豁免</button>` : ''}
-            ${finding.severity === 'blocking' && ['open', 'planned'].includes(finding.status) ? `<button data-revise="${escapeHtml(finding.findingId)}">发起修订</button>` : ''}
-            ${finding.severity !== 'blocking' ? `<button data-ignore="${escapeHtml(finding.findingId)}">忽略</button>` : ''}
-          </div>
-        </div>
-      `).join('')
-      : `<div class="empty">${review ? '审查通过，没有 finding。' : '尚未运行审查。'}</div>`;
-    $$('#inspector-body [data-locate]').forEach(node => node.addEventListener('click', () => locateQuote(node.dataset.locate)));
-    $$('#inspector-body [data-waive]').forEach(node => node.addEventListener('click', () => waiveFinding(node.dataset.waive)));
-    $$('#inspector-body [data-revise]').forEach(node => node.addEventListener('click', () => reviseFinding(node.dataset.revise)));
-    $$('#inspector-body [data-ignore]').forEach(node => node.addEventListener('click', () => ignoreFinding(node.dataset.ignore)));
+    $('#inspector-body').innerHTML = renderFindings(payload, { escapeHtml, activeId });
+    bindFindingActions();
+  } else if (state.tab === 'evidence') {
+    $('#inspector-body').innerHTML = renderEvidence(payload, { escapeHtml, activeId });
+    bindEvidenceActions();
+  } else if (state.tab === 'revisions') {
+    $('#inspector-body').innerHTML = renderRevisions(payload, { escapeHtml, activeId });
+    renderInlineDiff();
+    bindRevisionActions();
+  } else if (state.tab === 'segments') {
+    $('#inspector-body').innerHTML = renderSegmentsTab(payload, escapeHtml);
+    bindSegmentActions();
+  } else if (state.tab === 'beats') {
+    $('#inspector-body').innerHTML = renderBeats(payload, escapeHtml);
+  } else if (state.tab === 'context') {
+    $('#inspector-body').innerHTML = renderContext(payload, escapeHtml);
+  } else if (state.tab === 'stages') {
+    $('#inspector-body').innerHTML = renderStages(payload, escapeHtml);
   } else if (state.tab === 'plan') {
     const [plans, outlines] = await Promise.all([api('/api/plans'), api('/api/outlines')]);
     const planCards = plans.plans.map(entry => `
@@ -304,34 +550,6 @@ async function renderInspector() {
         toast(error.message, true);
       }
     });
-  } else if (state.tab === 'stages') {
-    const stages = detail.stages || {};
-    const block = (title, report, extra = '') => `
-      <div class="card"><h3>${title}</h3>
-        <p>${report ? `${extra}${report.passed ? '通过' : '未通过'}` : '缺失'}</p>
-        ${report ? `<pre>${escapeHtml(JSON.stringify(report, null, 2).slice(0, 9000))}</pre>` : ''}
-      </div>`;
-    $('#inspector-body').innerHTML = [
-      block('内容检查', stages.contentCheck, `${stages.contentCheck?.stats?.characters ?? 0} 字 · `),
-      block('证据抽取', stages.extraction, `${stages.extraction?.records?.length ?? 0} 条 · `),
-      block('覆盖审计', stages.audit, `${stages.audit?.contract?.covered?.length ?? 0} 项覆盖 · `),
-    ].join('');
-  } else if (state.tab === 'revisions') {
-    const revisions = detail.revisions || [];
-    $('#inspector-body').innerHTML = revisions.length
-      ? revisions.map(revision => `
-        <div class="card">
-          <h3>${escapeHtml(revision.revisionId)}</h3>
-          <p>${escapeHtml(revision.createdAt)} · ${revision.paragraphs.length} 段候选</p>
-          <div class="finding-actions">
-            <button data-merge="${escapeHtml(revision.revisionId)}">合并</button>
-            <button data-diff="${escapeHtml(revision.revisionId)}">查看 diff</button>
-          </div>
-        </div>
-      `).join('')
-      : '<div class="empty">还没有修订候选。blocking finding 可以在"意见"里发起修订。</div>';
-    $$('#inspector-body [data-merge]').forEach(node => node.addEventListener('click', () => mergeRevision(node.dataset.merge)));
-    $$('#inspector-body [data-diff]').forEach(node => node.addEventListener('click', () => showDiff(node.dataset.diff)));
   } else if (state.tab === 'waivers') {
     $('#inspector-body').innerHTML = state.waivers.length
       ? state.waivers.map(waiver => `
@@ -369,13 +587,319 @@ async function renderInspector() {
         </div>`).join('')
       : '<div class="empty">本章还没有正式提交。</div>';
   } else if (state.tab === 'contract') {
-    const contract = detail.contract;
+    const contract = payload.contract.data;
     $('#inspector-body').innerHTML = contract
       ? `<div class="section-label">chapter contract</div><pre>${escapeHtml(JSON.stringify(contract, null, 2))}</pre><button id="inspector-contract-edit">编辑合同</button>`
       : '<div class="empty">本章没有合同。请用 CLI 创建。</div>';
     const button = $('#inspector-contract-edit');
     if (button) button.addEventListener('click', showContractEditor);
   }
+}
+
+// ---- Segments tab ----------------------------------------------------------
+
+const SEGMENT_STATUS_LABELS = {
+  missing: '没有计划',
+  draft: '草稿',
+  modified: '已修改',
+  approved: '已批准',
+  skipped: '已跳过',
+  planned: '待生成',
+  generating: '生成中',
+  checked: '已检查',
+  failed: '失败',
+};
+
+function renderSegmentsTab(payload, esc) {
+  const view = payload.segmentPlan || { status: 'missing' };
+  const plan = view.plan;
+  const runtime = new Map((payload.run?.segments || []).map(record => [record.segmentId, record]));
+  const stats = new Map((payload.segmentStats || []).map(stat => [stat.segmentId, stat]));
+  const status = view.status;
+  const header = `<div class="section-label">分段计划 <span class="status-tag status-${esc(status)}">${esc(SEGMENT_STATUS_LABELS[status] || status)}</span></div>`;
+  if (!plan) {
+    return `${header}<div class="empty">还没有分段计划。先批准场景节拍，再生成计划。</div>
+      ${payload.beats.status === 'approved' ? '<button id="btn-segments-plan" class="accent">生成分段计划</button>' : '<div class="muted small">需要先批准场景节拍。</div>'}`;
+  }
+  const rows = plan.segments.map(segment => {
+    const record = runtime.get(segment.segmentId);
+    const stat = stats.get(segment.segmentId);
+    const segmentStatus = record?.status || stat?.status || segment.status;
+    const failed = segmentStatus === 'failed';
+    return `<div class="segment-row ${esc(segmentStatus)}">
+      <div class="segment-head">
+        <strong>${esc(segment.segmentId)}</strong>
+        <span class="status-tag status-${esc(segmentStatus)}">${esc(SEGMENT_STATUS_LABELS[segmentStatus] || segmentStatus)}</span>
+      </div>
+      <p class="small muted">节拍：${esc(segment.beatIds.join('、') || '—')}</p>
+      <p class="small">目标 ${segment.targetWords} 字 · 实际 ${stat ? stat.chars : '—'} 字${record?.usage?.totalTokens ? ` · ${record.usage.totalTokens} tokens` : ''}</p>
+      <p class="small">${esc(segment.goal)}</p>
+      <p class="small muted">入口：${esc(segment.entryState)} → 出口：${esc(segment.exitState)}</p>
+      ${failed && payload.run ? `<div class="finding-actions"><button data-segment-resume="${esc(payload.run.runId)}">重试失败段 / 从该段恢复</button></div>` : ''}
+    </div>`;
+  }).join('');
+  const approveButton = status === 'draft' || status === 'modified'
+    ? '<button id="btn-segments-approve" class="accent">批准分段计划</button>'
+    : '';
+  return `${header}
+    <div class="card compact">
+      <p>合同哈希 ${esc(plan.contractHash.slice(0, 16))}</p>
+      <p>计划哈希 ${esc(plan.planHash.slice(0, 16))}</p>
+      <p class="muted small">${esc(plan.segments.length)} 段 · 目标 ${plan.targetWords} 字</p>
+      ${approveButton}
+    </div>
+    ${rows}
+    <p class="muted small">分段只按批准的计划生成；失败段可恢复，但不会跳过检查直接合并。</p>`;
+}
+
+function bindSegmentActions() {
+  $('#btn-segments-plan')?.addEventListener('click', () => {
+    runChapterAction(`/api/chapters/${state.current}/segments/plan`, '已生成分段计划').catch(error => toast(error.message, true));
+  });
+  $('#btn-segments-approve')?.addEventListener('click', () => {
+    runChapterAction(`/api/chapters/${state.current}/segments/approve`, '已批准分段计划').catch(error => toast(error.message, true));
+  });
+  $$('#inspector-body [data-segment-resume]').forEach(node => {
+    node.addEventListener('click', () => runWriteStream({ strategy: 'segmented', resume: node.dataset.segmentResume }));
+  });
+}
+
+// ---- Ideas -----------------------------------------------------------------
+
+const IDEA_PROMOTION_TARGETS = [
+  ['plan', '计划候选'],
+  ['contract', '合同候选'],
+  ['outline', '章纲候选'],
+  ['canon', '设定候选'],
+  ['promise', '读者承诺候选'],
+];
+
+async function renderIdeasTab() {
+  const [live, archived, map] = await Promise.all([
+    api('/api/ideas'),
+    api('/api/ideas?status=archived'),
+    api('/api/ideas/map'),
+  ]);
+  const ideas = [...live.ideas, ...archived.ideas];
+  $('#inspector-body').innerHTML = renderIdeaPanel(ideas, map, { escapeHtml });
+  bindIdeaActions();
+}
+
+async function captureIdeaFromBox() {
+  const box = $('#idea-capture');
+  if (!box) return;
+  const body = box.value.trim();
+  if (!body) {
+    toast('想法正文不能为空', true);
+    return;
+  }
+  try {
+    const payload = await api('/api/ideas', { method: 'POST', body: { body } });
+    box.value = '';
+    toast(`已记下想法：${payload.idea.title}`);
+    await renderIdeasTab();
+    armIdeaUndo(payload.idea.id);
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function armIdeaUndo(ideaId) {
+  clearTimeout(state.ideaUndoTimer);
+  const hint = $('#idea-capture-hint');
+  if (!hint) return;
+  hint.innerHTML = `已保存，5 秒内可撤销 <button id="idea-undo" class="ghost">撤销</button>`;
+  $('#idea-undo').addEventListener('click', async () => {
+    try {
+      await api(`/api/ideas/${ideaId}`, { method: 'DELETE' });
+      toast('已撤销该想法');
+      clearTimeout(state.ideaUndoTimer);
+      await renderIdeasTab();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+  state.ideaUndoTimer = setTimeout(() => {
+    if (hint.isConnected) hint.textContent = '回车保存 · 5 秒内可撤销';
+  }, 5000);
+}
+
+function bindIdeaActions() {
+  $('#idea-save')?.addEventListener('click', captureIdeaFromBox);
+  $('#idea-capture')?.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      captureIdeaFromBox();
+    }
+  });
+  $$('#inspector-body [data-idea-promote]').forEach(node => {
+    node.addEventListener('click', () => openIdeaPromotion(node.dataset.ideaPromote).catch(error => toast(error.message, true)));
+  });
+  $$('#inspector-body [data-idea-archive]').forEach(node => {
+    node.addEventListener('click', async () => {
+      try {
+        await api(`/api/ideas/${node.dataset.ideaArchive}`, { method: 'DELETE' });
+        toast('已归档想法（文件保留）');
+        await renderIdeasTab();
+      } catch (error) { toast(error.message, true); }
+    });
+  });
+  $$('#inspector-body [data-idea-used]').forEach(node => {
+    node.addEventListener('click', async () => {
+      try {
+        const chapters = state.current ? [state.current] : [];
+        await api(`/api/ideas/${node.dataset.ideaUsed}/used`, { method: 'POST', body: { chapters } });
+        toast(chapters.length ? `已标记为第 ${chapters[0]} 章已用` : '已标记为已用');
+        await renderIdeasTab();
+      } catch (error) { toast(error.message, true); }
+    });
+  });
+  $$('#inspector-body [data-idea-unused]').forEach(node => {
+    node.addEventListener('click', async () => {
+      try {
+        await api(`/api/ideas/${node.dataset.ideaUnused}/used`, { method: 'DELETE' });
+        toast('已取消已用标记');
+        await renderIdeasTab();
+      } catch (error) { toast(error.message, true); }
+    });
+  });
+  $$('#inspector-body [data-idea-jump]').forEach(node => {
+    node.addEventListener('click', () => openChapter(Number(node.dataset.ideaJump)).catch(error => toast(error.message, true)));
+  });
+}
+
+async function openIdeaPromotion(ideaId) {
+  const select = `<select id="idea-promote-target">${IDEA_PROMOTION_TARGETS
+    .map(([value, label]) => `<option value="${value}">${label}（${value}）</option>`).join('')}</select>`;
+  showModal('晋升想法', `${select}<div id="idea-proposal" class="idea-proposal"><div class="empty">生成候选中…</div></div>`, [
+    { label: '取消', action: closeModal },
+    { label: '应用', action: () => applyIdeaProposal().catch(error => toast(error.message, true)) },
+  ]);
+  $('#idea-promote-target').addEventListener('change', event => {
+    loadIdeaProposal(ideaId, event.target.value).catch(error => toast(error.message, true));
+  });
+  await loadIdeaProposal(ideaId, 'plan');
+}
+
+async function loadIdeaProposal(ideaId, target) {
+  const payload = await api(`/api/ideas/${ideaId}/promote`, { method: 'POST', body: { target } });
+  state.pendingProposal = payload.proposal;
+  const box = $('#idea-proposal');
+  if (box) box.innerHTML = renderPromotionProposal(payload.proposal, { escapeHtml });
+}
+
+async function applyIdeaProposal() {
+  if (!state.pendingProposal) {
+    toast('还没有待应用的晋升提案', true);
+    return;
+  }
+  const ideaId = state.pendingProposal.ideaId;
+  await api(`/api/ideas/${ideaId}/apply`, { method: 'POST' });
+  state.pendingProposal = null;
+  closeModal();
+  toast('已应用候选；正式批准仍走现有流程');
+  await renderIdeasTab();
+}
+
+async function showIdeaMap() {
+  try {
+    const map = await api('/api/ideas/map');
+    showModal('想法地图', renderIdeaMap(map, { escapeHtml }), [{ label: '关闭', action: closeModal }]);
+    bindIdeaDetailButtons();
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function bindIdeaDetailButtons() {
+  $$('[data-idea-detail]').forEach(node => {
+    node.addEventListener('click', async () => {
+      try {
+        const result = await api(`/api/ideas/${node.dataset.ideaDetail}`);
+        showModal(`想法：${result.meta.title}`, renderIdeaDetail(result, { escapeHtml }), [{ label: '关闭', action: closeModal }]);
+        bindIdeaDetailButtons();
+      } catch (error) { toast(error.message, true); }
+    });
+  });
+}
+
+async function focusIdeaCapture() {
+  switchTab('ideas');
+  await renderInspector();
+  $('#idea-capture')?.focus();
+}
+
+// ---- Focus / evidence navigation -------------------------------------------
+
+async function focusFinding(findingId) {
+  const finding = state.cockpit?.findings.find(item => item.findingId === findingId);
+  if (!finding) return;
+  state.activeEvidence = findingHighlightId(finding);
+  if (finding.matched === false || finding.charStart == null) {
+    toast('定位失效：正文已改动', true);
+    switchTab('evidence');
+    await renderInspector();
+    return;
+  }
+  try {
+    await ensureFreshOffsets();
+  } catch {
+    return;
+  }
+  const fresh = state.cockpit.findings.find(item => item.findingId === findingId) ?? finding;
+  if (fresh.matched === false || fresh.charStart == null) {
+    toast('定位失效：正文已改动', true);
+    switchTab('evidence');
+    return;
+  }
+  const ratio = currentScrollRatio();
+  state.mode = 'review';
+  applyMode({ editor: ratio, view: ratio });
+  if (!scrollToHighlight($('#draft-view'), findingHighlightId(fresh))) {
+    toast('定位失效：该处高亮与其它意见重叠', true);
+  }
+  switchTab('evidence');
+  await renderInspector();
+}
+
+async function focusHighlight(highlightId) {
+  if (highlightId.startsWith('finding:')) {
+    return focusFinding(highlightId.slice('finding:'.length));
+  }
+  state.activeEvidence = highlightId;
+  try {
+    await ensureFreshOffsets();
+  } catch {
+    return;
+  }
+  const ratio = currentScrollRatio();
+  state.mode = 'review';
+  applyMode({ editor: ratio, view: ratio });
+  if (!scrollToHighlight($('#draft-view'), highlightId)) {
+    toast('定位失效：正文已改动', true);
+  }
+  switchTab('evidence');
+  await renderInspector();
+}
+
+function stepFinding(direction) {
+  const findings = state.cockpit?.findings ?? [];
+  if (findings.length === 0) return;
+  const current = findings.findIndex(item => state.activeEvidence === findingHighlightId(item));
+  const start = current < 0 ? (direction > 0 ? -1 : 0) : current;
+  const next = findings[(start + direction + findings.length) % findings.length];
+  if (next) focusFinding(next.findingId);
+}
+
+function locateQuote(quote) {
+  // Legacy fallback for surfaces that only have a quote. The cockpit path uses offsets.
+  const index = state.cockpit?.draft.text.indexOf(quote) ?? -1;
+  if (index < 0) {
+    toast('当前草稿中找不到该引文', true);
+    return;
+  }
+  const finding = state.cockpit.findings.find(item => item.quote === quote);
+  if (finding) focusFinding(finding.findingId);
 }
 
 async function showGates() {
@@ -391,7 +915,9 @@ async function showGates() {
   return result;
 }
 
-async function runWriteStream() {
+// ---- Stage actions ---------------------------------------------------------
+
+async function runWriteStream(options = {}) {
   if (state.dirty) {
     try {
       await saveDraft();
@@ -399,13 +925,22 @@ async function runWriteStream() {
       return;
     }
   }
+  if (state.mode !== 'edit') {
+    state.mode = 'edit';
+    applyMode();
+  }
   const controller = new AbortController();
   state.writeController = controller;
   $('#btn-cancel').classList.remove('hidden');
-  updateSave('生成中…');
+  updateSave(options.resume ? '从失败段恢复中…' : '生成中…');
   $('#draft').value = '';
+  state.offsetsStale = true;
   try {
-    const response = await fetch(`/api/chapters/${state.current}/write/stream`, {
+    const params = new URLSearchParams();
+    if (options.strategy) params.set('strategy', options.strategy);
+    if (options.resume) params.set('resume', options.resume);
+    const query = params.size ? `?${params}` : '';
+    const response = await fetch(`/api/chapters/${state.current}/write/stream${query}`, {
       method: 'POST',
       headers: { 'x-weave-token': state.token },
       signal: controller.signal,
@@ -427,13 +962,13 @@ async function runWriteStream() {
       for (const block of blocks) {
         const line = block.split('\n').find(item => item.startsWith('data:'));
         if (!line) continue;
-        const payload = JSON.parse(line.slice(5).trim());
-        if (payload.type === 'delta') {
-          $('#draft').value += payload.delta;
+        const event = JSON.parse(line.slice(5).trim());
+        if (event.type === 'delta') {
+          $('#draft').value += event.delta;
           updateWords();
           $('#draft').scrollTop = $('#draft').scrollHeight;
-        } else if (payload.type === 'error') {
-          failed = payload;
+        } else if (event.type === 'error') {
+          failed = event;
         }
       }
     }
@@ -466,7 +1001,7 @@ async function runStage(action) {
   if (action === 'finalize') {
     const gates = await showGates();
     if (!gates.ready) return;
-    if (!confirm(`确认定稿第 ${state.current} 章？\n草稿 ${state.detail.hash.slice(0, 16)}`)) return;
+    if (!confirm(`确认定稿第 ${state.current} 章？\n草稿 ${(state.cockpit?.draft.contentHash ?? '').slice(0, 16)}`)) return;
   }
   if (action === 'amend' && !confirm('重开草稿会复制当前正式正文，并可能产生新的影响面。继续？')) return;
   const labels = {
@@ -489,18 +1024,80 @@ async function runStage(action) {
   }
 }
 
-function locateQuote(quote) {
-  const editor = $('#draft');
-  const index = editor.value.indexOf(quote);
-  if (index < 0) {
-    toast('当前草稿中找不到该引文', true);
+// ---- Next action state machine ---------------------------------------------
+
+const STAGE_ALIASES = {
+  'content-check': 'check',
+  extraction: 'extract',
+  audit: 'audit',
+  review: 'review',
+};
+
+async function runNextAction() {
+  const next = state.cockpit?.nextAction;
+  if (!next) {
+    toast('还没有可用的下一步', true);
     return;
   }
-  editor.focus();
-  editor.setSelectionRange(index, index + quote.length);
-  const lineHeight = 30;
-  editor.scrollTop = Math.max(0, editor.value.slice(0, index).split('\n').length * lineHeight - 120);
+  if (next.kind === 'done') {
+    toast(next.label || '本章已完成');
+    return;
+  }
+  if (next.kind === 'contract-check') {
+    await runStage('contract-check');
+    return;
+  }
+  if (next.kind === 'write') {
+    await runWriteStream();
+    return;
+  }
+  if (next.kind === 'revise') {
+    switchTab('findings');
+    await renderInspector();
+    toast('请先处理阻塞问题：修订或豁免');
+    return;
+  }
+  if (next.kind === 'finalize') {
+    await runStage('finalize');
+    return;
+  }
+  if (next.kind === 'stage') {
+    await runStage(STAGE_ALIASES[next.stage] || next.stage);
+    return;
+  }
+  if (next.kind === 'beats-generate') {
+    await runChapterAction(`/api/chapters/${state.current}/beats/generate`, '已生成场景节拍');
+    return;
+  }
+  if (next.kind === 'beats-approve') {
+    await runChapterAction(`/api/chapters/${state.current}/beats/approve`, '已批准场景节拍');
+    return;
+  }
+  if (next.kind === 'segments-plan') {
+    await runChapterAction(`/api/chapters/${state.current}/segments/plan`, '已生成分段计划');
+    return;
+  }
+  if (next.kind === 'segments-approve') {
+    await runChapterAction(`/api/chapters/${state.current}/segments/approve`, '已批准分段计划');
+    return;
+  }
+  toast(`未知的下一步：${next.kind}`, true);
 }
+
+async function runChapterAction(path, label) {
+  if (!state.current) return;
+  updateSave(`${label}…`);
+  try {
+    await api(path, { method: 'POST' });
+    toast(label);
+    await openChapter(state.current, true);
+  } catch (error) {
+    updateSave('操作失败');
+    toast(error.message, true);
+  }
+}
+
+// ---- Findings and revisions actions ---------------------------------------
 
 async function waiveFinding(findingId) {
   const reason = prompt('豁免理由');
@@ -516,8 +1113,7 @@ async function reviseFinding(findingId) {
   try {
     const result = await api(`/api/chapters/${state.current}/revise`, { method: 'POST', body: { findings: [findingId] } });
     toast(`已生成修订 ${result.candidate.revisionId}`);
-    state.tab = 'revisions';
-    $$('#tabs button').forEach(node => node.classList.toggle('active', node.dataset.tab === 'revisions'));
+    switchTab('revisions');
     await openChapter(state.current, true);
   } catch (error) { toast(error.message, true); }
 }
@@ -557,15 +1153,66 @@ async function revokeWaiver(waiverId) {
   } catch (error) { toast(error.message, true); }
 }
 
-function showDiff(revisionId) {
-  const revision = state.detail.revisions.find(item => item.revisionId === revisionId);
+async function showDiff(revisionId) {
+  let revision = state.cockpit?.revisions?.find(item => item.revisionId === revisionId);
   if (!revision) return;
+  if (!Array.isArray(revision.paragraphs)) {
+    const payload = await api(`/api/chapters/${state.current}/revisions`);
+    revision = payload.revisions.find(item => item.revisionId === revisionId) ?? revision;
+  }
+  const paragraphs = Array.isArray(revision.paragraphs) ? revision.paragraphs : [];
   const before = new Map((revision.baseParagraphs || []).map(item => [item.paragraphId, item.text]));
-  const body = revision.paragraphs.map(item => `
-    <div class="section-label">${escapeHtml(item.paragraphId)}</div>
-    <pre>- ${escapeHtml(before.get(item.paragraphId) || '')}\n+ ${escapeHtml(item.text)}</pre>
-  `).join('');
-  showModal('修订 diff', body, [{ label: '关闭', action: closeModal }]);
+  state.inlineDiff = { revisionId, paragraphs, before };
+  switchTab('revisions');
+  await renderInspector();
+}
+
+function renderInlineDiff() {
+  const body = $('#inspector-body');
+  if (!body) return;
+  const toolbar = `<div class="inline-diff-toolbar">
+    <button id="btn-compare-commit" class="ghost">对比定稿</button>
+    <span class="muted small">只读；采纳仍走合并</span>
+  </div>`;
+  let html = toolbar;
+  if (state.inlineDiff) {
+    const { revisionId, paragraphs, before } = state.inlineDiff;
+    const rows = paragraphs.map(item => {
+      const prior = before.get(item.paragraphId) || '';
+      return `<div class="inline-diff-row"><div class="section-label">${escapeHtml(item.paragraphId)}</div>
+        <pre class="diff-before">- ${escapeHtml(prior)}</pre>
+        <pre class="diff-after">+ ${escapeHtml(item.text)}</pre></div>`;
+    }).join('');
+    html += `<div class="inline-diff"><div class="section-label">修订 diff · ${escapeHtml(revisionId)}</div>
+      ${rows || '<div class="empty">该修订没有段落内容。</div>'}
+      <div class="finding-actions"><button data-merge="${escapeHtml(revisionId)}">采纳（合并）</button>
+        <button id="inline-diff-close" class="ghost">收起 diff</button></div></div>`;
+  }
+  if (state.compare) {
+    const rows = state.compare.rows.map(row => {
+      const cls = row.status === 'same' ? 'same' : row.status;
+      return `<div class="compare-row ${cls}"><span class="compare-tag">${escapeHtml(row.status)}</span>
+        <pre class="diff-before">${row.before === null ? '' : `- ${escapeHtml(row.before)}`}</pre>
+        <pre class="diff-after">${row.after === null ? '' : `+ ${escapeHtml(row.after)}`}</pre></div>`;
+    }).join('');
+    html += `<div class="inline-diff"><div class="section-label">草稿 vs 定稿 r${state.compare.base.revision}</div>
+      ${rows || '<div class="empty">两边都没有段落。</div>'}
+      <p class="muted small">草稿 ${escapeHtml(state.compare.draft.contentHash.slice(0, 12))} · 定稿 ${escapeHtml(state.compare.base.contentHash.slice(0, 12))}</p>
+      <button id="inline-diff-close" class="ghost">收起对比</button></div>`;
+  }
+  body.innerHTML += html;
+  $('#inline-diff-close')?.addEventListener('click', async () => {
+    state.inlineDiff = null;
+    state.compare = null;
+    await renderInspector();
+  });
+  $('#btn-compare-commit')?.addEventListener('click', () => loadCommitCompare().catch(error => toast(error.message, true)));
+}
+
+async function loadCommitCompare() {
+  const result = await api(`/api/chapters/${state.current}/compare?base=commit`);
+  state.compare = result;
+  await renderInspector();
 }
 
 function showModal(title, body, actions) {
@@ -581,6 +1228,8 @@ function showModal(title, body, actions) {
   $('#modal').classList.remove('hidden');
 }
 function closeModal() { $('#modal').classList.add('hidden'); }
+
+// ---- Search / tools --------------------------------------------------------
 
 async function openSearch() {
   $('#drawer').classList.remove('hidden');
@@ -673,16 +1322,15 @@ async function createSelectionRevision(operation) {
     const payload = await api(`/api/chapters/${state.current}/selection-revisions`, {
       method: 'POST',
       body: {
-        baseDraftHash: state.detail.hash,
+        baseDraftHash: state.cockpit?.draft.contentHash,
         selectedText,
         occurrence,
         operation,
         ...(instruction ? { instruction } : {}),
       },
     });
-    const candidate = payload.candidate;
-    state.detail.revisions.unshift(candidate);
-    showSelectionCandidate(candidate);
+    await refreshCockpit();
+    showSelectionCandidate(payload.candidate);
   } catch (error) {
     toast(error.message, true);
   } finally {
@@ -730,6 +1378,7 @@ async function discardSelectionCandidate(revisionId) {
       body: { revisionId },
     });
     closeModal();
+    await refreshCockpit();
   } catch (error) {
     toast(error.message, true);
   }
@@ -845,6 +1494,109 @@ async function showEvalReport(force = false) {
   showModal('盲评结果', body, actions);
 }
 
+// ---- Command palette -------------------------------------------------------
+
+function commandList() {
+  const hasChapter = Boolean(state.current);
+  const chapter = () => state.current;
+  return [
+    { id: 'open-next', label: '打开下一章', hint: '章节', enabled: hasChapter, run: () => openChapter((chapter() ?? 0) + 1).catch(error => toast(error.message, true)) },
+    { id: 'open-prev', label: '打开上一章', hint: '章节', enabled: hasChapter && (chapter() ?? 1) > 1, run: () => openChapter(Math.max(1, (chapter() ?? 1) - 1)).catch(error => toast(error.message, true)) },
+    { id: 'contract-check', label: '运行合同检查', hint: '门禁', enabled: hasChapter, run: () => runStage('contract-check') },
+    { id: 'beats-generate', label: '生成场景节拍', hint: '节拍', enabled: hasChapter, run: () => runChapterAction(`/api/chapters/${state.current}/beats/generate`, '已生成场景节拍') },
+    { id: 'beats-approve', label: '批准场景节拍', hint: '节拍', enabled: hasChapter, run: () => runChapterAction(`/api/chapters/${state.current}/beats/approve`, '已批准场景节拍') },
+    { id: 'segments-plan', label: '生成分段计划', hint: '分段', enabled: hasChapter, run: () => runChapterAction(`/api/chapters/${state.current}/segments/plan`, '已生成分段计划') },
+    { id: 'segments-approve', label: '批准分段计划', hint: '分段', enabled: hasChapter, run: () => runChapterAction(`/api/chapters/${state.current}/segments/approve`, '已批准分段计划') },
+    { id: 'write', label: '写本章（流式）', hint: '生成', enabled: hasChapter, run: () => runWriteStream() },
+    { id: 'check', label: '运行内容检查', hint: '阶段', enabled: hasChapter, run: () => runStage('check') },
+    { id: 'extract', label: '运行证据抽取', hint: '阶段', enabled: hasChapter, run: () => runStage('extract') },
+    { id: 'audit', label: '运行覆盖审计', hint: '阶段', enabled: hasChapter, run: () => runStage('audit') },
+    { id: 'review', label: '运行审查', hint: '阶段', enabled: hasChapter, run: () => runStage('review') },
+    { id: 'finalize', label: '定稿本章', hint: '门禁', enabled: hasChapter, run: () => runStage('finalize') },
+    { id: 'capture-idea', label: '捕获想法', hint: '想法', enabled: true, run: () => focusIdeaCapture().catch(error => toast(error.message, true)) },
+    { id: 'idea-map', label: '打开想法地图', hint: '想法', enabled: true, run: () => showIdeaMap() },
+    { id: 'search', label: '全文搜索', hint: '工具', enabled: true, run: () => openSearch() },
+    { id: 'export', label: '导出', hint: '工具', enabled: true, run: () => showExport() },
+    { id: 'doctor', label: '项目体检', hint: '工具', enabled: true, run: () => showDoctor() },
+    { id: 'refresh', label: '刷新', hint: '工具', enabled: true, run: () => refresh().catch(error => toast(error.message, true)) },
+    { id: 'toggle-mode', label: '切换编辑/审阅', hint: '视图', enabled: hasChapter, run: () => toggleMode().catch(error => toast(error.message, true)) },
+  ];
+}
+
+const paletteState = { open: false, items: [], active: 0 };
+
+function openPalette() {
+  paletteState.open = true;
+  paletteState.active = 0;
+  $('#palette').classList.remove('hidden');
+  const input = $('#palette-q');
+  input.value = '';
+  input.focus();
+  renderPalette();
+}
+
+function closePalette() {
+  paletteState.open = false;
+  $('#palette').classList.add('hidden');
+}
+
+function renderPalette() {
+  const query = ($('#palette-q').value || '').trim().toLowerCase();
+  const items = commandList().filter(item => !query || item.label.toLowerCase().includes(query) || item.hint.toLowerCase().includes(query));
+  paletteState.items = items;
+  if (paletteState.active >= items.length) paletteState.active = Math.max(0, items.length - 1);
+  $('#palette-list').innerHTML = items.length
+    ? items.map((item, index) => `
+      <div class="palette-item ${item.enabled ? '' : 'disabled'} ${index === paletteState.active ? 'active' : ''}" data-palette-index="${index}">
+        <span>${escapeHtml(item.label)}</span>
+        <span class="palette-hint">${escapeHtml(item.hint)}</span>
+      </div>`).join('')
+    : '<div class="empty">没有匹配的命令。</div>';
+  $$('#palette-list [data-palette-index]').forEach(node => {
+    node.addEventListener('click', () => executePalette(Number(node.dataset.paletteIndex)));
+  });
+}
+
+function executePalette(index) {
+  const item = paletteState.items[index];
+  if (!item || !item.enabled) return;
+  closePalette();
+  Promise.resolve(item.run()).catch(error => toast(error.message, true));
+}
+
+function movePalette(delta) {
+  if (!paletteState.open || paletteState.items.length === 0) return;
+  paletteState.active = (paletteState.active + delta + paletteState.items.length) % paletteState.items.length;
+  renderPalette();
+}
+
+function bindPalette() {
+  $('#palette-q').addEventListener('input', () => {
+    paletteState.active = 0;
+    renderPalette();
+  });
+  $('#palette-q').addEventListener('keydown', event => {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      movePalette(1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      movePalette(-1);
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      executePalette(paletteState.active);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      closePalette();
+    }
+  });
+  $('#palette').addEventListener('click', event => {
+    if (event.target === $('#palette')) closePalette();
+  });
+}
+
+// ---- Bind ------------------------------------------------------------------
+
 function bind() {
   $('#draft').addEventListener('select', updateSelectionTools);
   $('#draft').addEventListener('keyup', updateSelectionTools);
@@ -853,11 +1605,14 @@ function bind() {
   $$('[data-selection-op]').forEach(node => node.addEventListener('click', () => createSelectionRevision(node.dataset.selectionOp)));
   $('#draft').addEventListener('input', () => {
     state.dirty = true;
+    state.offsetsStale = true;
     updateWords();
     updateSave('未保存');
     clearTimeout(state.saveTimer);
     state.saveTimer = setTimeout(() => saveDraft(), 900);
   });
+  $('#btn-mode').addEventListener('click', () => toggleMode().catch(error => toast(error.message, true)));
+  $('#btn-next').addEventListener('click', () => runNextAction().catch(error => toast(error.message, true)));
   $$('#stagebar button[data-stage]').forEach(node => node.addEventListener('click', () => runStage(node.dataset.stage)));
   $('#btn-cancel').addEventListener('click', () => state.writeController?.abort());
   $('#btn-refresh').addEventListener('click', () => refresh().catch(error => toast(error.message, true)));
@@ -865,6 +1620,7 @@ function bind() {
   $('#btn-doctor').addEventListener('click', showDoctor);
   $('#btn-export').addEventListener('click', showExport);
   $('#btn-search').addEventListener('click', openSearch);
+  $('#btn-ideas-map').addEventListener('click', showIdeaMap);
   $('#btn-eval').addEventListener('click', showEvalSessions);
   $('#eval-close').addEventListener('click', () => $('#eval-view').classList.add('hidden'));
   $('#eval-report').addEventListener('click', () => showEvalReport().catch(error => toast(error.message, true)));
@@ -873,14 +1629,26 @@ function bind() {
   $('#drawer-close').addEventListener('click', () => $('#drawer').classList.add('hidden'));
   $('#modal-close').addEventListener('click', closeModal);
   $('#search-form').addEventListener('submit', event => { event.preventDefault(); runSearch().catch(error => toast(error.message, true)); });
+  $$('#chapter-filters button').forEach(node => node.addEventListener('click', () => {
+    state.filter = node.dataset.filter;
+    renderShell();
+  }));
   $$('#tabs button').forEach(node => node.addEventListener('click', () => {
-    state.tab = node.dataset.tab;
-    state.preferences.tab = state.tab;
-    $$('#tabs button').forEach(item => item.classList.toggle('active', item === node));
-    persistPreferences();
+    switchTab(node.dataset.tab);
     renderInspector().catch(error => toast(error.message, true));
   }));
+  bindPalette();
   document.addEventListener('keydown', event => {
+    const typing = ['TEXTAREA', 'INPUT'].includes(event.target?.tagName);
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'p') {
+      event.preventDefault();
+      if (paletteState.open) closePalette();
+      else openPalette();
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') {
+      event.preventDefault();
+      runNextAction().catch(error => toast(error.message, true));
+    }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
       event.preventDefault();
       saveDraft().catch(error => toast(error.message, true));
@@ -889,7 +1657,26 @@ function bind() {
       event.preventDefault();
       openSearch();
     }
-    if (event.key === 'Escape') { closeModal(); $('#drawer').classList.add('hidden'); }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'e') {
+      event.preventDefault();
+      toggleMode().catch(error => toast(error.message, true));
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'i') {
+      event.preventDefault();
+      focusIdeaCapture().catch(error => toast(error.message, true));
+    }
+    if (!typing && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'j') {
+      event.preventDefault();
+      stepFinding(1);
+    }
+    if (!typing && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      stepFinding(-1);
+    }
+    if (event.key === 'Escape') { closeModal(); closePalette(); $('#drawer').classList.add('hidden'); }
+  });
+  window.addEventListener('resize', () => {
+    if (state.mode === 'review') renderDraftViewMarkup();
   });
 }
 

@@ -88,6 +88,13 @@ export interface TimelineCheck {
   passed: boolean
 }
 
+export interface AuditMissedItem {
+  missedId: string
+  summary: string
+  quote: string
+  evidence: EvidenceSpan
+}
+
 export interface CoverageSegment {
   startByte: number
   endByte: number
@@ -118,6 +125,7 @@ export interface CoverageAudit {
   secondPass: {
     summary: string
     missed: string[]
+    missedItems?: AuditMissedItem[]
     rejected: string[]
   }
   warnings: string[]

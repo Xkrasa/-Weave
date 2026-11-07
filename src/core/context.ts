@@ -1,5 +1,6 @@
 import type { ChapterContract, Material, MaterialDecision, ModelConfig } from './types.ts'
 import { hashText, objectHash } from './hash.ts'
+import { effectiveContextWindow, contextCapacityTokens } from './config.ts'
 
 const SYSTEM_PROMPT = [
   '你是中文长篇小说写作引擎。',
@@ -30,7 +31,7 @@ export interface AssembledContext {
   included: Material[]
   omitted: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
   /** 披露未到而被扣留的材料；不是预算省略，由材料收集阶段写入。 */
-  withheld: Array<{ sourceId: string; reason: 'not-yet-revealed' }>
+  withheld: Array<{ sourceId: string; reason: 'not-yet-revealed' | 'idea-spoiler' }>
   /** 预算不足被降级为紧凑形态的可选材料；required 不降级。 */
   degraded: Array<{ sourceId: string; reason: 'budget' }>
   estimatedTokens: number
@@ -40,30 +41,50 @@ export function estimateTokens(text: string, charsPerToken: number): number {
   return Math.ceil([...text].length / charsPerToken)
 }
 
+export interface SegmentPromptContext {
+  index: number
+  total: number
+  goal: string
+  entryState: string
+  exitState: string
+  /** Tail of the previous segment; used for continuity, not for literal repetition. */
+  priorTail: string
+  targetWords: number
+  mustNotHappen: string[]
+  usedMotifs?: string[]
+  /** Failure reasons from the previous attempt; only present on retries. */
+  retryReasons?: string[]
+}
+
 export function assembleContext(
   contract: ChapterContract,
   materials: Material[],
   config: ModelConfig,
   options: {
     beatText?: string
+    /** Segmented generation: current segment task, appended after chapter-level material. */
+    segment?: SegmentPromptContext
     /** 材料收集阶段判定未到披露章的条目；装配只如实上报，不参与判断与预算。 */
-    withheld?: Array<{ sourceId: string; reason: 'not-yet-revealed' }>
+    withheld?: Array<{ sourceId: string; reason: 'not-yet-revealed' | 'idea-spoiler' }>
+    /** 材料收集阶段已判定超出想法配额/预算的条目；只上报，不再进入候选。 */
+    preOmitted?: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }>
   } = {},
 ): { decision: MaterialDecision; context: AssembledContext | null } {
   const renderer = renderMode(config)
+  const segmentText = options.segment ? renderSegmentText(options.segment) : ''
   const contractText = `${JSON.stringify(contract, null, 2)}${options.beatText
     ? `\n\n已批准的场景节拍（生成辅助材料，不是既成事实）：\n${options.beatText}`
-    : ''}`
+    : ''}${segmentText ? `\n\n${segmentText}` : ''}`
   const framing = `${SYSTEM_PROMPT}\n章节合同：\n${contractText}\n材料：\n`
   const fixedTokens =
     estimateTokens(SYSTEM_PROMPT, config.charsPerToken) +
     estimateTokens(contractText, config.charsPerToken) +
     32
-  const capacityTokens =
-    config.contextWindow - config.maxOutputTokens - config.safetyMarginTokens - fixedTokens
+  const effectiveWindow = effectiveContextWindow(config)
+  const capacityTokens = contextCapacityTokens(config, fixedTokens)
 
   const usable: Material[] = []
-  const omitted: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }> = []
+  const omitted: Array<{ sourceId: string; reason: 'budget' | 'unknown-provenance' }> = [...(options.preOmitted ?? [])]
   for (const item of materials) {
     if (item.provenance === 'unknown') {
       omitted.push({ sourceId: item.sourceId, reason: 'unknown-provenance' })
@@ -91,6 +112,7 @@ export function assembleContext(
         omissions: omitted,
         requiredTokens,
         capacityTokens,
+        effectiveWindow,
         message: '必需材料来源未知，不能作为权威上下文；请补充来源信息',
       },
       context: null,
@@ -108,6 +130,7 @@ export function assembleContext(
         omissions: omitted,
         requiredTokens,
         capacityTokens,
+        effectiveWindow,
         message:
           decision === 'split-required'
             ? '必要材料总量超过可用上下文；请拆章或分批写作，不要静默裁剪'
@@ -143,8 +166,8 @@ export function assembleContext(
   const ordered = included.sort((a, b) => categoryRank(a) - categoryRank(b))
   const system = SYSTEM_PROMPT
   const user = renderer === 'mission'
-    ? renderMissionPrompt(contract, ordered, options.beatText)
-    : renderJsonPrompt(contract, contractText, ordered)
+    ? renderMissionPrompt(contract, ordered, options.beatText, options.segment)
+    : renderJsonPrompt(contract, contractText, ordered, options.segment)
   const usedTokens = fixedTokens + used
   const layers = buildLayers(system, ordered, user)
   return {
@@ -154,6 +177,7 @@ export function assembleContext(
       omitted,
       requiredTokens,
       capacityTokens,
+      effectiveWindow,
     },
     context: {
       system,
@@ -176,16 +200,50 @@ function renderMode(config: ModelConfig): PromptRenderer {
   return config.promptRenderer === 'mission' ? 'mission' : 'json'
 }
 
-function renderJsonPrompt(contract: ChapterContract, contractText: string, ordered: Material[]): string {
+function renderJsonPrompt(
+  contract: ChapterContract,
+  contractText: string,
+  ordered: Material[],
+  segment?: SegmentPromptContext,
+): string {
   const sections = ordered.map(item => `【${item.label}｜${item.category}/${item.provenance}】\n${item.text}`)
-  return `章节合同：\n${contractText}\n\n${sections.join('\n\n')}\n\n请写出第 ${contract.chapter} 章《${contract.title}》正文：`
+  return `章节合同：\n${contractText}\n\n${sections.join('\n\n')}\n\n${segment ? `${renderSegmentText(segment)}\n\n` : ''}请写出第 ${contract.chapter} 章《${contract.title}》正文：`
+}
+
+function renderSegmentText(segment: SegmentPromptContext): string {
+  const lines = [
+    `【本段任务（第 ${segment.index}/${segment.total} 段，目标约 ${segment.targetWords} 字）】`,
+    `本段目标：${segment.goal}`,
+    `进入状态：${segment.entryState}`,
+    `退出状态：${segment.exitState}`,
+  ]
+  if (segment.mustNotHappen.length > 0) {
+    lines.push('本段绝对不可以发生：', ...segment.mustNotHappen.map(item => `- ${item}`))
+  }
+  if (segment.retryReasons?.length) {
+    lines.push('上一次尝试未通过校验，必须修正：', ...segment.retryReasons.map(item => `- ${item}`))
+    lines.push(`本段目标字数仍为约 ${segment.targetWords} 字，不得为了凑字数重复上一段。`)
+  }
+  if (segment.usedMotifs?.length) {
+    lines.push('已用过的关键句或意象（不要重复）：', ...segment.usedMotifs.map(item => `- ${item}`))
+  }
+  if (segment.priorTail.trim()) {
+    lines.push('上一段结尾（只用于衔接，不要照抄）：', segment.priorTail.trim())
+  }
+  lines.push('只写本段正文；不要提前写后续段，也不要重复上一段已经发生的内容。')
+  return lines.join('\n')
 }
 
 /**
  * Prose task brief. Hard constraints stay as explicit lists so they remain auditable;
  * only the contract narrative is turned into sentences.
  */
-function renderMissionPrompt(contract: ChapterContract, ordered: Material[], beatText?: string): string {
+function renderMissionPrompt(
+  contract: ChapterContract,
+  ordered: Material[],
+  beatText?: string,
+  segment?: SegmentPromptContext,
+): string {
   const lines: string[] = [
     `【本章任务】写出第 ${contract.chapter} 章《${contract.title}》的正文。`,
     '',
@@ -212,6 +270,9 @@ function renderMissionPrompt(contract: ChapterContract, ordered: Material[], bea
   }
   if (beatText) {
     lines.push('【已批准的场景节拍（辅助材料，不是既成事实）】', beatText, '')
+  }
+  if (segment) {
+    lines.push(renderSegmentText(segment), '')
   }
   if (contract.mustHappen.length > 0) {
     lines.push('必须发生：', ...contract.mustHappen.map(item => `- ${item}`), '')

@@ -1,0 +1,44 @@
+{
+  "id": "segmented-rollout-m",
+  "kind": "segmented-rollout",
+  "title": "分段放量 · 长章",
+  "genre": "悬疑 / 长篇连载",
+  "audience": "追更型读者",
+  "promise": "每一次夜航的航线都被同一份错误海图改写。",
+  "premise": "引航员沈停在一次夜航后，发现港口记录里的航线与自己记得的完全不同。",
+  "world": "海港城按潮汐分区管理，夜航记录需引航员与灯塔员双签才生效。",
+  "style": "克制、以物写人；每段推进一条具体线索；段末留下可执行的动作。",
+  "prohibitions": ["不要用巧合解决线索"],
+  "characters": [
+    { "name": "沈停", "introducedIn": 1 },
+    { "name": "陆伯", "introducedIn": 1 },
+    { "name": "何漾", "introducedIn": 1 }
+  ],
+  "chapters": [
+    {
+      "chapter": 1,
+      "title": "错图",
+      "pov": "沈停",
+      "time": "第一夜",
+      "location": "海港灯塔",
+      "openingState": "沈停把夜航记录推回灯塔员面前",
+      "endingState": "沈停发现错误海图上有自己的签名",
+      "goal": "查清夜航记录为何与自己记得的航线不同",
+      "obstacle": "灯塔员坚持记录没有被改过",
+      "mustHappen": [
+        "沈停比对两份夜航记录的潮位数字",
+        "陆伯承认当晚换过一份备用海图",
+        "何漾在灯塔日志里找到被撕掉的一页",
+        "沈停确认错误海图上的签名是自己的笔迹",
+        "沈停把两份记录并排钉在灯室墙上"
+      ],
+      "mayHappen": ["凌晨的雾把灯塔的光压低了一截"],
+      "mustNotHappen": ["沈停当场找到改图的人"],
+      "characters": ["沈停", "陆伯", "何漾"],
+      "threads": ["错误海图", "夜航记录", "沈停的签名"],
+      "targetWords": 6000,
+      "previousLink": "开篇",
+      "nextLink": "她要去旧码头找那晚的备用海图"
+    }
+  ]
+}

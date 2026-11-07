@@ -2,7 +2,7 @@
 id: optional-semantic-retrieval
 type: task-spec
 title: 按召回证据决定是否增加语义检索
-status: draft
+status: deferred
 parent: weave-effect-first-architecture
 depends-on:
   - context-evidence-retrieval

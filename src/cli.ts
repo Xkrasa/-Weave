@@ -27,6 +27,13 @@ import {
   type DraftingStrategy,
   type SceneBeat,
 } from './core/beats.ts'
+import {
+  approveSegmentPlan,
+  planSegments,
+  readSegmentPlan,
+  saveSegmentPlan,
+  skipSegmentPlan,
+} from './core/segments.ts'
 import { findRecoverableRun } from './core/runs.ts'
 import { createImpactReport, loadImpactReport, resolveImpact } from './core/impact.ts'
 import { currentCommit, finalPath, readMainline } from './core/ledger.ts'
@@ -40,6 +47,7 @@ import {
   type ExportPlatform,
 } from './core/services.ts'
 import { WeaveError, usageError, validationError } from './core/errors.ts'
+import { migrateModelConfig, modelBudgetSummary, updateModelConfig, type ModelConfigPatch } from './core/config.ts'
 import { ensureProjectMigrated } from './core/migrate.ts'
 import type { GenerationEvent } from './core/types.ts'
 import { runContentCheck } from './core/content-check.ts'
@@ -48,7 +56,8 @@ import { runCoverageAudit, runTimelineReport } from './core/audit.ts'
 import { runReview } from './core/review.ts'
 import { runEffectReview } from './core/effect-review.ts'
 import { applyWaivers, createWaivers, loadWaivers, revokeWaiver } from './core/waivers.ts'
-import { decidePending, listPending, listUnresolvedPending } from './core/pending.ts'
+import { decideAuditMissed, decidePending, listPending, listUnresolvedPending } from './core/pending.ts'
+import { generateKeyCandidates, KEY_FOCUS, type KeyFocus } from './core/tiered.ts'
 import {
   ignoreFinding,
   mergeRevision,
@@ -115,6 +124,22 @@ import {
 } from './core/outline.ts'
 import { atomicWriteJson, ensureDir, readTextIfExists } from './core/io.ts'
 import {
+  archiveIdea,
+  applyPromotion,
+  captureIdea,
+  listIdeas,
+  listStaleIdeas,
+  loadPromotionProposal,
+  parseScope,
+  promoteIdea,
+  readIdea,
+  savePromotionProposal,
+  updateIdea,
+  type IdeaPatch,
+  type IdeaStatus,
+} from './core/ideas.ts'
+import type { IdeaPromotionTarget } from './core/types.ts'
+import {
   checkKnowledge,
   collectLedgerSources,
   effectiveBeliefs,
@@ -140,9 +165,12 @@ import type {
 interface Parsed {
   positionals: string[]
   flags: Record<string, string | true>
+  /** Repeated flags such as `--tag a --tag b`; single values are also kept in `flags`. */
+  lists: Record<string, string[]>
 }
 
-const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank', 'open', 'key', 'analyze', 'methods', 'samples', 'show-withheld'])
+const BOOLEAN_FLAGS = new Set(['json', 'help', 'force', 'all', 'events', 'waive-warnings', 'all-warnings', 'save', 'rerank', 'open', 'key', 'analyze', 'methods', 'samples', 'show-withheld', 'show-ideas', 'include-book-ideas'])
+const MULTI_FLAGS = new Set(['tag'])
 let eventStreamStarted = false
 
 async function main(): Promise<number> {
@@ -164,6 +192,10 @@ async function main(): Promise<number> {
   }
 
   switch (command) {
+    case 'idea':
+      return commandIdea(root, parsed, json)
+    case 'config':
+      return commandConfig(root, parsed, json)
     case 'status':
       return commandStatus(root, parsed, json)
     case 'contract':
@@ -236,6 +268,10 @@ async function main(): Promise<number> {
       return commandTimeline(root, parsed, json)
     case 'beats':
       return commandBeats(root, parsed, json)
+    case 'segments':
+      return commandSegments(root, parsed, json)
+    case 'key-candidates':
+      return commandKeyCandidates(root, parsed, json)
     case 'write':
       return commandWrite(root, parsed, json)
     case 'amend':
@@ -275,6 +311,7 @@ async function commandInit(parsed: Parsed, json: boolean): Promise<number> {
     model: optionalString(parsed, 'model'),
     baseUrl: optionalString(parsed, 'base-url'),
     contextWindow: optionalNumber(parsed, 'context-window'),
+    contextBudgetTokens: optionalNumber(parsed, 'context-budget'),
     maxOutputTokens: optionalNumber(parsed, 'max-output'),
     snapshotEvery: optionalNumber(parsed, 'snapshot-every'),
     platform: platform as 'fanqie' | 'qidian' | 'generic' | undefined,
@@ -286,8 +323,232 @@ async function commandInit(parsed: Parsed, json: boolean): Promise<number> {
     console.log(`已创建 Weave 项目：${result.root}`)
     console.log(`标题：${result.project.title}`)
     console.log(`模型：${result.config.model}（${result.config.baseUrl}）`)
+    console.log(`上下文：窗口 ${result.config.contextWindow}；软预算 ${result.config.contextBudgetTokens ?? result.config.contextWindow}；输出预留 ${result.config.maxOutputTokens}`)
   }
   return 0
+}
+
+async function commandIdea(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0]
+  const id = parsed.positionals[1]
+  switch (action) {
+    case 'add': {
+      const body = parsed.positionals.slice(1).join(' ').trim()
+      if (!body) throw usageError('用法：weave idea add "<正文>" [--title <text>] [--tag <tag>]... [--scope chapter:3|volume:3|book|character:名字|world|mechanic] [--priority high|normal|low] [--spoiler none|hint|reveal] [--after <chapter>]')
+      const tags = parsed.lists.tag ?? []
+      const scope = optionalString(parsed, 'scope')
+      const idea = await captureIdea(root, {
+        title: optionalString(parsed, 'title'),
+        body,
+        tags,
+        ...(scope ? { scope: parseScope(scope) } : {}),
+        priority: optionalString(parsed, 'priority'),
+        spoilerLevel: optionalString(parsed, 'spoiler'),
+        revealAfterChapter: optionalNumber(parsed, 'after'),
+      })
+      if (json) outputJson({ ok: true, idea })
+      else {
+        console.log(`已捕获想法 ${idea.id}`)
+        console.log(`标题：${idea.title}`)
+        console.log(`状态：${idea.status}`)
+        console.log(`范围：${formatIdeaScope(idea.scope)}`)
+        if (idea.tags.length) console.log(`标签：${idea.tags.join('、')}`)
+      }
+      return 0
+    }
+    case 'list': {
+      const status = optionalString(parsed, 'status')
+      if (status && !['inbox', 'promoted', 'archived'].includes(status)) {
+        throw usageError('--status 只能是 inbox、promoted 或 archived')
+      }
+      const filtered = await listIdeas(root, {
+        ...(status ? { status: status as IdeaStatus } : {}),
+        ...(optionalString(parsed, 'tag') ? { tag: optionalString(parsed, 'tag')! } : {}),
+      })
+      if (json) outputJson({ ok: true, ideas: filtered })
+      else if (filtered.length === 0) console.log('没有符合条件的想法。')
+      else {
+        for (const idea of filtered) {
+          const promotion = idea.promotionState === 'stale' ? ' · 晋升目标已变化' : idea.promotionState === 'active' ? ' · 已晋升' : ''
+          const tags = idea.tags.length ? ` · ${idea.tags.map(tag => `#${tag}`).join(' ')}` : ''
+          console.log(`${idea.id}  [${idea.status}] ${idea.title}（${formatIdeaScope(idea.scope)}）${tags}${promotion}`)
+        }
+      }
+      return 0
+    }
+    case 'show': {
+      if (!id) throw usageError('用法：weave idea show <id>')
+      const result = await readIdea(root, id)
+      if (json) outputJson({ ok: true, idea: result.meta, body: result.body })
+      else {
+        console.log(`${result.meta.title}（${result.meta.id}）`)
+        console.log(`状态：${result.meta.status}；范围：${formatIdeaScope(result.meta.scope)}；优先级：${result.meta.priority}`)
+        if (result.meta.tags.length) console.log(`标签：${result.meta.tags.join('、')}`)
+        if (result.meta.promotionState === 'stale') console.log('注意：晋升目标已变化，请重新评估。')
+        console.log('')
+        console.log(result.body.trimEnd())
+      }
+      return 0
+    }
+    case 'edit': {
+      if (!id) throw usageError('用法：weave idea edit <id> [--title <text>] [--body <text>] [--tag <tag>]... [--scope ...] [--priority ...] [--spoiler ...] [--after <chapter>]')
+      const patch: IdeaPatch = {}
+      const patchTitle = optionalString(parsed, 'title')
+      const patchBody = optionalString(parsed, 'body')
+      const patchScope = optionalString(parsed, 'scope')
+      const patchPriority = optionalString(parsed, 'priority')
+      const patchSpoiler = optionalString(parsed, 'spoiler')
+      const patchAfter = optionalNumber(parsed, 'after')
+      if (patchTitle !== undefined) patch.title = patchTitle
+      if (patchBody !== undefined) patch.body = patchBody
+      if (parsed.lists.tag?.length) patch.tags = parsed.lists.tag
+      if (patchScope !== undefined) patch.scope = parseScope(patchScope)
+      if (patchPriority !== undefined) patch.priority = patchPriority
+      if (patchSpoiler !== undefined) patch.spoilerLevel = patchSpoiler
+      if (patchAfter !== undefined) patch.revealAfterChapter = patchAfter
+      if (Object.keys(patch).length === 0) throw usageError('没有要修改的字段；请提供 --title、--body、--tag、--scope、--priority、--spoiler 或 --after')
+      const idea = await updateIdea(root, id, patch)
+      if (json) outputJson({ ok: true, idea })
+      else console.log(`已更新想法 ${idea.id}：${idea.title}`)
+      return 0
+    }
+    case 'archive': {
+      if (!id) throw usageError('用法：weave idea archive <id>')
+      const idea = await archiveIdea(root, id)
+      if (json) outputJson({ ok: true, idea })
+      else console.log(`已归档想法 ${idea.id}（文件保留，可 list --status archived 查看）`)
+      return 0
+    }
+    case 'promote': {
+      if (!id) throw usageError('用法：weave idea promote <id> --to plan|contract|outline|canon|promise [--target <path>]')
+      const to = optionalString(parsed, 'to')
+      if (!to || !['plan', 'contract', 'outline', 'canon', 'promise'].includes(to)) {
+        throw usageError('--to 只能是 plan、contract、outline、canon 或 promise')
+      }
+      const proposal = await promoteIdea(root, id, to as IdeaPromotionTarget, {
+        ...(optionalString(parsed, 'target') ? { targetPath: optionalString(parsed, 'target')! } : {}),
+      })
+      await savePromotionProposal(root, proposal)
+      if (json) outputJson({ ok: true, proposal })
+      else {
+        console.log(`晋升提案：${proposal.ideaId} → ${proposal.target}（${proposal.targetPath}）`)
+        console.log(`目标当前 hash：${proposal.currentHash}`)
+        for (const warning of proposal.warnings) console.warn(`警告：${warning}`)
+        console.log('')
+        console.log(proposal.diff)
+        console.log('')
+        console.log('尚未写入目标；确认后执行 weave idea apply <id>。')
+      }
+      return 0
+    }
+    case 'apply': {
+      if (!id) throw usageError('用法：weave idea apply <id>')
+      const proposal = await loadPromotionProposal(root, id)
+      if (!proposal) throw usageError(`没有待应用的晋升提案：${id}；请先运行 weave idea promote ${id} --to <target>`)
+      const idea = await applyPromotion(root, id, proposal)
+      if (json) outputJson({ ok: true, idea })
+      else console.log(`已应用晋升候选：${idea.promotion?.targetPath ?? ''}；批准仍走现有流程。`)
+      return 0
+    }
+    case 'stale': {
+      const stale = await listStaleIdeas(root)
+      if (json) outputJson({ ok: true, ideas: stale })
+      else if (stale.length === 0) console.log('没有失效的晋升目标。')
+      else for (const idea of stale) console.log(`${idea.id}  ${idea.title} → ${idea.promotion?.targetPath ?? ''}`)
+      return 0
+    }
+    case 'feedback': {
+      const chapter = optionalNumber(parsed, 'chapter')
+      if (chapter === undefined) throw usageError('用法：weave idea feedback --chapter <n> [--include-book-ideas]')
+      const contract = await loadContract(root, chapter)
+      const { decision, context, conflictWarnings } = await assembleChapterContext(root, contract, {
+        includeBookIdeas: parsed.flags['include-book-ideas'] === true,
+      })
+      if (decision.decision !== 'ready' || !context) {
+        throw validationError(decision.decision === 'ready' ? '上下文装配失败' : decision.message)
+      }
+      const ideas = {
+        included: context.included.filter(item => item.sourceId.startsWith('idea:')).map(item => item.sourceId),
+        degraded: context.degraded.filter(item => item.sourceId.startsWith('idea:')),
+        omitted: context.omitted.filter(item => item.sourceId.startsWith('idea:')),
+        withheld: context.withheld.filter(item => item.sourceId.startsWith('idea:')),
+        conflictWarnings: conflictWarnings.filter(warning => warning.startsWith('想法')),
+      }
+      if (json) outputJson({ ok: true, chapter, ideas })
+      else {
+        console.log(`第 ${chapter} 章想法回灌：`)
+        console.log(`- 纳入：${ideas.included.length ? ideas.included.join('、') : '无'}`)
+        if (ideas.degraded.length) console.log(`- 降级：${ideas.degraded.map(item => item.sourceId).join('、')}`)
+        if (ideas.omitted.length) console.log(`- 省略：${ideas.omitted.map(item => item.sourceId).join('、')}`)
+        if (ideas.withheld.length) console.log(`- 扣留：${ideas.withheld.map(item => `${item.sourceId}(${item.reason})`).join('、')}`)
+        for (const warning of ideas.conflictWarnings) console.log(`- ${warning}`)
+      }
+      return 0
+    }
+    default:
+      throw usageError('用法：weave idea add|list|show|edit|archive|promote|apply|stale|feedback')
+  }
+}
+
+function formatIdeaScope(scope: { kind: string; ref?: number | string }): string {
+  if (scope.kind === 'chapter') return `chapter:${String(scope.ref)}`
+  if (scope.kind === 'volume') return `volume:${String(scope.ref)}`
+  if (scope.kind === 'character') return `character:${String(scope.ref)}`
+  return scope.kind
+}
+
+async function commandConfig(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0]
+  if (action === 'show' || action === undefined) {
+    const config = await loadModelConfig(root)
+    const budget = modelBudgetSummary(config)
+    if (json) outputJson({ ok: true, config, budget })
+    else {
+      console.log(`模型：${config.model}`)
+      console.log(`上下文窗口：${config.contextWindow}`)
+      console.log(`写作软预算：${config.contextBudgetTokens ?? config.contextWindow}`)
+      console.log(`有效窗口：${budget.effectiveWindow}`)
+      console.log(`输出预留：${config.maxOutputTokens}；安全余量：${config.safetyMarginTokens}`)
+      console.log(`可用输入：${budget.capacityTokens}`)
+      console.log(`charsPerToken：${config.charsPerToken}`)
+    }
+    return 0
+  }
+  if (action === 'set') {
+    const patch: ModelConfigPatch = {}
+    const contextWindow = optionalNumber(parsed, 'context-window')
+    const contextBudgetTokens = optionalNumber(parsed, 'context-budget')
+    const maxOutputTokens = optionalNumber(parsed, 'max-output')
+    const safetyMarginTokens = optionalNumber(parsed, 'safety-margin')
+    const charsPerToken = optionalFloat(parsed, 'chars-per-token')
+    if (contextWindow !== undefined) patch.contextWindow = contextWindow
+    if (contextBudgetTokens !== undefined) patch.contextBudgetTokens = contextBudgetTokens
+    if (maxOutputTokens !== undefined) patch.maxOutputTokens = maxOutputTokens
+    if (safetyMarginTokens !== undefined) patch.safetyMarginTokens = safetyMarginTokens
+    if (charsPerToken !== undefined) patch.charsPerToken = charsPerToken
+    if (Object.keys(patch).length === 0) {
+      throw usageError('用法：weave config set [--context-window <n>] [--context-budget <n>] [--max-output <n>] [--safety-margin <n>] [--chars-per-token <n>]')
+    }
+    const config = await updateModelConfig(root, patch)
+    const budget = modelBudgetSummary(config)
+    if (json) outputJson({ ok: true, config, budget })
+    else {
+      console.log(`已更新模型配置；有效窗口 ${budget.effectiveWindow}；可用输入 ${budget.capacityTokens}`)
+    }
+    return 0
+  }
+  if (action === 'migrate') {
+    const result = await migrateModelConfig(root)
+    const budget = modelBudgetSummary(result.config)
+    if (json) outputJson({ ok: true, changed: result.changed, config: result.config, budget })
+    else {
+      console.log(result.changed.length > 0
+        ? `已补齐：${result.changed.join('、')}；写作软预算 ${result.config.contextBudgetTokens ?? result.config.contextWindow}`
+        : '无需迁移；模型配置已包含软预算')
+    }
+    return 0
+  }
+  throw usageError('用法：weave config show|set|migrate')
 }
 
 async function commandStatus(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -306,6 +567,11 @@ async function commandStatus(root: string, parsed: Parsed, json: boolean): Promi
     console.log(`未处理影响：${status.pendingImpacts}`)
     console.log(`检索索引：${status.searchIndex.status} @ ${status.searchIndex.mainlineRevision ?? '无'}`)
     console.log(`长期记忆：${status.memory.current ? 'current' : 'stale'} @ 第 ${status.memory.throughChapter} 章`)
+    for (const stage of status.draftStages ?? []) {
+      const done = stage.currentStages.length > 0 ? stage.currentStages.join('、') : '无'
+      const stale = stage.staleStages.length > 0 ? `；已失效：${stage.staleStages.join('、')}` : ''
+      console.log(`  第${stage.chapter}章草稿 [${stage.phase}] 已过：${done}${stale} → 下一步：${stage.nextCommand}（${stage.note}）`)
+    }
     if (status.disclosure) {
       const list = status.disclosure.withheld
         .map(item => `${item.sourceId}（第 ${item.revealChapter} 章起开放）`)
@@ -756,7 +1022,7 @@ async function commandPublish(root: string, parsed: Parsed, json: boolean): Prom
 
 async function commandExternal(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const action = parsed.positionals[0]
-  const componentRoot = path.resolve(optionalString(parsed, 'component-root') ?? 'test/fixtures/oh-story')
+  const componentRoot = path.resolve(requiredString(parsed, 'component-root'))
   if (action === 'inspect') {
     const candidates = await inspectExternalComponents(componentRoot)
     if (json) outputJson({ candidates })
@@ -765,7 +1031,7 @@ async function commandExternal(root: string, parsed: Parsed, json: boolean): Pro
   }
   if (action === 'test-deslop') {
     const input = parsed.positionals[1]
-    if (!input) throw usageError('用法：weave external test-deslop <fixture> [--component-root <dir>] [--disabled]')
+    if (!input) throw usageError('用法：weave external test-deslop <fixture> --component-root <dir> [--disabled]')
     const result = await runExternalDeslop(componentRoot, path.resolve(root, input), { disabled: parsed.flags.disabled === true })
     if (json) outputJson(result)
     else {
@@ -774,7 +1040,7 @@ async function commandExternal(root: string, parsed: Parsed, json: boolean): Pro
     }
     return 0
   }
-  throw usageError('用法：weave external inspect [--component-root <dir>]|test-deslop <fixture> [--component-root <dir>] [--disabled]')
+  throw usageError('用法：weave external inspect --component-root <dir>|test-deslop <fixture> --component-root <dir> [--disabled]')
 }
 
 async function commandOutline(root: string, parsed: Parsed, json: boolean): Promise<number> {
@@ -1035,7 +1301,9 @@ async function finalizedStyleSamples(root: string): Promise<Array<{ id: string; 
 async function commandContext(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const chapter = parseChapter(parsed.positionals[0])
   const contract = await loadContract(root, chapter)
-  const { decision, context, conflictWarnings } = await assembleChapterContext(root, contract)
+  const { decision, context, conflictWarnings } = await assembleChapterContext(root, contract, {
+    includeBookIdeas: parsed.flags['include-book-ideas'] === true,
+  })
   if (decision.decision !== 'ready' || !context) {
     const message = decision.decision === 'ready' ? '上下文装配失败' : decision.message
     if (json) outputJson({ ok: false, decision })
@@ -1065,6 +1333,15 @@ async function commandContext(root: string, parsed: Parsed, json: boolean): Prom
     if (context.degraded.length > 0) console.log(`降级：${context.degraded.map(item => item.sourceId).join('、')}`)
     if (context.omitted.length > 0) console.log(`省略：${context.omitted.map(item => `${item.sourceId}(${item.reason})`).join('、')}`)
     for (const warning of conflictWarnings) console.log(`- ${warning}`)
+    if (parsed.flags['show-ideas'] === true) {
+      const ideas = [
+        ...context.included.filter(item => item.sourceId.startsWith('idea:')).map(item => `${item.sourceId} 已纳入`),
+        ...context.degraded.filter(item => item.sourceId.startsWith('idea:')).map(item => `${item.sourceId} 已降级`),
+        ...context.omitted.filter(item => item.sourceId.startsWith('idea:')).map(item => `${item.sourceId} 已省略`),
+        ...context.withheld.filter(item => item.sourceId.startsWith('idea:')).map(item => `${item.sourceId} 已扣留（${item.reason}）`),
+      ]
+      console.log(ideas.length > 0 ? `想法：\n- ${ideas.join('\n- ')}` : '想法：没有晋升且命中的想法进入上下文。')
+    }
   }
   return 0
 }
@@ -1255,8 +1532,13 @@ async function commandExtract(root: string, parsed: Parsed, json: boolean): Prom
   const draft = await readDraft(root, chapter)
   const hash = draftHash(draft)
   await requireStage<ContentCheckReport>(root, 'content-check', chapter, hash)
+  const rawHint = optionalString(parsed, 'hint')
+  const hints = rawHint ? rawHint.split(',').map(item => item.trim()).filter(Boolean) : undefined
   const config = await loadModelConfig(root)
-  const report = await runExtraction(root, chapter, contract, draft, config, new AbortController().signal)
+  const report = await runExtraction(
+    root, chapter, contract, draft, config, new AbortController().signal,
+    hints ? { hints } : {},
+  )
   if (json) outputJson(report)
   else {
     console.log(`第 ${chapter} 章抽取：${report.passed ? '通过' : '未通过'}；记录 ${report.records.length} 条`)
@@ -1266,6 +1548,50 @@ async function commandExtract(root: string, parsed: Parsed, json: boolean): Prom
 }
 
 async function commandAudit(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  if (parsed.positionals[0] === 'decide') {
+    const chapter = parseChapter(parsed.positionals[1])
+    const missedId = optionalString(parsed, 'missed') ?? parsed.positionals[2]
+    if (!missedId) {
+      throw usageError('用法：weave audit decide <章号> --missed <missedId> --decision rerun|dismiss --reason <理由>')
+    }
+    const choice = optionalString(parsed, 'decision') ?? optionalString(parsed, 'as')
+    if (choice !== 'dismiss' && choice !== 'rerun') {
+      throw usageError('--decision 只能是 dismiss（驳回疑似遗漏）或 rerun（带提示重新抽取并重审）')
+    }
+    const reason = requiredString(parsed, 'reason')
+    const decided = await decideAuditMissed(root, chapter, missedId, choice, reason)
+    if (choice === 'dismiss') {
+      if (json) outputJson({ ok: true, decision: decided.decision, audit: decided.auditReport })
+      else {
+        console.log(`已驳回第二遍疑似遗漏 ${missedId}：${decided.item.summary}`)
+        console.log(`覆盖审计状态：${decided.auditReport.passed ? '通过' : '仍未通过'}`)
+      }
+      return decided.auditReport.passed ? 0 : 3
+    }
+    const contract = await loadContract(root, chapter)
+    await requirePassingContractCheck(root, contract)
+    const draft = await readDraft(root, chapter)
+    const hash = draftHash(draft)
+    await requireStage<ContentCheckReport>(root, 'content-check', chapter, hash)
+    const config = await loadModelConfig(root)
+    const extraction = await runExtraction(
+      root,
+      chapter,
+      contract,
+      draft,
+      config,
+      new AbortController().signal,
+      { hints: [`${decided.item.summary}（原文引文：${decided.item.quote}）`] },
+    )
+    const auditReport = await runCoverageAudit(
+      root, chapter, contract, draft, extraction, config, new AbortController().signal,
+    )
+    if (json) outputJson({ ok: auditReport.passed, decision: decided.decision, extraction, audit: auditReport })
+    else {
+      console.log(`已带提示重跑第 ${chapter} 章抽取与覆盖审计：${auditReport.passed ? '通过' : '未通过'}`)
+    }
+    return auditReport.passed ? 0 : 3
+  }
   const chapter = parseChapter(parsed.positionals[0])
   const contract = await loadContract(root, chapter)
   const draft = await readDraft(root, chapter)
@@ -1280,6 +1606,11 @@ async function commandAudit(root: string, parsed: Parsed, json: boolean): Promis
     console.log(`第 ${chapter} 章覆盖审计：${report.passed ? '通过' : '未通过'}`)
     console.log(`合同节点：${report.contract.covered.length}/${report.contract.planned.length}`)
     for (const missed of report.contract.missed) console.log(`- 未覆盖：${missed}`)
+    for (const item of report.secondPass.missedItems ?? []) {
+      if (report.secondPass.missed.includes(item.summary)) {
+        console.log(`- 第二遍疑似遗漏 [${item.missedId}]：${item.summary}（引文：${item.quote}）`)
+      }
+    }
     for (const error of report.timeline.errors) console.log(`- 时间线：${error}`)
     for (const item of report.quantityBreaks) {
       console.log(`- ${formatQuantityBreak(item)}`)
@@ -1329,10 +1660,16 @@ async function commandReview(root: string, parsed: Parsed, json: boolean): Promi
 
 async function commandEffectReview(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const chapter = parseChapter(parsed.positionals[0])
+  const externalDeslopRoot = parsed.flags['external-deslop-root'] === undefined
+    ? undefined
+    : path.resolve(requiredString(parsed, 'external-deslop-root'))
   const contract = await loadContract(root, chapter)
   const draft = await readDraft(root, chapter)
   const config = await loadModelConfig(root)
-  const report = await runEffectReview(root, chapter, contract, draft, config, new AbortController().signal)
+  const report = await runEffectReview(
+    root, chapter, contract, draft, config, new AbortController().signal,
+    externalDeslopRoot ? { externalDeslopRoot } : {},
+  )
   if (json) outputJson(report)
   else {
     console.log(`第 ${chapter} 章阅读效果审查（仅建议，不阻断定稿）`)
@@ -1344,11 +1681,61 @@ async function commandEffectReview(root: string, parsed: Parsed, json: boolean):
   return 0
 }
 
+async function warnIfFrozenStagesInvalidated(root: string, chapter: number): Promise<string | null> {
+  const draft = await readDraft(root, chapter).catch(() => null)
+  if (!draft) return null
+  const currentHash = draftHash(draft)
+  const active: string[] = []
+  const extraction = await loadStage<ExtractionReport>(root, 'extraction', chapter).catch(() => null)
+  const audit = await loadStage<CoverageAudit>(root, 'audit', chapter).catch(() => null)
+  const review = await loadStage<ReviewReport>(root, 'review', chapter).catch(() => null)
+  if (extraction?.draftHash === currentHash) active.push('extract')
+  if (audit?.draftHash === currentHash) active.push('audit')
+  if (review?.draftHash === currentHash) active.push('review')
+  if (active.length === 0) return null
+  return `提示：第 ${chapter} 章已有绑定当前草稿的 ${active.join('/')} 报告；合并改稿后这些可信阶段将失效需重跑。建议在打磨段（effect-review）集中完成改稿后再进入 extract/audit/review。`
+}
+
+async function commandKeyCandidates(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const chapter = parseChapter(parsed.positionals[0])
+  const contract = await loadContract(root, chapter)
+  await requirePassingContractCheck(root, contract)
+  const rawFocus = optionalString(parsed, 'focus')
+  const focuses = rawFocus
+    ? rawFocus
+        .split(',')
+        .map(item => item.trim())
+        .filter((item): item is KeyFocus => (KEY_FOCUS as readonly string[]).includes(item))
+    : undefined
+  if (rawFocus && (!focuses || focuses.length === 0)) {
+    throw usageError(`--focus 只支持 ${KEY_FOCUS.join(',')}`)
+  }
+  const config = await loadModelConfig(root)
+  const groups = await generateKeyCandidates(
+    root,
+    chapter,
+    contract,
+    config,
+    new AbortController().signal,
+    focuses ? { focuses } : {},
+  )
+  if (json) outputJson({ ok: true, chapter, keyCandidates: groups })
+  else {
+    console.log(`已生成第 ${chapter} 章关键片段候选：${groups.length} 组`)
+    for (const group of groups) {
+      console.log(`- ${group.focus}（${group.paragraphIds.join(',')}）：${group.revisionIds.join('、')}`)
+    }
+  }
+  return 0
+}
+
 async function commandRevise(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const chapter = parseChapter(parsed.positionals[0])
   const rawFindings = optionalString(parsed, 'findings')
   const findingIds = (rawFindings ?? '').split(',').map(item => item.trim()).filter(Boolean)
   if (findingIds.length === 0) throw usageError('请提供 --findings <id,...>')
+  const frozenWarning = await warnIfFrozenStagesInvalidated(root, chapter)
+  if (frozenWarning) console.error(frozenWarning)
   const config = await loadModelConfig(root)
   const result = await reviseChapter(root, chapter, findingIds, config, new AbortController().signal)
   if (json) outputJson({
@@ -1382,6 +1769,8 @@ async function commandMerge(root: string, parsed: Parsed, json: boolean): Promis
       choices[paragraphId] = value
     }
   }
+  const frozenWarning = await warnIfFrozenStagesInvalidated(root, chapter)
+  if (frozenWarning) console.error(frozenWarning)
   const report = await mergeRevision(root, chapter, revisionId, choices)
   if (json) outputJson({ ok: report.status === 'merged', exitCode: report.status === 'merged' ? 0 : 3, report })
   else if (report.status === 'merged') console.log(`已合并修订 ${revisionId} 到草稿`)
@@ -1487,11 +1876,55 @@ async function commandBeats(root: string, parsed: Parsed, json: boolean): Promis
   }
 }
 
+async function commandSegments(root: string, parsed: Parsed, json: boolean): Promise<number> {
+  const action = parsed.positionals[0]
+  const chapter = parseChapter(parsed.positionals[1])
+  switch (action) {
+    case 'plan': {
+      const plan = await planSegments(root, chapter)
+      if (json) outputJson(plan)
+      else console.log(`已生成第 ${chapter} 章分段建议（${plan.segments.length} 段）；请检查后执行 weave segments approve ${chapter}`)
+      return 0
+    }
+    case 'set': {
+      const file = requiredString(parsed, 'file')
+      const raw = JSON.parse(await readFile(path.resolve(file), 'utf8')) as unknown
+      const plan = await saveSegmentPlan(root, chapter, raw)
+      if (json) outputJson(plan)
+      else console.log(`已保存第 ${chapter} 章分段计划；请执行 weave segments approve ${chapter}`)
+      return 0
+    }
+    case 'show': {
+      const view = await readSegmentPlan(root, chapter)
+      if (json) outputJson(view)
+      else if (view.status === 'missing') console.log(`第 ${chapter} 章没有分段计划`)
+      else console.log(JSON.stringify(view, null, 2))
+      return 0
+    }
+    case 'approve': {
+      const plan = await approveSegmentPlan(root, chapter)
+      if (json) outputJson(plan)
+      else console.log(`已批准第 ${chapter} 章分段计划（${plan.segments.length} 段）`)
+      return 0
+    }
+    case 'skip': {
+      const plan = await skipSegmentPlan(root, chapter)
+      if (json) outputJson(plan)
+      else console.log(`已跳过第 ${chapter} 章分段计划；默认 prose-first 可继续使用`)
+      return 0
+    }
+    default:
+      throw usageError('用法：weave segments plan|show|set|approve|skip <chapter> [--file <path>]')
+  }
+}
+
 async function commandWrite(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const chapter = parseChapter(parsed.positionals[0])
   const events = parsed.flags.events === true
   const strategy = String(parsed.flags.strategy ?? 'prose-first')
-  if (strategy !== 'prose-first' && strategy !== 'beat-first') throw usageError('--strategy 只能是 prose-first 或 beat-first')
+  if (strategy !== 'prose-first' && strategy !== 'beat-first' && strategy !== 'segmented') {
+    throw usageError('--strategy 只能是 prose-first、beat-first 或 segmented')
+  }
   const draftingStrategy = strategy as DraftingStrategy
   const authorSamplesValue = String(parsed.flags['author-samples'] ?? 'scene')
   if (!['scene', 'legacy', 'off'].includes(authorSamplesValue)) throw usageError('--author-samples 只能是 scene、legacy 或 off')
@@ -1534,6 +1967,7 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
         renderer: result.renderer,
         draftingStrategy: result.draftingStrategy,
         beatContentHash: result.beatContentHash,
+        segments: result.segments ?? [],
         sampleSelection: result.sampleSelection,
         estimatedTokens: result.estimatedTokens,
         included: result.included,
@@ -1823,6 +2257,9 @@ async function commandDoctor(root: string, json: boolean): Promise<number> {
   if (json) outputJson({ ...result, ok: result.ok })
   else {
     console.log(result.ok ? `体检通过（${result.checkedCommits} 个提交）` : '体检失败：')
+    if (result.budget) {
+      console.log(`模型：${result.budget.model}；有效窗口 ${result.budget.effectiveWindow}；可用输入 ${result.budget.capacityTokens}`)
+    }
     for (const error of result.errors) console.error(`- ${error}`)
     for (const warning of result.warnings) console.warn(`- 警告：${warning}`)
   }
@@ -1832,31 +2269,38 @@ async function commandDoctor(root: string, json: boolean): Promise<number> {
 function parseArgs(argv: string[]): Parsed {
   const positionals: string[] = []
   const flags: Record<string, string | true> = {}
+  const lists: Record<string, string[]> = {}
+  const setFlag = (key: string, value: string | true): void => {
+    flags[key] = value
+    if (typeof value === 'string' && MULTI_FLAGS.has(key)) {
+      (lists[key] ??= []).push(value)
+    }
+  }
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]!
     if (token.startsWith('--')) {
       const [rawKey, inline] = token.slice(2).split('=', 2)
       if (!rawKey) throw usageError(`无效参数：${token}`)
       if (inline !== undefined) {
-        flags[rawKey] = inline
+        setFlag(rawKey, inline)
         continue
       }
       if (BOOLEAN_FLAGS.has(rawKey)) {
-        flags[rawKey] = true
+        setFlag(rawKey, true)
         continue
       }
       const next = argv[index + 1]
       if (next !== undefined && !next.startsWith('--')) {
-        flags[rawKey] = next
+        setFlag(rawKey, next)
         index += 1
       } else {
-        flags[rawKey] = true
+        setFlag(rawKey, true)
       }
     } else {
       positionals.push(token)
     }
   }
-  return { positionals, flags }
+  return { positionals, flags, lists }
 }
 
 function parseWorkflow(parsed: Parsed): 1 | 2 | undefined {
@@ -1895,6 +2339,15 @@ function optionalNumber(parsed: Parsed, key: string): number | undefined {
   return number
 }
 
+function optionalFloat(parsed: Parsed, key: string): number | undefined {
+  const value = parsed.flags[key]
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') throw usageError(`--${key} 需要一个数字`)
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0) throw usageError(`--${key} 需要大于 0`)
+  return number
+}
+
 function outputJson(value: unknown): void {
   console.log(JSON.stringify(value, null, 2))
 }
@@ -1903,7 +2356,12 @@ function printHelp(): void {
   console.log(`Weave 0.1.0
 
 用法：
-  weave init [dir] --title <name> --model <model> --base-url <url> [--snapshot-every <n>] [--workflow p0|p05] [--platform fanqie|qidian|generic]
+  weave init [dir] --title <name> --model <model> --base-url <url> [--context-window <n>] [--context-budget <n>] [--max-output <n>] [--snapshot-every <n>] [--workflow p0|p05] [--platform fanqie|qidian|generic]
+  weave config show|set [--context-window <n>] [--context-budget <n>] [--max-output <n>] [--safety-margin <n>] [--chars-per-token <n>]|migrate
+  weave idea add "<正文>" [--title <text>] [--tag <tag>]... [--scope chapter:N|volume:N|book|character:名字|world|mechanic] [--priority high|normal|low] [--spoiler none|hint|reveal] [--after <chapter>]
+  weave idea list [--status inbox|promoted|archived] [--tag <tag>] | show <id> | edit <id> [--title <text>] [--body <text>] ... | archive <id>
+  weave idea promote <id> --to plan|contract|outline|canon|promise [--target <path>] | apply <id> | stale | feedback --chapter <n>
+  weave context --chapter <n> [--show-ideas] [--include-book-ideas]
   weave status
   weave contract show|set <chapter> [--file <path>]
   weave contract check <chapter> | --all
@@ -1920,7 +2378,7 @@ function printHelp(): void {
   weave hotspot import <file> --captured-at <date> --ranking <name> [--metric <name>] [--channel <name>] [--id <id>]
   weave hotspot list|show <snapshotId>|compare <previousId> <currentId>|candidates <snapshotId>
   weave publish build|validate <file>
-  weave external inspect [--component-root <dir>] | test-deslop <fixture> [--component-root <dir>] [--disabled]
+  weave external inspect --component-root <dir> | test-deslop <fixture> --component-root <dir> [--disabled]
   weave outline status|generate <from> [--count <n>]|show|check|apply|approve <chapter>
   weave method list|show <id>|candidates|approve <id>|route <chapter> [--platform long-form|short-form|generic|qidian|fanqie] [--max-tokens <n>]
   weave method history <chapter>
@@ -1934,9 +2392,10 @@ function printHelp(): void {
   weave timeline series
   weave check <chapter>
   weave extract <chapter>
-  weave audit <chapter>
+  weave audit <chapter> | decide <chapter> --missed <id> --decision rerun|dismiss --reason <text>
+  weave key-candidates <chapter> [--focus opening,choice,climax,ending]
   weave review <chapter> [--waive-warnings --waive-reason <text>]
-  weave effect-review <chapter>
+  weave effect-review <chapter> [--external-deslop-root <dir>]
   weave revise <chapter> --findings <id,...>
   weave merge <chapter> --revision <id> [--choices p001=base|revision|manual]
   weave recheck <chapter>
@@ -1945,7 +2404,9 @@ function printHelp(): void {
   weave waivers list|revoke <waiverId>
   weave timeline <chapter>
   weave beats generate|set|show|approve|skip <chapter> [--file <path>] [--benchmark]
-  weave write <chapter> [--json|--events] [--key] [--strategy prose-first|beat-first] [--author-samples scene|legacy|off] [--benchmark] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
+  weave segments plan|show|set|approve|skip <chapter> [--file <path>]
+  weave write <chapter> [--json|--events] [--key] [--strategy prose-first|beat-first|segmented] [--author-samples scene|legacy|off] [--benchmark] [--cancel-after-ms <n>] [--resume [runId] | --from-run <runId>]
+           （segmented 需先批准 beats 与 segments，是显式 opt-in，不是默认路径）
   weave amend <chapter> [--force]
   weave finalize <chapter>
   weave impact <chapter>

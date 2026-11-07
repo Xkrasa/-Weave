@@ -3,8 +3,10 @@ import type { EvidenceSpan } from './stage-types.ts'
 import { completeJsonObject } from './model.ts'
 import { resolveTaskConfig } from './model-policy.ts'
 import { appendUsage } from './usage.ts'
-import { draftHash, resolveEvidence, saveStage } from './stages.ts'
-import { validationError } from './errors.ts'
+import { draftHash, readDraft, resolveEvidence, saveStage } from './stages.ts'
+import { conflictError, validationError } from './errors.ts'
+import { draftPath } from './ledger.ts'
+import { runExternalDeslop } from './external-components.ts'
 import { collectLoopState } from './story-ledger.ts'
 import { loadExpressionLintConfig, runExpressionLint } from './expression-lint.ts'
 import { readerPromiseFindings } from './reader-promises.ts'
@@ -18,10 +20,12 @@ export interface EffectFinding {
   description: string
   quote?: string
   evidence?: EvidenceSpan
-  source: 'model' | 'lint'
+  source: 'model' | 'lint' | 'external'
   status: 'open' | 'planned' | 'applied' | 'verified' | 'ignored' | 'waived'
   ruleId?: string
   ruleVersion?: number
+  upstreamSeverity?: string
+  review?: string
   revisionId?: string
   paragraphIds?: string[]
   ignoreReason?: string
@@ -53,6 +57,10 @@ const SYSTEM_PROMPT = [
 
 const DIMENSIONS = '读者期待 | 情绪兑现 | 场景张力 | 人物声音 | 信息释放 | 环境与描写 | 章末追读'
 
+export interface EffectReviewOptions {
+  externalDeslopRoot?: string
+}
+
 export async function runEffectReview(
   root: string,
   chapter: number,
@@ -60,6 +68,7 @@ export async function runEffectReview(
   draft: string,
   config: ModelConfig,
   signal: AbortSignal,
+  options: EffectReviewOptions = {},
 ): Promise<EffectReviewReport> {
   const taskConfig = resolveTaskConfig(config, 'effectReview')
   const model = taskConfig.model
@@ -68,6 +77,9 @@ export async function runEffectReview(
     ? platformReviewPrompt(await loadPlatformProfile(root, 'fanqie'))
     : ''
   const lint = await lintFindings(root, chapter, contract, draft)
+  const external = options.externalDeslopRoot
+    ? await externalDeslopFindings(root, chapter, draft, options.externalDeslopRoot)
+    : []
   const prompt = [
     `第 ${chapter} 章合同：`,
     JSON.stringify(contract, null, 2),
@@ -139,13 +151,53 @@ export async function runEffectReview(
     draftHash: draftHash(draft),
     createdAt: new Date().toISOString(),
     summary,
-    findings: [...lint, ...findings],
+    findings: [...lint, ...external, ...findings],
     model,
     usage: result.usage,
     passed: true,
   }
   await saveStage(root, 'effect-review', chapter, report)
   return report
+}
+
+async function externalDeslopFindings(
+  root: string,
+  chapter: number,
+  draft: string,
+  componentRoot: string,
+): Promise<EffectFinding[]> {
+  const input = draftPath(root, chapter)
+  const onDisk = await readDraft(root, chapter)
+  if (draftHash(onDisk) !== draftHash(draft)) {
+    throw conflictError(`第 ${chapter} 章外部组件输入与当前审查草稿不一致`)
+  }
+  const result = await runExternalDeslop(componentRoot, input)
+  if (result.fixtureHashBefore !== result.fixtureHashAfter) {
+    throw conflictError('外部 story-deslop 执行期间草稿发生变化，本次效果审查无效')
+  }
+  return result.findings.map((match, index) => {
+    const finding: EffectFinding = {
+      findingId: `e-external-${index + 1}`,
+      dimension: match.dimension,
+      severity: match.severity,
+      description: match.description,
+      source: 'external',
+      status: 'open',
+      ruleId: match.ruleId,
+      ruleVersion: match.ruleVersion,
+      upstreamSeverity: match.upstreamSeverity,
+      ...(match.review ? { review: match.review } : {}),
+      ...(match.quote ? { quote: match.quote } : {}),
+    }
+    if (match.quote) {
+      try {
+        finding.evidence = resolveEvidence(draft, chapter, match.quote)
+      } catch {
+        // Upstream excerpts are not reliable byte spans; keep only the soft finding.
+      }
+    }
+    return finding
+  })
 }
 
 const ENV_DUMP_WORDS = [

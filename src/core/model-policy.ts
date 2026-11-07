@@ -8,6 +8,7 @@ export interface TaskModelOverride {
   temperature?: number
   maxOutputTokens?: number
   contextWindow?: number
+  contextBudgetTokens?: number
 }
 
 export const TASK_NAMES: TaskName[] = [
@@ -28,6 +29,7 @@ export function resolveTaskConfig(config: ModelConfig, task: TaskName): ModelCon
     temperature: override.temperature ?? config.temperature,
     maxOutputTokens: override.maxOutputTokens ?? config.maxOutputTokens,
     contextWindow: override.contextWindow ?? config.contextWindow,
+    contextBudgetTokens: override.contextBudgetTokens ?? config.contextBudgetTokens,
   }
 }
 

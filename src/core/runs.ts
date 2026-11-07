@@ -84,7 +84,8 @@ export async function findRecoverableRun(root: string, chapter: number): Promise
     if (!run) continue
     if (run.chapter !== chapter) continue
     if (run.status !== 'failed' && run.status !== 'cancelled') continue
-    if (!run.partialPath) continue
+    // Segmented runs keep recoverable work at segment boundaries even before a partial exists.
+    if (!run.partialPath && run.draftingStrategy !== 'segmented') continue
     candidates.push(run)
   }
   candidates.sort((a, b) => (b.startedAt ?? '').localeCompare(a.startedAt ?? ''))

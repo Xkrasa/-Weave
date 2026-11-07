@@ -2,7 +2,7 @@
 id: reader-effect-review
 type: task-spec
 title: 增加独立的阅读效果审查轨道
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - effect-evaluation-harness
@@ -48,6 +48,8 @@ ReaderPromise/Payoff 语义建立后，效果审查可以读取其软规划，�
 效果审查允许独立配置 `effectReviewModel`，未配置时沿用审查模型。输入可包含作者样本、风格、合同和当前卷软目标；输出不得修改正文。
 
 warning/info 可沿用现有豁免、忽略和审计机制。豁免只降低同类建议噪声，不表示问题在客观上不存在。
+
+外部 `story-deslop` 是默认关闭的可选参考源。只有显式提供 `--external-deslop-root <dir>` 才执行固定 commit 和哈希校验后的脚本；结果使用 `source: external` 与独立 finding ID，重新定位当前草稿证据，上游 blocking 仍降为 warning。组件失败或输入完整性异常会明确失败，不静默转为空结果。
 
 ## 验收
 

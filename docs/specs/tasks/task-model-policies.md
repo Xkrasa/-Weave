@@ -2,7 +2,7 @@
 id: task-model-policies
 type: task-spec
 title: 按创作任务配置模型与结构化输出
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - effect-evaluation-harness

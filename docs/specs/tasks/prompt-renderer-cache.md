@@ -2,7 +2,7 @@
 id: prompt-renderer-cache
 type: task-spec
 title: 实验任务书渲染与缓存友好分层
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - effect-evaluation-harness

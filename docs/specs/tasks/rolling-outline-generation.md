@@ -2,7 +2,7 @@
 id: rolling-outline-generation
 type: task-spec
 title: 生成可批准的滚动章纲与合同
-status: draft
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - story-planning-model

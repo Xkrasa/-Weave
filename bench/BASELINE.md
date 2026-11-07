@@ -148,6 +148,50 @@ WEAVE_API_KEY=... node scripts/benchmark.ts run \
 
 即使触发条件成立，本环境也无法完成 embedding 的真实验证；引入前必须先确认可用的 embedding 服务。
 
+## 分段生成放量实验（设计已定，真实数据未采集）
+
+2026-11-07 新增固定三组样本，用于回答“分段是否更少截断、更少门禁失败、是否值得多花成本”：
+
+| 组 | seed | 目标字数 | 计划段数 | 说明 |
+| --- | --- | --- | --- | --- |
+| S | `segmented-rollout-s` | 3000 | 2 | 普通章 |
+| M | `segmented-rollout-m` | 6000 | 3 | 长章 |
+| L | `segmented-rollout-l` | 9000 | 5 | 压力章 |
+
+固定条件：同一合同、同一已批准节拍、同一模型与温度；只改变 `draftingStrategy`。每组至少 3 次，记录中位数与失败样本。
+
+一条命令复跑（先 prose-first，再 segmented，最后用 `pairs`/`score` 做盲评）：
+
+```bash
+WEAVE_API_KEY=... node scripts/benchmark.ts run \
+  --suite segmented-rollout --strategy prose-first \
+  --mode real --base-url http://127.0.0.1:7863/v1 \
+  --model cn:glm-5.3 --timeout-ms 180000 --max-output 8192 \
+  --out bench/runs/segmented-rollout-prose
+
+WEAVE_API_KEY=... node scripts/benchmark.ts run \
+  --suite segmented-rollout --strategy segmented \
+  --mode real --base-url http://127.0.0.1:7863/v1 \
+  --model cn:glm-5.3 --timeout-ms 180000 --max-output 8192 \
+  --out bench/runs/segmented-rollout-segmented
+```
+
+当前状态：
+
+- 已用 fake 模式跑通三组（2/3/5 段、0 失败），只证明审批流、分段计划、写入与报告接线；**不是效果证据**。
+- 真实模型运行、门禁统计、盲评均**未采集**。
+- 因此放量裁决为：**保持显式 `--strategy segmented` opt-in，不改为默认路径**。
+
+放量门槛（同时满足才升级）：
+
+1. L 组完成率 ≥95%；
+2. 段级首次通过率 ≥90%；
+3. 合并稿门禁通过率不低于单次路径；
+4. 总成本 ≤单次路径的 1.25 倍；
+5. 至少 1 轮盲评留痕，且没有“分段明显更差”的一致结论。
+
+报告中的 `segments` / `failed` 来自写入返回的真实分段状态；`usage` 来自真实模型返回；门禁数据需在真实运行后从阶段报告中补齐。报告同时区分 `mode: fake` 与 `mode: real`，fake 不得用于阅读效果结论。
+
 ## 限制
 
 - 单模型、单种子、单次采样；不足以比较模型或 prompt 变体。

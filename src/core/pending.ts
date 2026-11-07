@@ -1,17 +1,20 @@
 import path from 'node:path'
 import { appendFile, mkdir } from 'node:fs/promises'
-import type { ExtractionReport, PendingRecord } from './stage-types.ts'
+import type { AuditMissedItem, CoverageAudit, ExtractionReport, PendingRecord } from './stage-types.ts'
+import { objectHash } from './hash.ts'
 import type { LedgerFact } from './types.ts'
 import { atomicWriteJson, readJsonIfExists } from './io.ts'
 import { projectPaths } from './project.ts'
 import { loadStage, saveStage } from './stages.ts'
 import { validationError } from './errors.ts'
 
-export type PendingChoice = 'text' | 'ledger'
+export type PendingChoice = 'text' | 'ledger' | 'dismiss' | 'rerun' | 'promote'
+export type PendingKind = 'ledger-conflict' | 'audit-missed' | 'idea-promotion'
 
 export interface PendingDecision {
   decisionId: string
   pendingId: string
+  kind?: PendingKind
   chapter: number
   subject: string
   choice: PendingChoice
@@ -125,4 +128,91 @@ export async function decidePending(
   await saveDecisions(root, decisions)
   await audit(root, choice, decision)
   return decision
+}
+
+/**
+ * Idea promotion decisions share the pending decision log, but are not tied to an
+ * extraction stage: a promotion can happen before the chapter is ever generated.
+ * `chapter` is 0 because the log field is chapter-bound for ledger/audit records.
+ */
+export async function recordIdeaPromotionDecision(
+  root: string,
+  input: { ideaId: string; targetPath: string; choice: 'promote' | 'dismiss'; reason: string },
+): Promise<PendingDecision> {
+  if (!input.reason.trim()) throw validationError('晋升裁决必须提供理由')
+  const decisions = await loadPendingDecisions(root)
+  const decision: PendingDecision = {
+    decisionId: `decision-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    pendingId: `idea-promotion-${input.ideaId}`,
+    kind: 'idea-promotion',
+    chapter: 0,
+    subject: input.targetPath,
+    choice: input.choice,
+    reason: input.reason.trim(),
+    createdAt: new Date().toISOString(),
+  }
+  decisions.push(decision)
+  await saveDecisions(root, decisions)
+  await audit(root, `idea-${input.choice}`, decision)
+  return decision
+}
+
+export function missedFingerprint(chapter: number, item: { summary: string; quote: string }): string {  return `missed-${chapter}-${objectHash({ summary: item.summary.trim(), quote: item.quote.trim() }).slice(0, 10)}`
+}
+
+/** 某章已驳回（dismiss）的第二遍审计遗漏项 ID 集合。 */
+export async function dismissedAuditMissedIds(root: string, chapter: number): Promise<Set<string>> {
+  const dismissed = new Set<string>()
+  for (const decision of await loadPendingDecisions(root)) {
+    if (decision.chapter === chapter && decision.kind === 'audit-missed' && decision.choice === 'dismiss') {
+      dismissed.add(decision.pendingId)
+    }
+  }
+  return dismissed
+}
+
+export async function decideAuditMissed(
+  root: string,
+  chapter: number,
+  missedId: string,
+  choice: 'dismiss' | 'rerun',
+  reason: string,
+): Promise<{ decision: PendingDecision; item: AuditMissedItem; auditReport: CoverageAudit }> {
+  const report = await loadStage<CoverageAudit>(root, 'audit', chapter)
+  if (!report) throw validationError(`第 ${chapter} 章没有覆盖审计报告`)
+  const items = report.secondPass.missedItems ?? []
+  const item = items.find(entry => entry.missedId === missedId)
+  if (!item) throw validationError(`未找到第二遍审计遗漏项：${missedId}`)
+  if (!reason.trim()) throw validationError('裁决必须提供理由')
+  const decisions = await loadPendingDecisions(root)
+  const existing = decisions.find(
+    entry => entry.chapter === chapter && entry.kind === 'audit-missed' && entry.pendingId === missedId && entry.choice === 'dismiss',
+  )
+  const decision: PendingDecision = existing ?? {
+    decisionId: `decision-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    pendingId: missedId,
+    kind: 'audit-missed',
+    chapter,
+    subject: item.summary,
+    choice,
+    reason: reason.trim(),
+    createdAt: new Date().toISOString(),
+  }
+  if (!existing) {
+    decisions.push(decision)
+    await saveDecisions(root, decisions)
+    await audit(root, `audit-${choice}`, decision)
+  }
+  if (choice === 'dismiss') {
+    const dismissed = await dismissedAuditMissedIds(root, chapter)
+    const remaining = items.filter(entry => !dismissed.has(entry.missedId))
+    report.secondPass.missed = remaining.map(entry => entry.summary)
+    report.passed =
+      report.contract.missed.length === 0
+      && (report.dimensions?.missed.length ?? 0) === 0
+      && report.timeline.passed
+      && remaining.length === 0
+    await saveStage(root, 'audit', chapter, report)
+  }
+  return { decision, item, auditReport: report }
 }
