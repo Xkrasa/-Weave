@@ -44,7 +44,11 @@ export function assembleContext(
   contract: ChapterContract,
   materials: Material[],
   config: ModelConfig,
-  options: { beatText?: string } = {},
+  options: {
+    beatText?: string
+    /** 材料收集阶段判定未到披露章的条目；装配只如实上报，不参与判断与预算。 */
+    withheld?: Array<{ sourceId: string; reason: 'not-yet-revealed' }>
+  } = {},
 ): { decision: MaterialDecision; context: AssembledContext | null } {
   const renderer = renderMode(config)
   const contractText = `${JSON.stringify(contract, null, 2)}${options.beatText
@@ -148,7 +152,7 @@ export function assembleContext(
       renderer,
       included: ordered,
       omitted,
-      withheld: [],
+      withheld: options.withheld ?? [],
       degraded: [],
       estimatedTokens: usedTokens,
     },

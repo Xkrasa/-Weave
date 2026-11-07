@@ -940,6 +940,69 @@ test('extraction rejects fabricated quotes instead of passing silently', async (
   }
 })
 
+test('canon reveal withholding keeps unrevealed materials out of the prompt', async () => {
+  const model = new FakeModel(['第一章正文：林岚在码头核对账本，记下缺页数目。', '第二章正文：林岚顺着缺页查到旧仓。'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    await setCharacters(dir, [{
+      name: '林岚',
+      status: 'alive',
+      introducedIn: 1,
+      knows: [{ fact: '账本缺页', fromChapter: 1 }],
+    }, {
+      name: '陈九',
+      status: 'alive',
+      introducedIn: 1,
+      voice: '说话带盐城口音',
+    }])
+    await setContract(dir, 1, { characters: ['林岚', '陈九'] })
+    await writeFile(path.join(dir, 'canon', 'world.md'), '世界设定：雾港深处藏着第七盏灯的坐标。\n')
+    await writeFile(
+      path.join(dir, 'canon', 'reveals.json'),
+      `${JSON.stringify({ 'canon:world.md': 2, 'canon:characters:陈九': 3 }, null, 2)}\n`,
+    )
+    const checked = await checkContract(dir, 1)
+    assert.equal(checked.code, 0, checked.stderr)
+
+    const first = await runCli(dir, ['write', '1', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(first.code, 0, first.stderr)
+    const firstPayload = parseJson<{ withheld: Array<{ sourceId: string; reason: string }> }>(first.stdout)
+    assert.deepEqual(firstPayload.withheld, [
+      { sourceId: 'canon:world.md', reason: 'not-yet-revealed' },
+      { sourceId: 'canon:characters:陈九', reason: 'not-yet-revealed' },
+    ])
+    const firstBody = JSON.stringify(model.requests[0])
+    assert.ok(!firstBody.includes('第七盏灯'), 'unrevealed world.md must stay out of the prompt')
+    assert.ok(!firstBody.includes('盐城口音'), 'unrevealed character profile must stay out of the prompt')
+
+    const status = parseJson<{ disclosure?: { chapter: number; withheld: Array<{ sourceId: string; revealChapter: number }> } }>(
+      (await runCli(dir, ['status', '--json'])).stdout,
+    )
+    assert.equal(status.disclosure?.chapter, 1)
+    assert.deepEqual(
+      status.disclosure?.withheld.map(item => item.sourceId),
+      ['canon:world.md', 'canon:characters:陈九'],
+    )
+
+    const finalized = await runCli(dir, ['finalize', '1', '--json'])
+    assert.equal(finalized.code, 0, finalized.stderr)
+    await setContract(dir, 2, { characters: ['林岚', '陈九'] })
+    const checked2 = await checkContract(dir, 2)
+    assert.equal(checked2.code, 0, checked2.stderr)
+    const second = await runCli(dir, ['write', '2', '--json'], { WEAVE_API_KEY: SECRET })
+    assert.equal(second.code, 0, second.stderr)
+    const secondPayload = parseJson<{ withheld: Array<{ sourceId: string }> }>(second.stdout)
+    assert.deepEqual(secondPayload.withheld.map(item => item.sourceId), ['canon:characters:陈九'])
+    const secondBody = JSON.stringify(model.requests[model.requests.length - 1])
+    assert.ok(secondBody.includes('第七盏灯'), 'world.md must enter the prompt once revealed')
+    assert.ok(!secondBody.includes('盐城口音'))
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 async function prepareP05(model: FakeModel): Promise<string> {
   const dir = await initBook(model.baseUrl, [], 'p05')
   await contract1(dir)

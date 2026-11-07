@@ -156,7 +156,7 @@ async function main(): Promise<number> {
 
   switch (command) {
     case 'status':
-      return commandStatus(root, json)
+      return commandStatus(root, parsed, json)
     case 'contract':
       return commandContract(root, parsed, json)
     case 'waive':
@@ -277,7 +277,7 @@ async function commandInit(parsed: Parsed, json: boolean): Promise<number> {
   return 0
 }
 
-async function commandStatus(root: string, json: boolean): Promise<number> {
+async function commandStatus(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const status = await projectStatus(root)
   if (json) outputJson({ ok: true, ...status })
   else {
@@ -293,6 +293,17 @@ async function commandStatus(root: string, json: boolean): Promise<number> {
     console.log(`未处理影响：${status.pendingImpacts}`)
     console.log(`检索索引：${status.searchIndex.status} @ ${status.searchIndex.mainlineRevision ?? '无'}`)
     console.log(`长期记忆：${status.memory.current ? 'current' : 'stale'} @ 第 ${status.memory.throughChapter} 章`)
+    if (status.disclosure) {
+      const list = status.disclosure.withheld
+        .map(item => `${item.sourceId}（第 ${item.revealChapter} 章起开放）`)
+        .join('、')
+      console.log(`第 ${status.disclosure.chapter} 章未开放条目：${list}`)
+      if (parsed.flags['show-withheld'] === true) {
+        for (const item of status.disclosure.withheld) {
+          console.log(`  ${item.sourceId} 预览：${item.excerpt}…`)
+        }
+      }
+    }
   }
   return 0
 }
@@ -1392,6 +1403,8 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
         estimatedTokens: result.estimatedTokens,
         included: result.included,
         omitted: result.omitted,
+        withheld: result.withheld,
+        degraded: result.degraded,
         usage: result.run.usage ?? {},
         attempts: result.run.attempts ?? [],
         recovery: result.run.recovery,
@@ -1402,6 +1415,12 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
       console.log(`运行：${result.run.runId}；估算输入 token：${result.estimatedTokens}`)
       if (result.omitted.length > 0) {
         console.log(`省略材料：${result.omitted.map(item => `${item.sourceId}(${item.reason})`).join('、')}`)
+      }
+      if (result.withheld.length > 0) {
+        console.log(`未披露材料（披露未到，非省略）：${result.withheld.map(item => item.sourceId).join('、')}`)
+      }
+      if (result.degraded.length > 0) {
+        console.log(`降级材料：${result.degraded.map(item => `${item.sourceId}(${item.reason})`).join('、')}`)
       }
       for (const group of result.keyCandidates) {
         console.log(`关键段落候选（${group.focus} / ${group.paragraphId}）：${group.revisionIds.join('、')}`)

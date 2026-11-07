@@ -8,6 +8,7 @@ import { loadDraftMeta } from './runs.ts'
 import { textAtSpan } from './stages.ts'
 import { assertFinalIntegrity, currentCommit, finalPath, listCommits, readCommit, readMainline } from './ledger.ts'
 import { loadContract } from './contract.ts'
+import { withheldForChapter } from './materials.ts'
 import { impactSummary, pendingImpactItems } from './impact.ts'
 import {
   assertProjectionCurrent,
@@ -54,6 +55,11 @@ export interface ProjectStatus {
   pendingImpacts: number
   searchIndex: Awaited<ReturnType<typeof searchIndexHealth>>
   memory: { current: boolean; throughChapter: number; mainlineRevision: number | null }
+  /** 下一待写章仍被披露控制扣留的 canon 条目；无合同或无扣留时不出现。 */
+  disclosure?: {
+    chapter: number
+    withheld: Array<{ sourceId: string; revealChapter: number; excerpt: string }>
+  }
 }
 
 export async function projectStatus(root: string): Promise<ProjectStatus> {
@@ -86,6 +92,15 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
     if (Number.isSafeInteger(number) && number > 0) drafts.push(number)
   }
   const impacts = await impactSummary(root)
+  const nextChapter = (chapters[chapters.length - 1]?.chapter ?? 0) + 1
+  let disclosure: ProjectStatus['disclosure']
+  try {
+    const nextContract = await loadContract(root, nextChapter)
+    const withheld = await withheldForChapter(root, nextContract)
+    if (withheld.length > 0) disclosure = { chapter: nextChapter, withheld }
+  } catch {
+    // 下一章没有合同时不展示披露控制；扣留与否由写作时的装配报告说了算
+  }
   return {
     root,
     title: project.title,
@@ -102,6 +117,7 @@ export async function projectStatus(root: string): Promise<ProjectStatus> {
     pendingImpacts: impacts.reduce((sum, item) => sum + item.pending, 0),
     searchIndex: await searchIndexHealth(root),
     memory: await memoryStatus(root),
+    ...(disclosure ? { disclosure } : {}),
   }
 }
 

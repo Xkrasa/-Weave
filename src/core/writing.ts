@@ -140,11 +140,12 @@ export async function writeChapter(
   const beatCandidate = draftingStrategy === 'beat-first'
     ? await requireApprovedBeats(root, chapter, { allowBenchmarkDraft: options.benchmark === true })
     : null
-  const { materials, sampleSelection, methodSelection } = await collectMaterialBundle(root, contract, {
+  const { materials, sampleSelection, methodSelection, withheld } = await collectMaterialBundle(root, contract, {
     authorSamples: options.authorSamples,
   })
   const assembled = assembleContext(contract, materials, modelConfig, {
     ...(beatCandidate ? { beatText: formatBeats(beatCandidate) } : {}),
+    withheld,
   })
   if (assembled.decision.decision !== 'ready') {
     throw validationError(assembled.decision.message, assembled.decision)

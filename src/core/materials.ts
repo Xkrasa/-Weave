@@ -8,7 +8,7 @@ import { currentCommit, finalPath, readMainline } from './ledger.ts'
 import { collectLedger, collectLoopState, effectiveBeliefs, effectiveFacts } from './story-ledger.ts'
 import { loadMethods, methodText, selectMethods } from './methods.ts'
 import { loadStyleConstitution, selectAuthorSamples, styleText } from './style.ts'
-import { conflictError } from './errors.ts'
+import { conflictError, validationError } from './errors.ts'
 import { rebuildSearchIndex, searchBook, searchIndexHealth } from './search.ts'
 import { listPlans, readApprovedPlan, type CharacterArc, type RollingPlan, type StoryPromise, type VolumeArc } from './planning.ts'
 import { ensureStoryMemory, povMemory } from './memory.ts'
@@ -26,6 +26,68 @@ interface ReferenceManifest {
   references?: ReferenceManifestEntry[]
 }
 
+export interface WithheldMaterial {
+  sourceId: string
+  reason: 'not-yet-revealed'
+}
+
+export interface DisclosureEntry {
+  sourceId: string
+  revealChapter: number
+  excerpt: string
+}
+
+const CANON_FILES = [
+  ['premise.md', '故事前提'],
+  ['world.md', '世界设定'],
+  ['style.md', '写作风格'],
+  ['prohibitions.md', '禁区与约束'],
+] as const
+
+/**
+ * canon/reveals.json：sourceId → 首次对生成开放的章号。
+ * 未到章号的 canon 材料不进上下文，也不得被预算逻辑当作省略处理。
+ */
+export async function loadReveals(root: string): Promise<Map<string, number>> {
+  const raw = await readJsonIfExists<Record<string, unknown>>(path.join(projectPaths(root).canon, 'reveals.json'))
+  const reveals = new Map<string, number>()
+  if (!raw) return reveals
+  for (const [sourceId, value] of Object.entries(raw)) {
+    if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+      throw validationError(`canon/reveals.json 中 ${sourceId} 的披露章号必须是正整数，收到 ${String(value)}`)
+    }
+    reveals.set(sourceId, value)
+  }
+  return reveals
+}
+
+/** 指定章仍未开放的 canon 条目（含内容预览）；供 status 对照装配报告。 */
+export async function withheldForChapter(
+  root: string,
+  contract: ChapterContract,
+): Promise<DisclosureEntry[]> {
+  const reveals = await loadReveals(root)
+  if (reveals.size === 0) return []
+  const entries: DisclosureEntry[] = []
+  for (const [file] of CANON_FILES) {
+    const sourceId = `canon:${file}`
+    const revealChapter = reveals.get(sourceId)
+    if (revealChapter === undefined || revealChapter <= contract.chapter) continue
+    const text = await readTextIfExists(path.join(projectPaths(root).canon, file))
+    if (!text?.trim()) continue
+    entries.push({ sourceId, revealChapter, excerpt: text.trim().replace(/\s+/g, ' ').slice(0, 160) })
+  }
+  const registry = await loadCharacters(root)
+  for (const character of registry.characters) {
+    if (!contract.characters.includes(character.name)) continue
+    const sourceId = `canon:characters:${character.name}`
+    const revealChapter = reveals.get(sourceId)
+    if (revealChapter === undefined || revealChapter <= contract.chapter) continue
+    entries.push({ sourceId, revealChapter, excerpt: `${character.name} 的人物档案整体未开放` })
+  }
+  return entries
+}
+
 export async function collectMaterialBundle(
   root: string,
   contract: ChapterContract,
@@ -34,24 +96,44 @@ export async function collectMaterialBundle(
   materials: Material[]
   methodSelection: import('./methods.ts').MethodSelection
   sampleSelection: import('./style.ts').AuthorSampleSelection
+  withheld: WithheldMaterial[]
 }> {
   const paths = projectPaths(root)
   const materials: Material[] = []
+  const withheld: WithheldMaterial[] = []
+  const reveals = await loadReveals(root)
 
-  for (const [file, label] of [
-    ['premise.md', '故事前提'],
-    ['world.md', '世界设定'],
-    ['style.md', '写作风格'],
-    ['prohibitions.md', '禁区与约束'],
-  ] as const) {
+  for (const [file, label] of CANON_FILES) {
     const text = await readTextIfExists(path.join(paths.canon, file))
-    if (text?.trim()) materials.push(material(`canon:${file}`, 'author', 'author', true, label, text))
+    if (!text?.trim()) continue
+    const sourceId = `canon:${file}`
+    const revealAt = reveals.get(sourceId)
+    if (revealAt !== undefined && revealAt > contract.chapter) {
+      withheld.push({ sourceId, reason: 'not-yet-revealed' })
+      continue
+    }
+    materials.push(material(sourceId, 'author', 'author', true, label, text))
   }
 
   const registry = await loadCharacters(root)
-  const relevant = registry.characters
-    .filter(character => contract.characters.includes(character.name))
-    .map(character => ({
+  const relevant: Array<{
+    name: string
+    status: string
+    introducedIn: number
+    deathChapter?: number
+    role?: string
+    traits?: string[]
+    voice?: string
+    desire?: string
+  }> = []
+  for (const character of registry.characters) {
+    if (!contract.characters.includes(character.name)) continue
+    const revealAt = reveals.get(`canon:characters:${character.name}`)
+    if (revealAt !== undefined && revealAt > contract.chapter) {
+      withheld.push({ sourceId: `canon:characters:${character.name}`, reason: 'not-yet-revealed' })
+      continue
+    }
+    relevant.push({
       name: character.name,
       status: character.status,
       introducedIn: character.introducedIn,
@@ -60,7 +142,8 @@ export async function collectMaterialBundle(
       ...(character.traits?.length ? { traits: character.traits } : {}),
       ...(character.voice ? { voice: character.voice } : {}),
       ...(character.desire ? { desire: character.desire } : {}),
-    }))
+    })
+  }
   if (relevant.length > 0) {
     materials.push(
       material(
@@ -291,7 +374,7 @@ export async function collectMaterialBundle(
     }
   }
 
-  return { materials, methodSelection, sampleSelection }
+  return { materials, methodSelection, sampleSelection, withheld }
 }
 
 export async function collectMaterials(

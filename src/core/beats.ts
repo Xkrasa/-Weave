@@ -6,7 +6,7 @@ import { conflictError, validationError } from './errors.ts'
 import { projectPaths } from './project.ts'
 import { loadContract, requirePassingContractCheck } from './contract.ts'
 import { assertOutlineApproved } from './outline.ts'
-import { collectMaterials } from './materials.ts'
+import { collectMaterialBundle } from './materials.ts'
 import { assembleContext } from './context.ts'
 import { completeJsonObject } from './model.ts'
 import { resolveTaskConfig } from './model-policy.ts'
@@ -70,8 +70,8 @@ export async function generateBeatCandidate(
   const contract = await loadContract(root, chapter)
   await requirePassingContractCheck(root, contract)
   const taskConfig = resolveTaskConfig(config, 'planning')
-  const materials = await collectMaterials(root, contract)
-  const assembled = assembleContext(contract, materials, taskConfig)
+  const { materials, withheld } = await collectMaterialBundle(root, contract)
+  const assembled = assembleContext(contract, materials, taskConfig, { withheld })
   if (assembled.decision.decision !== 'ready' || !assembled.context) {
     throw validationError(assembled.decision.decision === 'ready' ? '节拍材料装配失败' : assembled.decision.message)
   }
