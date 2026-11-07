@@ -40,9 +40,14 @@ async function project(options: { contract?: ChapterContract } = {}): Promise<{ 
   return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) }
 }
 
-async function promoted(dir: string, id: string): Promise<void> {
-  const proposal = await promoteIdea(dir, id, 'plan')
+/**
+ * Each idea promotes to its own canon candidate, so earlier promotions stay active:
+ * the shared `plan` target would change hash on every promotion and mark them stale.
+ */
+async function promoted(dir: string, id: string): Promise<string> {
+  const proposal = await promoteIdea(dir, id, 'canon')
   await applyPromotion(dir, id, proposal)
+  return proposal.targetPath
 }
 
 async function assemble(dir: string, options: { includeBookIdeas?: boolean } = {}) {
@@ -180,12 +185,11 @@ test('a stale promotion is excluded until the target is re-evaluated', async () 
   const { dir, cleanup } = await project()
   try {
     const idea = await captureIdea(dir, { body: '会被改掉目标的想法', scope: 'chapter:1' })
-    await promoted(dir, idea.id)
-    const planPath = path.join(dir, 'plans', 'idea-promotions', `${idea.id}.md`)
+    const targetPath = await promoted(dir, idea.id)
     const result = await assemble(dir)
     assert.ok(result.context!.included.some(item => item.sourceId === `idea:${idea.id}`))
     // Deleting the target makes the recorded hash unresolvable -> stale, so it is not injected.
-    await rm(planPath)
+    await rm(path.join(dir, targetPath))
     const stale = await assemble(dir)
     assert.equal(stale.context!.included.some(item => item.sourceId === `idea:${idea.id}`), false)
   } finally {
