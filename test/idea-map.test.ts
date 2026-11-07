@@ -43,7 +43,7 @@ async function project(): Promise<{ dir: string; cleanup: () => Promise<void> }>
   return { dir, cleanup: () => rm(dir, { recursive: true, force: true }) }
 }
 
-async function promote(dir: string, id: string, target: 'plan' | 'contract' = 'plan'): Promise<void> {
+async function promote(dir: string, id: string, target: 'plan' | 'contract' | 'canon' = 'canon'): Promise<void> {
   const proposal = await promoteIdea(dir, id, target)
   await applyPromotion(dir, id, proposal)
 }
@@ -98,8 +98,8 @@ test('the map counts promoted/used/unused per volume and never guesses usage', a
 
     const second = map.byVolume.find(bucket => bucket.volume === 2)!
     assert.equal(second.promoted, 2)
-    assert.equal(second.used, 1)
-    assert.equal(second.unused, 1)
+    assert.equal(second.used, 0)
+    assert.equal(second.unused, 2)
     assert.deepEqual(second.highPriorityUnused, [{ id: volume.id, title: volume.title }])
 
     assert.deepEqual(map.byCharacter, [{ name: '林岚', ideaIds: [character.id] }])
@@ -132,7 +132,7 @@ test('a changed promotion target reports stale and is not counted as unused cove
     await promote(dir, idea.id)
     assert.equal((await buildIdeaMap(dir)).totals.stale, 0)
 
-    const target = path.join(dir, 'plans', 'idea-promotions', `${idea.id}.md`)
+    const target = path.join(dir, 'canon', `${idea.id}.candidate.md`)
     await (await import('node:fs/promises')).writeFile(target, '作者手改候选\n')
     const map = await buildIdeaMap(dir)
     assert.equal(map.totals.stale, 1)

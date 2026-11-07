@@ -20,6 +20,7 @@ import {
 } from '../src/core/ideas.ts'
 import { initProject, projectPaths } from '../src/core/project.ts'
 import { hashText } from '../src/core/hash.ts'
+import { decidePending, listIdeaPromotionPendings } from '../src/core/pending.ts'
 import { startUiServer } from '../src/core/ui-server.ts'
 
 const CLI = path.resolve(import.meta.dirname, '..', 'src', 'cli.ts')
@@ -221,7 +222,8 @@ test('CLI add/list/show/edit/archive round-trips through ideas/', async () => {
   }
 })
 
-test('API exposes capture/list/read/edit/archive and requires the session token for writes', async () => {  const { dir, cleanup } = await project()
+test('API exposes capture/list/read/edit/archive and requires the session token for writes', async () => {
+  const { dir, cleanup } = await project()
   const server = await startUiServer(dir)
   try {
     const headers = { 'x-weave-token': server.token, 'content-type': 'application/json' }
@@ -267,24 +269,42 @@ test('API exposes capture/list/read/edit/archive and requires the session token 
 test('promote previews a diff without writing, and apply writes only a candidate', async () => {
   const { dir, cleanup } = await project()
   try {
+    const official = path.join(projectPaths(dir).outlines, 'chapters', '003.json')
+    await writeFile(official, `${JSON.stringify({
+      chapter: 3,
+      title: '守墓人',
+      pov: '许舟',
+      time: '夜',
+      location: '旧王墓',
+      openingState: '许舟发现墓门',
+      endingState: '长老承认身份',
+      goal: '确认长老的身份',
+      mustHappen: [],
+      mayHappen: [],
+      mustNotHappen: [],
+      characters: ['许舟', '长老'],
+      threads: ['旧王'],
+      targetWords: 2000,
+      previousLink: '开篇',
+      nextLink: '继续',
+    }, null, 2)}\n`)
+
     const idea = await captureIdea(dir, {
       body: '长老其实是旧王的守墓人。',
       scope: { kind: 'chapter', ref: 3 },
       tags: ['人物'],
     })
-    const target = path.join(projectPaths(dir).outlines, 'chapters', `003.idea-${idea.id}.json`)
+    const target = path.join(projectPaths(dir).plans, 'candidates', 'chapters', '003.json')
     const proposal = await promoteIdea(dir, idea.id, 'contract')
     assert.equal(proposal.target, 'contract')
-    assert.match(proposal.targetPath, /003\.idea-idea-/)
+    assert.match(proposal.targetPath, /plans\/candidates\/chapters\/003\.json/)
     assert.ok(proposal.diff.includes('+'))
     // The proposal is a preview only.
     await assert.rejects(readFile(target, 'utf8'), /ENOENT/)
     // The official chapter contract is never touched by promotion.
-    const official = path.join(projectPaths(dir).outlines, 'chapters', '003.json')
-    await assert.rejects(readFile(official, 'utf8'), /ENOENT/)
+    const before = JSON.parse(await readFile(official, 'utf8')) as { goal: string }
+    assert.equal(before.goal, '确认长老的身份')
 
-    const proposalFile = await savePromotionProposal(dir, proposal)
-    assert.match(proposalFile, /idea-proposals/)
     const loaded = await loadPromotionProposal(dir, idea.id)
     assert.equal(loaded?.currentHash, proposal.currentHash)
 
@@ -293,11 +313,17 @@ test('promote previews a diff without writing, and apply writes only a candidate
     assert.equal(applied.promotion?.target, 'contract')
     assert.equal(applied.promotion?.approvedBy, 'author')
     assert.equal(applied.promotionState, 'active')
-    const candidate = JSON.parse(await readFile(target, 'utf8')) as { kind: string; ideaId: string; note: string }
-    assert.equal(candidate.kind, 'idea-contract-patch')
-    assert.equal(candidate.ideaId, idea.id)
-    assert.match(candidate.note, /不会自动写入正式合同/)
-    await assert.rejects(readFile(official, 'utf8'), /ENOENT/)
+    const candidate = JSON.parse(await readFile(target, 'utf8')) as {
+      status: string
+      model: string
+      contract: { goal: string; chapter: number }
+    }
+    assert.equal(candidate.status, 'draft')
+    assert.equal(candidate.model, `idea:${idea.id}`)
+    assert.equal(candidate.contract.chapter, 3)
+    assert.match(candidate.contract.goal, /长老其实是旧王的守墓人/)
+    const after = JSON.parse(await readFile(official, 'utf8')) as { goal: string }
+    assert.equal(after.goal, '确认长老的身份', '正式合同在 outline apply 前保持不变')
 
     // Decisions are traceable in the shared pending log.
     const decisions = await readFile(path.join(projectPaths(dir).metadata, 'pending-decisions.log.jsonl'), 'utf8')
@@ -316,15 +342,64 @@ test('changing the target after promotion marks it stale and blocks stale applie
   try {
     const idea = await captureIdea(dir, { body: '灯塔在退潮时会熄灭。', scope: 'world' })
     const proposal = await promoteIdea(dir, idea.id, 'plan')
-    assert.equal(proposal.targetPath, `plans/idea-promotions/${idea.id}.md`)
+    assert.equal(proposal.targetPath, 'plans/rolling.json')
     await applyPromotion(dir, idea.id, proposal)
     assert.equal((await listIdeas(dir, { status: 'promoted' }))[0]!.promotionState, 'active')
 
-    await writeFile(path.join(dir, proposal.targetPath), '作者手改候选\n')
+    const planFile = path.join(dir, proposal.targetPath)
+    const envelope = JSON.parse(await readFile(planFile, 'utf8')) as {
+      status: string
+      content: { chapters: Array<{ goal: string }> }
+    }
+    assert.equal(envelope.status, 'draft')
+    assert.match(envelope.content.chapters[0]!.goal, /灯塔在退潮时会熄灭/)
+    envelope.content.chapters[0]!.goal = '作者手改的计划草稿'
+    await writeFile(planFile, `${JSON.stringify(envelope, null, 2)}\n`)
+
     assert.equal((await listIdeas(dir, { status: 'promoted' }))[0]!.promotionState, 'stale')
     const stale = await promoteIdea(dir, idea.id, 'plan')
     assert.notEqual(stale.currentHash, proposal.currentHash)
     await assert.rejects(applyPromotion(dir, idea.id, proposal), /目标已变化/)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('promise promotion appends to the volume plan draft and never approves it', async () => {
+  const { dir, cleanup } = await project()
+  try {
+    const volumePlan = path.join(projectPaths(dir).plans, 'volumes', '002.json')
+    await writeFile(volumePlan, `${JSON.stringify({
+      schemaVersion: 1,
+      kind: 'volume',
+      status: 'approved',
+      provenance: 'author',
+      contentHash: hashText('approved'),
+      content: {
+        volume: 2,
+        title: '退潮',
+        mainConflict: '灯塔熄灭',
+        antagonistEscalation: '守塔人失控',
+        protagonistChoice: '留下维修',
+        climax: '风暴夜',
+        irreversibleChange: '灯塔易主',
+        threads: ['灯塔'],
+        readerPromises: ['解释灯塔为何熄灭'],
+      },
+    }, null, 2)}\n`)
+
+    const idea = await captureIdea(dir, { body: '灯塔在退潮时熄灭，是因为守塔人欠了债。', scope: { kind: 'volume', ref: 2 } })
+    const proposal = await promoteIdea(dir, idea.id, 'promise')
+    assert.equal(proposal.targetPath, 'plans/volumes/002.json')
+    await applyPromotion(dir, idea.id, proposal)
+
+    const saved = JSON.parse(await readFile(volumePlan, 'utf8')) as {
+      status: string
+      content: { readerPromises: string[] }
+    }
+    assert.equal(saved.status, 'draft')
+    assert.equal(saved.content.readerPromises.includes('解释灯塔为何熄灭'), true)
+    assert.equal(saved.content.readerPromises.includes('灯塔在退潮时熄灭，是因为守塔人欠了债。'), true)
   } finally {
     await cleanup()
   }
@@ -346,6 +421,74 @@ test('canon promotion can only write a .candidate.md and never the formal file',
     assert.equal(await readFile(formal, 'utf8'), formalBefore)
     assert.match(await readFile(path.join(dir, proposal.targetPath), 'utf8'), /旧王的名字/)
   } finally {
+    await cleanup()
+  }
+})
+
+test('an idea promotion is an open pending until the author decides', async () => {
+  const { dir, cleanup } = await project()
+  try {
+    const idea = await captureIdea(dir, { body: '灯塔在退潮时会熄灭。', scope: 'world' })
+    await promoteIdea(dir, idea.id, 'plan')
+    assert.deepEqual(
+      (await listIdeaPromotionPendings(dir)).map(item => item.pendingId),
+      [`idea-promotion-${idea.id}`],
+    )
+
+    const promoted = await decidePending(dir, 0, `idea-promotion-${idea.id}`, 'promote', '作者确认晋升')
+    assert.equal(promoted.choice, 'promote')
+    assert.equal((await listIdeas(dir, { status: 'promoted' })).length, 1)
+    assert.equal((await listIdeaPromotionPendings(dir)).length, 0)
+
+    const second = await captureIdea(dir, { body: '另一条暂不推进的想法', scope: 'world' })
+    await promoteIdea(dir, second.id, 'plan')
+    const dismissed = await decidePending(dir, 0, `idea-promotion-${second.id}`, 'dismiss', '暂不使用')
+    assert.equal(dismissed.choice, 'dismiss')
+    assert.equal((await listIdeas(dir)).find(item => item.id === second.id)!.status, 'inbox')
+    assert.equal((await listIdeaPromotionPendings(dir)).length, 0)
+  } finally {
+    await cleanup()
+  }
+})
+
+test('the pending API lists and decides idea promotions without a chapter', async () => {
+  const { dir, cleanup } = await project()
+  const server = await startUiServer(dir)
+  try {
+    const idea = await captureIdea(dir, { body: '灯塔在退潮时会熄灭。', scope: 'world' })
+    await promoteIdea(dir, idea.id, 'plan')
+
+    const listed = await (await fetch(`${server.url}/api/pending`)).json() as {
+      pending: unknown[]
+      ideaPromotions: Array<{ pendingId: string; ideaId: string }>
+    }
+    assert.deepEqual(listed.ideaPromotions.map(item => item.pendingId), [`idea-promotion-${idea.id}`])
+    assert.equal(listed.pending.length, 0)
+
+    const headers = { 'x-weave-token': server.token, 'content-type': 'application/json' }
+    const unauthorized = await fetch(`${server.url}/api/pending/decide`, {
+      method: 'POST',
+      body: JSON.stringify({ pendingId: `idea-promotion-${idea.id}`, as: 'promote', reason: '作者确认' }),
+    })
+    assert.equal(unauthorized.status, 401)
+
+    const decided = await fetch(`${server.url}/api/pending/decide`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ pendingId: `idea-promotion-${idea.id}`, as: 'promote', reason: '作者确认' }),
+    })
+    assert.equal(decided.status, 200)
+    assert.equal(((await decided.json()) as { choice: string }).choice, 'promote')
+    assert.equal((await (await fetch(`${server.url}/api/pending`)).json() as { ideaPromotions: unknown[] }).ideaPromotions.length, 0)
+
+    const bad = await fetch(`${server.url}/api/pending/decide`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ pendingId: `idea-promotion-${idea.id}`, as: 'text', reason: '错误分支' }),
+    })
+    assert.equal(bad.status, 400)
+  } finally {
+    await server.close()
     await cleanup()
   }
 })

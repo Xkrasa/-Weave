@@ -7,6 +7,9 @@ import { projectPaths } from './project.ts'
 import { hashText } from './hash.ts'
 import { lcsMatches } from './lcs.ts'
 import { recordIdeaPromotionDecision } from './pending.ts'
+import { contractHash, loadContract } from './contract.ts'
+import { candidatePath, type OutlineCandidate } from './outline.ts'
+import { planPath, readPlan, savePlanDraft, type RollingPlan, type VolumeArc } from './planning.ts'
 
 export type IdeaStatus = 'inbox' | 'promoted' | 'archived'
 export type IdeaPriority = 'high' | 'normal' | 'low'
@@ -501,14 +504,30 @@ async function decorate(root: string, idea: Idea, bodyMissing = false): Promise<
 
 // ---- Promotion --------------------------------------------------------------
 
-const PROMOTION_PREFIX: Record<IdeaPromotionTarget, (root: string, ideaId: string, idea: Idea) => string> = {
-  plan: (root, ideaId) => path.join(projectPaths(root).plans, 'idea-promotions', `${ideaId}.md`),
-  contract: (root, ideaId, idea) => idea.scope.kind === 'chapter'
-    ? path.join(projectPaths(root).outlines, 'chapters', `${String(idea.scope.ref).padStart(3, '0')}.idea-${ideaId}.json`)
-    : path.join(projectPaths(root).outlines, 'ideas', `${ideaId}.json`),
-  outline: (root, ideaId) => path.join(projectPaths(root).outlines, 'ideas', `${ideaId}.md`),
-  canon: (root, ideaId) => path.join(projectPaths(root).canon, `${ideaId}.candidate.md`),
-  promise: (root, ideaId) => path.join(projectPaths(root).plans, 'idea-promotions', `${ideaId}.promise.json`),
+const PROMOTION_TARGETS: IdeaPromotionTarget[] = ['plan', 'contract', 'outline', 'canon', 'promise']
+
+function requireChapterScope(idea: Idea, target: IdeaPromotionTarget): number {
+  if (idea.scope.kind !== 'chapter') {
+    throw validationError(`${target} 晋升需要 chapter scope；请先执行 weave idea edit ${idea.id} --scope chapter:N`)
+  }
+  return idea.scope.ref
+}
+
+function requireVolumeScope(idea: Idea): number {
+  if (idea.scope.kind !== 'volume') {
+    throw validationError(`promise 晋升需要 volume scope；请先执行 weave idea edit ${idea.id} --scope volume:N`)
+  }
+  return idea.scope.ref
+}
+
+/** Every target resolves to a file the existing approval chain already reads. */
+function defaultTargetPath(root: string, target: IdeaPromotionTarget, idea: Idea): string {
+  if (target === 'contract' || target === 'outline') {
+    return candidatePath(root, requireChapterScope(idea, target))
+  }
+  if (target === 'canon') return path.join(projectPaths(root).canon, `${idea.id}.candidate.md`)
+  if (target === 'plan') return planPath(root, 'rolling')
+  return planPath(root, 'volume', requireVolumeScope(idea))
 }
 
 export function proposalPath(root: string, ideaId: string): string {
@@ -521,7 +540,7 @@ export async function loadPromotionProposal(root: string, ideaId: string): Promi
 
 /**
  * Reads the idea and target, then produces a candidate. No target file is written here:
- * callers show the diff and only `applyPromotion` persists the candidate.
+ * the proposal is stored as an open pending record, and only `applyPromotion` writes.
  */
 export async function promoteIdea(
   root: string,
@@ -529,24 +548,91 @@ export async function promoteIdea(
   target: IdeaPromotionTarget,
   options: { targetPath?: string } = {},
 ): Promise<PromotionProposal> {
-  if (!['plan', 'contract', 'outline', 'canon', 'promise'].includes(target)) {
+  if (!PROMOTION_TARGETS.includes(target)) {
     throw validationError('晋升目标只能是 plan、contract、outline、canon 或 promise')
   }
   const { meta, body } = await loadIdea(root, ideaId)
   const targetAbsolute = options.targetPath
     ? path.resolve(root, options.targetPath)
-    : PROMOTION_PREFIX[target](root, meta.id, meta)
-  assertSafeTarget(root, target, targetAbsolute)
-  const existing = await readTextIfExists(targetAbsolute)
-  const proposedText = candidateText(meta, body, target)
-  return {
+    : defaultTargetPath(root, target, meta)
+  assertSafeTarget(root, target, targetAbsolute, meta)
+  const currentText = (await readTextIfExists(targetAbsolute)) ?? ''
+  const proposedText = await proposedTargetText(root, meta, body, target)
+  const proposal: PromotionProposal = {
     ideaId: meta.id,
     target,
     targetPath: relativeTarget(root, targetAbsolute),
-    currentHash: hashText(existing ?? ''),
+    currentHash: hashText(currentText),
     proposedText,
-    diff: lineDiff(existing ?? '', proposedText),
+    diff: lineDiff(currentText, proposedText),
     warnings: promotionWarnings(meta, target),
+  }
+  await savePromotionProposal(root, proposal)
+  return proposal
+}
+
+/** Chapter contract/outline promotions land in the outline candidate that `outline apply` consumes. */
+async function proposedTargetText(
+  root: string,
+  idea: Idea,
+  body: string,
+  target: IdeaPromotionTarget,
+): Promise<string> {
+  if (target === 'contract' || target === 'outline') {
+    return `${JSON.stringify(await buildOutlineCandidate(root, idea, body), null, 2)}\n`
+  }
+  if (target === 'plan') {
+    return `${JSON.stringify(await buildRollingDraft(root, idea, body), null, 2)}\n`
+  }
+  if (target === 'promise') {
+    return `${JSON.stringify(await buildVolumePromise(root, idea, body), null, 2)}\n`
+  }
+  return candidateText(idea, body)
+}
+
+async function buildOutlineCandidate(root: string, idea: Idea, body: string): Promise<OutlineCandidate> {
+  const chapter = requireChapterScope(idea, 'contract')
+  const existing = await readJsonIfExists<OutlineCandidate>(candidatePath(root, chapter))
+  const contract: ChapterContract = existing?.contract ?? await loadContract(root, chapter)
+  const marker = `【想法 ${idea.id}：${idea.title}】`
+  const goal = contract.goal.includes(marker) ? contract.goal : `${contract.goal}\n\n${marker}\n${body.trim()}`
+  const patched: ChapterContract = { ...contract, goal }
+  return {
+    schemaVersion: 1,
+    chapter,
+    status: 'draft',
+    provenance: 'generated',
+    createdAt: new Date().toISOString(),
+    contentHash: contractHash(patched),
+    contract: patched,
+    model: `idea:${idea.id}`,
+  }
+}
+
+async function buildRollingDraft(root: string, idea: Idea, body: string): Promise<RollingPlan> {
+  const entry = await readPlan(root, 'rolling')
+  const base = entry.content as RollingPlan | undefined
+  const chapter = idea.scope.kind === 'chapter'
+    ? idea.scope.ref
+    : idea.revealAfterChapter ?? base?.fromChapter ?? 1
+  const chapters = [
+    ...(base?.chapters ?? []).filter(item => item.chapter !== chapter),
+    { chapter, title: idea.title, goal: body.trim(), beats: [] },
+  ].sort((left, right) => left.chapter - right.chapter)
+  return { fromChapter: base?.fromChapter ?? chapter, chapters }
+}
+
+async function buildVolumePromise(root: string, idea: Idea, body: string): Promise<VolumeArc> {
+  const volume = requireVolumeScope(idea)
+  const entry = await readPlan(root, 'volume', volume)
+  const current = entry.content as VolumeArc | undefined
+  if (!current) throw validationError(`第 ${volume} 卷还没有已保存的计划；请先创建卷计划再晋升 promise`)
+  const promise = body.trim()
+  return {
+    ...current,
+    readerPromises: current.readerPromises.includes(promise)
+      ? current.readerPromises
+      : [...current.readerPromises, promise],
   }
 }
 
@@ -565,7 +651,8 @@ export async function applyPromotion(
 ): Promise<IdeaView> {
   if (proposal.ideaId !== ideaId) throw validationError('晋升提案与想法 id 不一致')
   const targetAbsolute = path.resolve(root, proposal.targetPath)
-  assertSafeTarget(root, proposal.target, targetAbsolute)
+  const { meta } = await loadIdea(root, ideaId)
+  assertSafeTarget(root, proposal.target, targetAbsolute, meta)
   const actual = await fileHash(targetAbsolute).catch(error => {
     if (isMissing(error)) return null
     throw error
@@ -573,7 +660,7 @@ export async function applyPromotion(
   if ((actual ?? hashText('')) !== proposal.currentHash) {
     throw conflictError('晋升目标已变化，请重新生成 diff 后再应用')
   }
-  await atomicWrite(targetAbsolute, proposal.proposedText)
+  await writePromotionTarget(root, meta, proposal)
   const targetHash = await fileHash(targetAbsolute)
   const idea = await recordPromotion(root, ideaId, {
     target: proposal.target,
@@ -591,50 +678,33 @@ export async function applyPromotion(
   return idea
 }
 
+/** Writes through the existing save path of each target; nothing here approves a plan or contract. */
+async function writePromotionTarget(root: string, idea: Idea, proposal: PromotionProposal): Promise<void> {
+  if (proposal.target === 'plan') {
+    await savePlanDraft(root, 'rolling', JSON.parse(proposal.proposedText) as RollingPlan, { provenance: 'author' })
+    return
+  }
+  if (proposal.target === 'promise') {
+    const volume = requireVolumeScope(idea)
+    await savePlanDraft(root, 'volume', JSON.parse(proposal.proposedText) as VolumeArc, { provenance: 'author', volume })
+    return
+  }
+  await atomicWrite(path.resolve(root, proposal.targetPath), proposal.proposedText)
+}
+
 
 export async function listStaleIdeas(root: string): Promise<IdeaView[]> {
   return (await listIdeas(root, { status: 'promoted' })).filter(idea => idea.promotionState === 'stale')
 }
 
-function candidateText(idea: Idea, body: string, target: IdeaPromotionTarget): string {
-  if (target === 'contract') {
-    return `${JSON.stringify({
-      kind: 'idea-contract-patch',
-      schemaVersion: 1,
-      ideaId: idea.id,
-      title: idea.title,
-      scope: idea.scope,
-      suggested: {
-        chapter: idea.scope.kind === 'chapter' ? idea.scope.ref : null,
-        mayHappen: [idea.title],
-        threads: idea.tags,
-      },
-      body: body.trim(),
-      note: '候选 patch：不会自动写入正式合同；请在合同编辑器确认后再保存。',
-    }, null, 2)}\n`
-  }
-  if (target === 'promise') {
-    return `${JSON.stringify({
-      kind: 'reader-promise-candidate',
-      schemaVersion: 1,
-      promiseId: `promise-${idea.id}`,
-      title: idea.title,
-      scope: idea.scope,
-      tags: idea.tags,
-      body: body.trim(),
-      sourceIdea: idea.id,
-      status: 'candidate',
-      note: '候选 promise：批准仍走现有 promise/planning 流程。',
-    }, null, 2)}\n`
-  }
-  const formal = target === 'canon' ? '设定' : target === 'plan' ? '计划' : '章纲'
+function candidateText(idea: Idea, body: string): string {
   const header = [
     `# 作者想法：${idea.title}`,
     '',
     `- 来源：ideas/${idea.id}.md`,
     `- 范围：${formatIdeaScope(idea.scope)}`,
     `- 标签：${idea.tags.length ? idea.tags.join('、') : '无'}`,
-    `- 状态：晋升候选，尚未批准；确认后再合并到正式${formal}。`,
+    `- 状态：晋升候选，尚未批准；确认后再合并到正式设定。`,
     '',
   ].join('\n')
   return `${header}${body.trim()}\n`
@@ -664,7 +734,12 @@ function relativeTarget(root: string, absolute: string): string {
   return path.relative(root, absolute).split(path.sep).join('/')
 }
 
-function assertSafeTarget(root: string, target: IdeaPromotionTarget, absolute: string): void {
+function assertSafeTarget(
+  root: string,
+  target: IdeaPromotionTarget,
+  absolute: string,
+  idea: Idea,
+): void {
   const paths = projectPaths(root)
   if (isWithin(absolute, paths.ledger)) throw validationError('任何晋升目标都不允许写 ledger/')
   if (target === 'canon') {
@@ -673,25 +748,24 @@ function assertSafeTarget(root: string, target: IdeaPromotionTarget, absolute: s
     }
     return
   }
-  if (target === 'contract') {
-    const chapters = path.join(paths.outlines, 'chapters')
-    const ideas = path.join(paths.outlines, 'ideas')
-    if (!isWithin(absolute, chapters) && !isWithin(absolute, ideas)) {
-      throw validationError('合同晋升只能写 outlines/chapters/ 或 outlines/ideas/ 下的候选文件')
-    }
-    if (isWithin(absolute, chapters) && !path.basename(absolute).includes('.idea-')) {
-      throw validationError('合同候选文件名必须包含 .idea-，避免覆盖正式合同')
+  if (target === 'contract' || target === 'outline') {
+    const expected = candidatePath(root, requireChapterScope(idea, target))
+    if (path.resolve(absolute) !== path.resolve(expected)) {
+      throw validationError(`${target} 晋升只能写本章的章纲候选 ${relativeTarget(root, expected)}`)
     }
     return
   }
-  if (target === 'outline') {
-    if (!isWithin(absolute, path.join(paths.outlines, 'ideas'))) {
-      throw validationError('章纲晋升只能写 outlines/ideas/ 下的候选文件')
+  if (target === 'plan') {
+    const expected = planPath(root, 'rolling')
+    if (path.resolve(absolute) !== path.resolve(expected)) {
+      throw validationError('plan 晋升只能写 plans/rolling.json 的计划草稿，批准仍走 weave plan approve rolling')
     }
     return
   }
-  if (!isWithin(absolute, path.join(paths.plans, 'idea-promotions'))) {
-    throw validationError('计划/promise 晋升只能写 plans/idea-promotions/ 下的候选文件')
+  const volume = requireVolumeScope(idea)
+  const expected = planPath(root, 'volume', volume)
+  if (path.resolve(absolute) !== path.resolve(expected)) {
+    throw validationError(`promise 晋升只能写第 ${volume} 卷计划草稿，批准仍走 weave plan approve volume`)
   }
 }
 

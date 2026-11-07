@@ -3,13 +3,23 @@ import { appendFile, mkdir } from 'node:fs/promises'
 import type { AuditMissedItem, CoverageAudit, ExtractionReport, PendingRecord } from './stage-types.ts'
 import { objectHash } from './hash.ts'
 import type { LedgerFact } from './types.ts'
-import { atomicWriteJson, readJsonIfExists } from './io.ts'
+import { atomicWriteJson, listFiles, readJsonIfExists } from './io.ts'
 import { projectPaths } from './project.ts'
 import { loadStage, saveStage } from './stages.ts'
 import { validationError } from './errors.ts'
 
 export type PendingChoice = 'text' | 'ledger' | 'dismiss' | 'rerun' | 'promote'
 export type PendingKind = 'ledger-conflict' | 'audit-missed' | 'idea-promotion'
+
+/** Idea promotions use the same decision log; the pending id is derived from the idea id. */
+export const IDEA_PROMOTION_PREFIX = 'idea-promotion-'
+
+export interface IdeaPromotionPending {
+  pendingId: string
+  ideaId: string
+  target: string
+  targetPath: string
+}
 
 export interface PendingDecision {
   decisionId: string
@@ -95,6 +105,27 @@ export async function listUnresolvedPending(
 }
 
 /**
+ * Open idea promotions: every saved proposal is a pending record until the author applies
+ * or dismisses it. The proposal file is the payload; the decision log is the audit trail.
+ */
+export async function listIdeaPromotionPendings(root: string): Promise<IdeaPromotionPending[]> {
+  const dir = projectPaths(root).ideaProposals
+  const decided = new Set((await loadPendingDecisions(root)).map(decision => decision.pendingId))
+  const pending: IdeaPromotionPending[] = []
+  for (const name of await listFiles(dir)) {
+    if (!name.endsWith('.json')) continue
+    const proposal = await readJsonIfExists<{ ideaId?: string; target?: string; targetPath?: string }>(
+      path.join(dir, name),
+    )
+    if (!proposal?.ideaId || !proposal.target || !proposal.targetPath) continue
+    const pendingId = `${IDEA_PROMOTION_PREFIX}${proposal.ideaId}`
+    if (decided.has(pendingId)) continue
+    pending.push({ pendingId, ideaId: proposal.ideaId, target: proposal.target, targetPath: proposal.targetPath })
+  }
+  return pending.sort((left, right) => left.ideaId.localeCompare(right.ideaId))
+}
+
+/**
  * 裁决：以正文为准时把扣下的事实放回抽取 stage（补上 supersedes，指向它冲突的旧事实），
  * 重放投影后与手工修正一致；以账本为准时只记录决定，事实保持不入账。
  */
@@ -105,6 +136,9 @@ export async function decidePending(
   choice: PendingChoice,
   reason: string,
 ): Promise<PendingDecision> {
+  if (pendingId.startsWith(IDEA_PROMOTION_PREFIX)) {
+    return decideIdeaPromotion(root, pendingId, choice, reason)
+  }
   const report = await loadStage<ExtractionReport>(root, 'extraction', chapter)
   if (!report) throw validationError(`第 ${chapter} 章没有抽取报告`)
   const record = (report.pending ?? []).find(item => item.pendingId === pendingId)
@@ -134,6 +168,47 @@ export async function decidePending(
   return decision
 }
 
+async function decideIdeaPromotion(
+  root: string,
+  pendingId: string,
+  choice: PendingChoice,
+  reason: string,
+): Promise<PendingDecision> {
+  if (choice !== 'promote' && choice !== 'dismiss') {
+    throw validationError('想法晋升裁决只能是 promote 或 dismiss')
+  }
+  if (!reason.trim()) throw validationError('裁决必须提供理由')
+  const ideaId = pendingId.slice(IDEA_PROMOTION_PREFIX.length)
+  if (!ideaId) throw validationError(`无效的想法晋升 pending：${pendingId}`)
+  const existing = (await loadPendingDecisions(root)).find(decision => decision.pendingId === pendingId)
+  if (existing) throw validationError(`该记录已有裁决：${pendingId}`)
+  if (choice === 'promote') {
+    // Dynamic import keeps the ideas <-> pending dependency one-way at module load time.
+    const { applyPromotion, loadPromotionProposal } = await import('./ideas.ts')
+    const proposal = await loadPromotionProposal(root, ideaId)
+    if (!proposal) throw validationError(`没有待应用的晋升提案：${ideaId}`)
+    await applyPromotion(root, ideaId, proposal)
+    const applied = (await loadPendingDecisions(root)).filter(decision => decision.pendingId === pendingId).at(-1)
+    if (!applied) throw validationError(`晋升已应用，但没有写入裁决日志：${ideaId}`)
+    return applied
+  }
+  const decision: PendingDecision = {
+    decisionId: newDecisionId(),
+    pendingId,
+    kind: 'idea-promotion',
+    chapter: 0,
+    subject: ideaId,
+    choice,
+    reason: reason.trim(),
+    createdAt: new Date().toISOString(),
+  }
+  const decisions = await loadPendingDecisions(root)
+  decisions.push(decision)
+  await saveDecisions(root, decisions)
+  await audit(root, 'idea-dismiss', decision)
+  return decision
+}
+
 /**
  * Idea promotion decisions share the pending decision log, but are not tied to an
  * extraction stage: a promotion can happen before the chapter is ever generated.
@@ -147,7 +222,7 @@ export async function recordIdeaPromotionDecision(
   const decisions = await loadPendingDecisions(root)
   const decision: PendingDecision = {
     decisionId: newDecisionId(),
-    pendingId: `idea-promotion-${input.ideaId}`,
+    pendingId: `${IDEA_PROMOTION_PREFIX}${input.ideaId}`,
     kind: 'idea-promotion',
     chapter: 0,
     subject: input.targetPath,

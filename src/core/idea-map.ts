@@ -101,18 +101,9 @@ export async function buildIdeaMap(root: string): Promise<IdeaMap> {
 
 function isUsed(idea: IdeaView, finalized: Set<number>): boolean {
   if (idea.usage) return true
-  if (idea.links.chapters.some(chapter => finalized.has(chapter))) return true
-  const promotedChapter = contractChapter(idea.promotion?.targetPath)
-  return promotedChapter !== null && finalized.has(promotedChapter)
-}
-
-function contractChapter(targetPath: string | undefined): number | null {
-  if (!targetPath) return null
-  const normalized = targetPath.split(path.sep).join('/')
-  const match = /outlines\/chapters\/(\d{3})\./.exec(normalized)
-  if (!match) return null
-  const chapter = Number(match[1])
-  return Number.isSafeInteger(chapter) && chapter > 0 ? chapter : null
+  // Only an explicit author mark or a finalized chapter link counts. A promotion target
+  // (outline candidate / draft plan) is never proof that the idea reached the mainline.
+  return idea.links.chapters.some(chapter => finalized.has(chapter))
 }
 
 function ideaVolume(idea: IdeaView, chapterVolume: Map<number, number>): number {

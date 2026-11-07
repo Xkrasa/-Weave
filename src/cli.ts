@@ -56,7 +56,7 @@ import { runCoverageAudit, runTimelineReport } from './core/audit.ts'
 import { runReview } from './core/review.ts'
 import { runEffectReview } from './core/effect-review.ts'
 import { applyWaivers, createWaivers, loadWaivers, revokeWaiver } from './core/waivers.ts'
-import { decideAuditMissed, decidePending, listPending, listUnresolvedPending } from './core/pending.ts'
+import { decideAuditMissed, decidePending, listPending, listUnresolvedPending, listIdeaPromotionPendings, IDEA_PROMOTION_PREFIX } from './core/pending.ts'
 import { generateKeyCandidates, KEY_FOCUS, type KeyFocus } from './core/tiered.ts'
 import {
   ignoreFinding,
@@ -458,6 +458,24 @@ async function commandIdea(root: string, parsed: Parsed, json: boolean): Promise
       else for (const idea of stale) console.log(`${idea.id}  ${idea.title} → ${idea.promotion?.targetPath ?? ''}`)
       return 0
     }
+    case 'pending': {
+      const pending = await listIdeaPromotionPendings(root)
+      if (json) outputJson({ ok: true, pending })
+      else if (pending.length === 0) console.log('没有待裁决的想法晋升。')
+      else for (const item of pending) {
+        console.log(`${item.pendingId}：${item.ideaId} → ${item.target}（${item.targetPath}）`)
+        console.log(`  应用：weave idea apply ${item.ideaId}；驳回：weave idea dismiss ${item.ideaId} --reason 理由`)
+      }
+      return 0
+    }
+    case 'dismiss': {
+      if (!id) throw usageError('用法：weave idea dismiss <id> --reason 理由')
+      const reason = requiredString(parsed, 'reason')
+      const decision = await decidePending(root, 0, `${IDEA_PROMOTION_PREFIX}${id}`, 'dismiss', reason)
+      if (json) outputJson({ ok: true, decision })
+      else console.log(`已驳回想法晋升 ${id}；想法状态保持不变。`)
+      return 0
+    }
     case 'feedback': {
       const chapter = optionalNumber(parsed, 'chapter')
       if (chapter === undefined) throw usageError('用法：weave idea feedback --chapter <n> [--include-book-ideas]')
@@ -487,7 +505,7 @@ async function commandIdea(root: string, parsed: Parsed, json: boolean): Promise
       return 0
     }
     default:
-      throw usageError('用法：weave idea add|list|show|edit|archive|promote|apply|stale|feedback')
+      throw usageError('用法：weave idea add|list|show|edit|archive|promote|apply|pending|dismiss|stale|feedback')
   }
 }
 

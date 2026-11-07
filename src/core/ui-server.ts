@@ -17,7 +17,7 @@ import { runExtraction } from './extraction.ts'
 import { runCoverageAudit } from './audit.ts'
 import { runReview } from './review.ts'
 import { applyWaivers, createWaivers, loadWaivers, revokeWaiver } from './waivers.ts'
-import { decidePending, listPending, listUnresolvedPending } from './pending.ts'
+import { decidePending, listPending, listUnresolvedPending, listIdeaPromotionPendings, IDEA_PROMOTION_PREFIX } from './pending.ts'
 import { assembleChapterContext } from './materials.ts'
 import {
   ignoreFinding,
@@ -542,6 +542,7 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
         ...status.chapters.map(item => item.chapter),
         ...status.drafts,
       ]),
+      ideaPromotions: await listIdeaPromotionPendings(root),
     })
     return
   }
@@ -569,7 +570,13 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
   }
   if (url.pathname === '/api/pending/decide' && request.method === 'POST') {
     const body = await readJsonBody<{ chapter?: number; pendingId?: string; as?: string; reason?: string }>(request)
-    if (!body.chapter || !body.pendingId || !body.reason) throw usageError('缺少 chapter、pendingId 或 reason')
+    if (!body.pendingId || !body.reason) throw usageError('缺少 pendingId 或 reason')
+    if (body.pendingId.startsWith(IDEA_PROMOTION_PREFIX)) {
+      if (body.as !== 'promote' && body.as !== 'dismiss') throw usageError('想法晋升的 as 只能是 promote 或 dismiss')
+      sendJson(response, 200, await decidePending(root, body.chapter ?? 0, body.pendingId, body.as, body.reason))
+      return
+    }
+    if (!body.chapter) throw usageError('缺少 chapter、pendingId 或 reason')
     if (body.as !== 'text' && body.as !== 'ledger') throw usageError('as 只能是 text 或 ledger')
     sendJson(response, 200, await decidePending(root, body.chapter, body.pendingId, body.as, body.reason))
     return
