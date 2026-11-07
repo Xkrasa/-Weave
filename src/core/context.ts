@@ -1,5 +1,5 @@
 import type { ChapterContract, Material, MaterialDecision, ModelConfig } from './types.ts'
-import { objectHash } from './hash.ts'
+import { hashText, objectHash } from './hash.ts'
 
 const SYSTEM_PROMPT = [
   '你是中文长篇小说写作引擎。',
@@ -118,15 +118,26 @@ export function assembleContext(
   }
 
   const included = [...required]
+  const degraded: Array<{ sourceId: string; reason: 'budget' }> = []
   let used = requiredTokens
   for (const item of optional) {
     const tokens = estimateTokens(item.text, config.charsPerToken)
     if (used + tokens <= capacityTokens) {
       included.push(item)
       used += tokens
-    } else {
-      omitted.push({ sourceId: item.sourceId, reason: 'budget' })
+      continue
     }
+    // 预算不足的可选材料先降到紧凑形态保住存在性，仍塞不下才丢弃；required 永不走这条路。
+    if (item.compact !== undefined) {
+      const compactTokens = estimateTokens(item.compact, config.charsPerToken)
+      if (used + compactTokens <= capacityTokens) {
+        included.push({ ...item, text: item.compact, contentHash: hashText(item.compact) })
+        degraded.push({ sourceId: item.sourceId, reason: 'budget' })
+        used += compactTokens
+        continue
+      }
+    }
+    omitted.push({ sourceId: item.sourceId, reason: 'budget' })
   }
 
   const ordered = included.sort((a, b) => categoryRank(a) - categoryRank(b))
@@ -153,7 +164,7 @@ export function assembleContext(
       included: ordered,
       omitted,
       withheld: options.withheld ?? [],
-      degraded: [],
+      degraded,
       estimatedTokens: usedTokens,
     },
   }

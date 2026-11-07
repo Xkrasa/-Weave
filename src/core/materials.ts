@@ -729,6 +729,7 @@ async function collectPlanningMaterials(root: string, contract: ChapterContract)
         JSON.stringify({ characters: relevantArcs }, null, 2),
       ),
       priority: 5,
+      compact: `人物弧（本章未展开）：${relevantArcs.map(arc => arc.name).join('、')}`,
     })
   }
 
@@ -748,6 +749,7 @@ async function collectPlanningMaterials(root: string, contract: ChapterContract)
         JSON.stringify(current, null, 2),
       ),
       priority: 6,
+      compact: `当前卷弧：第 ${current.volume} 卷（本章未展开）`,
     })
   }
 
@@ -764,6 +766,7 @@ async function collectPlanningMaterials(root: string, contract: ChapterContract)
         JSON.stringify({ chapters: upcoming }, null, 2),
       ),
       priority: 3,
+      compact: `滚动章纲：第 ${upcoming[0]!.chapter}–${upcoming[upcoming.length - 1]!.chapter} 章（本章未展开）`,
     })
   }
   return materials

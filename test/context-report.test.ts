@@ -100,3 +100,45 @@ test('required overflow keeps the explicit split-required failure semantics', ()
   assert.equal(assembled.decision.decision, 'split-required')
   assert.equal(assembled.context, null)
 })
+
+test('optional materials degrade to compact before being omitted', () => {
+  const arcs = material({
+    sourceId: 'plan:character-arcs',
+    text: JSON.stringify({ characters: [{ name: '许舟', arc: '从接单到追查平台时间线' }] }).repeat(400),
+    provenance: 'author',
+    category: 'author',
+    priority: 5,
+    compact: '人物弧（本章未展开）：许舟',
+  })
+  const premise = material({ sourceId: 'canon:premise.md', text: '前提一句话。', required: true, provenance: 'author', category: 'author' })
+
+  const tight = assembleContext(contract, [premise, arcs], config)
+  assert.equal(tight.decision.decision, 'ready')
+  assert.deepEqual(tight.context!.degraded, [{ sourceId: 'plan:character-arcs', reason: 'budget' }])
+  assert.deepEqual(tight.context!.omitted, [])
+  const degradedMaterial = tight.context!.included.find(item => item.sourceId === 'plan:character-arcs')
+  assert.ok(degradedMaterial)
+  assert.equal(degradedMaterial.text, '人物弧（本章未展开）：许舟')
+  assert.ok(degradedMaterial.text.includes('许舟'), 'existence survives degradation')
+  assert.ok(!degradedMaterial.text.includes('追查平台'), 'full card stays out')
+
+  const roomy = assembleContext(contract, [premise, arcs], { ...config, contextWindow: 60000 })
+  assert.equal(roomy.decision.decision, 'ready')
+  assert.deepEqual(roomy.context!.degraded, [])
+  assert.ok(roomy.context!.included.find(item => item.sourceId === 'plan:character-arcs')!.text.includes('追查平台'))
+})
+
+test('required materials never degrade even when they carry a compact form', () => {
+  const assembled = assembleContext(contract, [
+    material({
+      sourceId: 'canon:characters',
+      text: '人物状态全集。'.repeat(3000),
+      required: true,
+      provenance: 'author',
+      category: 'author',
+      compact: '本章出场人物：许舟（本章未展开）',
+    }),
+  ], config)
+  assert.equal(assembled.decision.decision, 'capacity-conflict')
+  assert.equal(assembled.context, null)
+})

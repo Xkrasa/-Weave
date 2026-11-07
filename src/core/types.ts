@@ -143,6 +143,8 @@ export interface Material {
   priority?: number
   /** Retrieval relevance; keeps ranking through budget trimming. */
   relevance?: number
+  /** 紧凑形态（如「姓名 + 一句话身份」）：预算不足时先降级到它、再丢弃；文案自带「（本章未展开）」标记。 */
+  compact?: string
 }
 
 export type MaterialDecision =
