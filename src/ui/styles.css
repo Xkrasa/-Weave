@@ -28,6 +28,24 @@ button.ghost { border-color: transparent; color: var(--muted); }
 button.ghost:hover { color: var(--text); background: var(--panel-2); }
 button.icon { border: 0; font-size: 20px; padding: 2px 7px; color: var(--muted); }
 .hidden { display: none !important; }
+
+/* ---- Library / model settings / first-run setup ------------------------- */
+.library-list { display: flex; flex-direction: column; gap: 8px; max-height: 46vh; overflow: auto; }
+.library-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel);
+}
+.library-row.current { border-color: var(--accent); }
+.library-meta { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.library-actions { display: flex; align-items: center; gap: 8px; }
+.library-new { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; align-items: center; }
+.library-new input { flex: 1 1 200px; }
+.model-notes { margin: 8px 0 0; padding-left: 18px; }
+.model-notes li { margin-bottom: 3px; }
+.field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+.field > label { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.field > input, .field > textarea, .field > select { width: 100%; }
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
 #app { height: 100%; display: flex; flex-direction: column; }

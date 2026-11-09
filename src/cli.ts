@@ -1125,7 +1125,11 @@ async function commandOutline(root: string, parsed: Parsed, json: boolean): Prom
 async function commandUi(root: string, parsed: Parsed, json: boolean): Promise<number> {
   const port = optionalNumber(parsed, 'port') ?? 0
   if (port < 0 || port > 65535) throw usageError('--port 必须在 0–65535 之间')
-  const ui = await startUiServer(root, { port })
+  const libraryRoot = optionalString(parsed, 'library-root')
+  const ui = await startUiServer(root, {
+    port,
+    ...(libraryRoot ? { libraryRoot: path.resolve(libraryRoot) } : {}),
+  })
   if (json) outputJson({ ok: true, url: ui.url, port: ui.port })
   else {
     console.log(`Weave 工作台已启动：${ui.url}`)

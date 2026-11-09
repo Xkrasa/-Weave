@@ -250,3 +250,84 @@ test('UI exposes planning, outline and preference surfaces', async () => {
     await rm(app.dir, { recursive: true, force: true })
   }
 })
+
+test('library, model settings and first-run setup work over the UI API', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'weave-library-'))
+  const libraryRoot = path.join(dir, 'books')
+  await mkdir(libraryRoot, { recursive: true })
+  const bookRoot = path.join(libraryRoot, 'main')
+  await initProject(bookRoot, {
+    title: '书库测试',
+    model: 'fake-model',
+    baseUrl: 'http://127.0.0.1:1/v1',
+    workflowVersion: 2,
+  })
+  const ui = await startUiServer(bookRoot, { libraryRoot })
+  const headers = { 'x-weave-token': ui.token, 'content-type': 'application/json' }
+  try {
+    const library = await (await request(ui.url, '/api/library')).json() as {
+      current: string
+      books: Array<{ name: string; current: boolean }>
+    }
+    assert.equal(library.current, bookRoot)
+    assert.equal(library.books.length, 1)
+    assert.equal(library.books[0]?.name, 'main')
+    assert.equal(library.books[0]?.current, true)
+
+    const setup = await (await request(ui.url, '/api/setup')).json() as { needsSetup: boolean }
+    assert.equal(setup.needsSetup, true, 'empty canon asks for setup')
+    const applied = await request(ui.url, '/api/setup/apply', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ premise: '一个杂工靠家政技能净化魔物', protagonist: '陆渊' }),
+    })
+    assert.equal(applied.status, 200)
+    const after = await (await request(ui.url, '/api/setup')).json() as { needsSetup: boolean }
+    assert.equal(after.needsSetup, false)
+
+    const models = await (await request(ui.url, '/api/models')).json() as {
+      model: string
+      apiKeyEnv: string
+      presets: Array<{ id: string }>
+    }
+    assert.equal(models.model, 'fake-model')
+    assert.ok(models.presets.length > 0)
+    const changed = await request(ui.url, '/api/models/apply', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: 'mimo-v2.6-pro',
+        baseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
+        apiKeyEnv: 'Mimo_API_KEY',
+      }),
+    })
+    assert.equal(changed.status, 200)
+    const reloaded = await (await request(ui.url, '/api/models')).json() as { model: string; apiKeyEnv: string }
+    assert.equal(reloaded.model, 'mimo-v2.6-pro')
+    assert.equal(reloaded.apiKeyEnv, 'Mimo_API_KEY')
+
+    const created = await request(ui.url, '/api/library/create', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ title: '第二本书' }),
+    })
+    assert.equal(created.status, 200)
+    const createdPayload = await created.json() as { current: string }
+    assert.notEqual(createdPayload.current, bookRoot)
+    const libraryAfter = await (await request(ui.url, '/api/library')).json() as {
+      books: Array<{ current: boolean }>
+    }
+    assert.equal(libraryAfter.books.length, 2)
+    assert.equal(libraryAfter.books.filter(item => item.current).length, 1)
+
+    const unauthenticated = await request(ui.url, '/api/models/apply', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'x' }),
+    })
+    assert.equal(unauthenticated.status, 401)
+  } finally {
+    await ui.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})

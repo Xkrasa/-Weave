@@ -31,6 +31,17 @@ import {
 } from './revisions.ts'
 import { amendChapter, finalizeChapter, writeChapter } from './writing.ts'
 import { doctor, exportBook, projectStatus } from './services.ts'
+import {
+  MODEL_PRESETS,
+  applyModel,
+  applySetup,
+  createBook,
+  listBooks,
+  readModel,
+  readSetup,
+  type ModelPreset,
+  type SetupDraft,
+} from './library.ts'
 import { loadModelConfig, projectPaths } from './project.ts'
 import { draftHash, loadStage, readDraft, saveStage } from './stages.ts'
 import { saveDraft } from './runs.ts'
@@ -73,6 +84,13 @@ export interface UiServerOptions {
   port?: number
   host?: string
   token?: string
+  /** Directory that holds multiple books; defaults to the parent of the project root. */
+  libraryRoot?: string
+}
+
+interface UiState {
+  root: string
+  libraryRoot: string
 }
 
 export interface UiServer {
@@ -94,8 +112,12 @@ const MIME: Record<string, string> = {
 export async function startUiServer(root: string, options: UiServerOptions = {}): Promise<UiServer> {
   const token = options.token ?? randomBytes(24).toString('hex')
   const host = options.host ?? '127.0.0.1'
+  const state: UiState = {
+    root,
+    libraryRoot: options.libraryRoot ?? path.dirname(root),
+  }
   const server = createServer((request, response) => {
-    void handle(root, request, response, token).catch(error => sendError(response, error))
+    void handle(state, request, response, token).catch(error => sendError(response, error))
   })
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
@@ -114,7 +136,8 @@ export async function startUiServer(root: string, options: UiServerOptions = {})
   }
 }
 
-async function handle(root: string, request: IncomingMessage, response: ServerResponse, token: string): Promise<void> {
+async function handle(state: UiState, request: IncomingMessage, response: ServerResponse, token: string): Promise<void> {
+  const root = state.root
   const url = new URL(request.url ?? '/', 'http://localhost')
   const host = request.headers.host?.split(':')[0]
   if (host && !['127.0.0.1', 'localhost', '[::1]'].includes(host)) {
@@ -148,6 +171,73 @@ async function handle(root: string, request: IncomingMessage, response: ServerRe
     throw usageError('章节号必须是正整数')
   }
 
+  if (request.method === 'GET' && url.pathname === '/api/library') {
+    sendJson(response, 200, {
+      current: state.root,
+      libraryRoot: state.libraryRoot,
+      books: await listBooks(state.libraryRoot, state.root),
+    })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/library/open') {
+    const body = await readJsonBody<{ path?: string }>(request)
+    if (!body.path) throw usageError('缺少书稿路径')
+    const target = path.resolve(body.path)
+    const inside = path.relative(state.libraryRoot, target)
+    if (!inside || inside.startsWith('..') || path.isAbsolute(inside)) {
+      throw usageError('只能打开书库目录下的书稿')
+    }
+    const project = await readJsonIfExists<{ title?: string }>(projectPaths(target).project)
+    if (!project) throw usageError('该目录不是 Weave 项目')
+    state.root = target
+    sendJson(response, 200, { ok: true, current: target })
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/library/create') {
+    const body = await readJsonBody<{
+      title?: string
+      model?: string
+      baseUrl?: string
+      apiKeyEnv?: string
+      provider?: ModelPreset['provider']
+    }>(request)
+    if (!body.title?.trim()) throw usageError('缺少书名')
+    const preset = MODEL_PRESETS.find(item => item.id === (body.model ?? '')) ?? MODEL_PRESETS[0]
+    const created = await createBook(state.libraryRoot, {
+      title: body.title,
+      model: body.model?.trim() || preset.model,
+      baseUrl: body.baseUrl?.trim() || preset.baseUrl,
+      apiKeyEnv: body.apiKeyEnv ?? preset.apiKeyEnv,
+      provider: body.provider ?? preset.provider,
+    })
+    state.root = created
+    sendJson(response, 200, { ok: true, current: created })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/models') {
+    sendJson(response, 200, await readModel(root))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/models/apply') {
+    const body = await readJsonBody<{
+      model?: string
+      baseUrl?: string
+      apiKeyEnv?: string
+      provider?: ModelPreset['provider']
+    }>(request)
+    sendJson(response, 200, { ok: true, config: await applyModel(root, body) })
+    return
+  }
+  if (request.method === 'GET' && url.pathname === '/api/setup') {
+    sendJson(response, 200, await readSetup(root))
+    return
+  }
+  if (request.method === 'POST' && url.pathname === '/api/setup/apply') {
+    const body = await readJsonBody<Partial<SetupDraft>>(request)
+    await applySetup(root, body)
+    sendJson(response, 200, { ok: true, setup: await readSetup(root) })
+    return
+  }
   if (request.method === 'GET' && url.pathname === '/api/status') {
     sendJson(response, 200, await projectStatus(root))
     return

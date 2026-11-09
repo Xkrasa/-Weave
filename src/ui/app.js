@@ -1280,6 +1280,153 @@ function showModal(title, body, actions) {
 }
 function closeModal() { $('#modal').classList.add('hidden'); }
 
+// ---- Library / models / first-run setup ------------------------------------
+
+async function openLibrary() {
+  const [library, models] = await Promise.all([api('/api/library'), api('/api/models')]);
+  const rows = library.books.map(book => `
+    <div class="library-row${book.current ? ' current' : ''}">
+      <div class="library-meta">
+        <strong>${escapeHtml(book.title)}</strong>
+        <span class="muted small">${escapeHtml(book.model || '未配置模型')} · 草稿 ${book.drafted} · 定稿 ${book.finalized}</span>
+      </div>
+      <div class="library-actions">
+        ${book.current
+          ? '<span class="pill">当前</span>'
+          : `<button class="ghost" data-open-book="${escapeHtml(book.path)}">打开</button>`}
+      </div>
+    </div>`).join('');
+  const options = models.presets
+    .map(preset => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.label)}</option>`)
+    .join('');
+
+  showModal('书库', `
+    <div class="library-list">${rows || '<div class="muted">书库还是空的，先新建一本。</div>'}</div>
+    <div class="library-new">
+      <input id="new-book-title" placeholder="新书名，例如：末日魔潮" autocomplete="off">
+      <select id="new-book-model">${options}</select>
+      <button class="accent" id="new-book-create">新建这本</button>
+    </div>
+  `, [{ label: '关闭', action: closeModal }]);
+
+  $$('[data-open-book]').forEach(node => node.addEventListener('click', async () => {
+    try {
+      await api('/api/library/open', { method: 'POST', body: { path: node.dataset.openBook } });
+      location.reload();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  }));
+  $('#new-book-create').addEventListener('click', async () => {
+    const title = $('#new-book-title').value.trim();
+    if (!title) {
+      toast('书名不能为空', true);
+      return;
+    }
+    try {
+      await api('/api/library/create', { method: 'POST', body: { title, model: $('#new-book-model').value } });
+      location.reload();
+    } catch (error) {
+      toast(error.message, true);
+    }
+  });
+}
+
+async function openModelSettings() {
+  const models = await api('/api/models');
+  const options = models.presets
+    .map(preset => `<option value="${escapeHtml(preset.id)}">${escapeHtml(preset.label)}</option>`)
+    .join('');
+  const notes = models.presets
+    .filter(preset => preset.note)
+    .map(preset => `<li><strong>${escapeHtml(preset.label)}</strong>：${escapeHtml(preset.note)}</li>`)
+    .join('');
+
+  showModal('模型', `
+    <div class="field"><label>当前</label><div class="muted">${escapeHtml(models.model)} · ${escapeHtml(models.baseUrl)}</div></div>
+    <div class="field"><label>预设</label><select id="model-preset"><option value="">自定义…</option>${options}</select></div>
+    <div class="field"><label>模型名</label><input id="model-name" value="${escapeHtml(models.model)}" autocomplete="off"></div>
+    <div class="field"><label>Base URL</label><input id="model-base" value="${escapeHtml(models.baseUrl)}" autocomplete="off"></div>
+    <div class="field"><label>密钥变量名</label><input id="model-key" value="${escapeHtml(models.apiKeyEnv)}" autocomplete="off"></div>
+    <div class="field"><label>协议</label><select id="model-provider">
+      <option value="">openai-compatible</option>
+      <option value="google">google</option>
+    </select></div>
+    <ul class="muted small model-notes">${notes}</ul>
+    <div class="muted small">密钥值不写进项目，只写变量名；变量写在仓库根的 .env 或系统环境里。</div>
+  `, [
+    {
+      label: '保存',
+      action: async () => {
+        try {
+          await api('/api/models/apply', {
+            method: 'POST',
+            body: {
+              model: $('#model-name').value.trim(),
+              baseUrl: $('#model-base').value.trim(),
+              apiKeyEnv: $('#model-key').value.trim(),
+              provider: $('#model-provider').value || undefined,
+            },
+          });
+          location.reload();
+        } catch (error) {
+          toast(error.message, true);
+        }
+      },
+    },
+    { label: '关闭', action: closeModal },
+  ]);
+
+  const providerSelect = $('#model-provider');
+  providerSelect.value = models.provider || '';
+  $('#model-preset').addEventListener('change', () => {
+    const preset = models.presets.find(item => item.id === $('#model-preset').value);
+    if (!preset) return;
+    $('#model-name').value = preset.model;
+    $('#model-base').value = preset.baseUrl;
+    $('#model-key').value = preset.apiKeyEnv;
+    providerSelect.value = preset.provider || '';
+  });
+}
+
+async function openSetup() {
+  const setup = await api('/api/setup');
+  if (!setup.needsSetup) return;
+  const draft = setup.draft;
+  showModal('先填几件事', `
+    <div class="field"><label>书名</label><input id="setup-title" value="${escapeHtml(draft.title)}" autocomplete="off"></div>
+    <div class="field"><label>一句话前提</label><textarea id="setup-premise" rows="3" placeholder="谁，在什么处境，靠什么改变处境">${escapeHtml(draft.premise)}</textarea></div>
+    <div class="field"><label>世界观（2–3 句）</label><textarea id="setup-world" rows="4" placeholder="时代、规则、主角所处的位置">${escapeHtml(draft.world)}</textarea></div>
+    <div class="field"><label>主角名</label><input id="setup-protagonist" value="${escapeHtml(draft.protagonist)}" autocomplete="off"></div>
+    <div class="field"><label>文风</label><textarea id="setup-voice" rows="3" placeholder="例如：短句为主，禁止成段环境描写">${escapeHtml(draft.voice)}</textarea></div>
+    <div class="field"><label>禁区（每行一条）</label><textarea id="setup-prohibitions" rows="3" placeholder="例如：不写心理独白">${escapeHtml(draft.prohibitions)}</textarea></div>
+    <div class="muted small">这些会写入 canon/，之后每次生成都会带上；随时可以再改。</div>
+  `, [
+    {
+      label: '保存设定',
+      action: async () => {
+        try {
+          await api('/api/setup/apply', {
+            method: 'POST',
+            body: {
+              title: $('#setup-title').value,
+              premise: $('#setup-premise').value,
+              world: $('#setup-world').value,
+              protagonist: $('#setup-protagonist').value,
+              voice: $('#setup-voice').value,
+              prohibitions: $('#setup-prohibitions').value,
+            },
+          });
+          location.reload();
+        } catch (error) {
+          toast(error.message, true);
+        }
+      },
+    },
+    { label: '稍后再说', action: closeModal },
+  ]);
+}
+
 // ---- Search / tools --------------------------------------------------------
 
 async function openSearch() {
@@ -1672,6 +1819,8 @@ function bind() {
   $('#btn-export').addEventListener('click', showExport);
   $('#btn-search').addEventListener('click', openSearch);
   $('#btn-ideas-map').addEventListener('click', showIdeaMap);
+  $('#btn-library').addEventListener('click', () => openLibrary().catch(error => toast(error.message, true)));
+  $('#btn-model').addEventListener('click', () => openModelSettings().catch(error => toast(error.message, true)));
   $('#btn-eval').addEventListener('click', showEvalSessions);
   $('#eval-close').addEventListener('click', () => $('#eval-view').classList.add('hidden'));
   $('#eval-report').addEventListener('click', () => showEvalReport().catch(error => toast(error.message, true)));
@@ -1751,6 +1900,12 @@ async function boot() {
   $$('#tabs button').forEach(node => node.classList.toggle('active', node.dataset.tab === state.tab));
   bind();
   await refresh();
+  try {
+    const setup = await api('/api/setup');
+    if (setup.needsSetup) await openSetup();
+  } catch {
+    // 引导失败不能挡住工作台
+  }
 }
 
 boot().catch(error => {
