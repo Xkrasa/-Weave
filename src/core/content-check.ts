@@ -83,7 +83,12 @@ export async function runContentCheck(
   }
 
   const tail = draft.trim()
-  if (tail.length > 10 && !/[。！？…～—”」』）)】]$/.test(tail)) {
+  // A closing quote may end a complete line of dialogue, so judge the inner sentence instead.
+  const inner = tail.replace(/[”"’'」』）)】]+$/, '')
+  const endsOnPunctuation = /[。！？…～—-]$/.test(inner)
+  // A lone closing bracket keeps its previous meaning: it is treated as a finished line.
+  const endsOnCloser = /[）)】]$/.test(tail)
+  if (tail.length > 10 && !endsOnPunctuation && !endsOnCloser) {
     findings.push({
       severity: 'blocking',
       code: 'TRUNCATED_ENDING',
