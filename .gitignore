@@ -4,5 +4,6 @@ repos/
 *.tsbuildinfo
 .DS_Store
 bench/runs/
+books/
 .env
 .env.*

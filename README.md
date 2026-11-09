@@ -50,6 +50,25 @@ npm run check
 - `taskModels` 可让写作用一个服务商、抽取或审查用另一个，正文与门禁流程不变。
 - `.env` 默认放在**项目根目录**（即运行 `weave` 的目录），仓库根只对 `scripts/benchmark.ts` 生效；放在别处时用 `weave <command> --env-file <path>` 指定。
 
+## 一键启动（推荐）
+
+双击仓库根目录的 **`start-weave.cmd`**。
+
+首次运行会自动完成：安装依赖 → 在 `books/main` 创建书稿项目 → 按 `.env` 里的密钥自动选模型 → 打开本地工作台。
+
+之后每次双击直接进界面。书稿、设定、草稿都保存在 `books/main/`，`books/` 不进版本控制。
+
+- 密钥写在仓库根的 `.env` 里，认下列任意一个变量名：`Mimo_API_KEY`、`Google_API_KEY`、`WEAVE_API_KEY`；
+- 停止：在黑色窗口按 Ctrl+C；
+- 换模型：改 `books/main/.weave/config.json` 的 `model` 与 `baseUrl`，启动器会保留你的选择。
+
+命令行等价写法：
+
+```bash
+node scripts/launch.mjs          # 自动建书并打开浏览器
+node scripts/launch.mjs --no-open  # 只启动服务，不开浏览器
+```
+
 ## 快速开始
 
 ```bash
