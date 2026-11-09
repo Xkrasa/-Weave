@@ -11,10 +11,6 @@ export interface TaskModelOverride {
   contextBudgetTokens?: number
 }
 
-export const TASK_NAMES: TaskName[] = [
-  'planning', 'writing', 'extraction', 'trustedReview', 'effectReview', 'revision',
-]
-
 /**
  * Per-task model policy. Explicit task overrides win, then the legacy single-purpose fields,
  * then the project default. Nothing here promises quality: the benchmark decides.

@@ -421,10 +421,6 @@ export async function requireApprovedSegmentPlan(root: string, chapter: number):
   }
 }
 
-export function formatSegmentPlan(plan: ChapterSegmentPlan): string {
-  return JSON.stringify(plan, null, 2)
-}
-
 async function loadPlanFile(root: string, chapter: number): Promise<ChapterSegmentPlan> {
   const plan = await readJsonIfExists<ChapterSegmentPlan>(segmentPlanPath(root, chapter))
   if (!plan) throw conflictError(`第 ${chapter} 章没有分段计划`)
