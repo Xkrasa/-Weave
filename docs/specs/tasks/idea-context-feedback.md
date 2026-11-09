@@ -2,7 +2,7 @@
 id: idea-context-feedback
 type: task-spec
 title: 晋升想法受控回灌写作与审查
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - idea-promotion-pipeline

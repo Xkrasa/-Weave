@@ -2,7 +2,7 @@
 id: idea-promotion-pipeline
 type: task-spec
 title: 想法晋升、待裁决与失效检测
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - idea-inbox-core

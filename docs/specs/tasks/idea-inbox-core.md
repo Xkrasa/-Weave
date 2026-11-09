@@ -2,7 +2,7 @@
 id: idea-inbox-core
 type: task-spec
 title: 想法收件箱模型、存储与 CLI/API
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 references:
   - weave-next-iteration-plan

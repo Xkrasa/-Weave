@@ -2,7 +2,7 @@
 id: chapter-cockpit-read-model
 type: task-spec
 title: 驾驶舱聚合读模型与证据偏移
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 references:
   - weave-next-iteration-plan

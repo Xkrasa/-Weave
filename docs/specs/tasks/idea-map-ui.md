@@ -2,7 +2,7 @@
 id: idea-map-ui
 type: task-spec
 title: 想法地图与驾驶舱想法页签
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - idea-inbox-core

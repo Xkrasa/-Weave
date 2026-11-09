@@ -116,7 +116,7 @@ date: 2026-11-07
 - 收尾验证：`npm run check`（typecheck + 140 测试）全绿；`.scratch/` 无遗留工作项。
 - task-spec 处置：9 份 `implemented` 保留在 `docs/specs/tasks/`——因同目录仍有 3 份 `deferred` 未结任务（`chapter-ending-profile`、`context-assembly-profiles`、`optional-semantic-retrieval`），按仓库规则保留目录与状态标记，不删除。
 - **遗留验收欠账（效果层）**：批 1/3 的盲评留痕未做——`bench/BASELINE.md` 最后更新仍是 `4e8f7ca`（Fanqie 基线），需真实模型经 `scripts/benchmark.ts` 复跑后再更新；在此之前，批 1/3 的交付只证明接线与门禁行为，不证明阅读效果（与 `README.md` 的口径一致）。
-- **文档欠账**：`docs/research/` 下 6 篇文档（含 `craft-knowledge-reference.md`，以及被 task-spec `references` 引用的两篇马良文档）尚未提交入库；提交前 task-spec 的 `references` 指向未入库文件。
+- **文档欠账（已解决）**：`docs/research/` 下 7 篇文档（含 `craft-knowledge-reference.md` 与被 task-spec `references` 引用的两篇马良文档）均已提交入库（2026-11-09 核对）；task-spec 的 `references` 不再指向未入库文件。
 
 ## 五、拒绝清单（维持决策篇裁决，不再重议）
 

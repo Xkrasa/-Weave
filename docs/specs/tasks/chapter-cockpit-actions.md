@@ -2,7 +2,7 @@
 id: chapter-cockpit-actions
 type: task-spec
 title: 下一步状态机、命令面板与内联 diff
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - chapter-cockpit-evidence-view

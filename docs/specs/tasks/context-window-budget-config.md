@@ -2,7 +2,7 @@
 id: context-window-budget-config
 type: task-spec
 title: 将百万上下文窗口接入可用预算
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 references:
   - weave-next-iteration-plan

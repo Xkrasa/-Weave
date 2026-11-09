@@ -2,7 +2,7 @@
 id: segmented-chapter-checks-recovery
 type: task-spec
 title: 段级确定性校验与段边界恢复
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - segmented-chapter-generation

@@ -2,7 +2,7 @@
 id: segmented-chapter-plan-model
 type: task-spec
 title: 建立作者批准的分段计划模型
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 references:
   - weave-next-iteration-plan

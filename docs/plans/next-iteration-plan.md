@@ -2,7 +2,7 @@
 id: weave-next-iteration-plan
 type: optimization-plan
 title: 百万上下文、分段生成、章节驾驶舱与想法收件箱
-status: ready
+status: delivered
 tags:
   - context-engineering
   - generation
@@ -13,11 +13,22 @@ date: 2026-11-07
 
 # 百万上下文、分段生成、章节驾驶舱与想法收件箱
 
-> **状态（2026-11-07）**：本计划只完成任务拆分，尚未开始实现。任务以 `docs/specs/tasks/` 下的 task-spec 承载，状态统一从 `ready` 起步；交付后改为 `implemented`。
+> **状态（2026-11-09）**：M1–M5 已交付并并入 `main`；M6 只完成工具链（`--repeat`、中位数聚合、重复目录），真实模型基线、盲评与放量裁决仍未完成。任务以 `docs/specs/tasks/` 下的 task-spec 承载，状态见各文件 frontmatter；`segmented-chapter-rollout-benchmark` 保持 `ready`，其余交付项为 `implemented`。
 >
 > **约束**：继续遵守 `docs/specs/effect-first/SPEC.md` 的内核——作者权威、字节级证据、不可变提交、草稿与定稿隔离、POV 信息边界、显式降级、定稿门禁不可绕过。
 >
 > **口径**：工程测试是回归底线，不是阅读效果证据。分段生成的效果结论必须来自真实模型 A/B，不用“能跑通”替代盲评。
+
+> **交付记录（2026-11-09）**
+>
+> | 里程碑 | 主要提交 | 备注 |
+> | --- | --- | --- |
+> | M1 容量与配置 | `c4fcb25`、`c6fd343` | 1M 窗口 / 120k 软预算 / token 校准 |
+> | M2 分段内核 | `c4fcb25`、`56b594f` | 计划、生成、段级校验与恢复 |
+> | M3 驾驶舱只读 | `c4fcb25` | 聚合读模型、证据偏移与高亮 |
+> | M4 想法内核 | `c4fcb25`、`efc52bd` | 收件箱、晋升待裁决、受控回灌 |
+> | M5 驾驶舱操作 | `c4fcb25`、`bf21cfb` | 下一步状态机、命令面板、上下文预算页 |
+> | M6 放量 | `6ebba69` | 仅工具链；真实基线与裁决未完成 |
 
 ## 一、裁决
 

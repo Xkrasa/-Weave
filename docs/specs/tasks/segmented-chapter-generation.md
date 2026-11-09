@@ -2,7 +2,7 @@
 id: segmented-chapter-generation
 type: task-spec
 title: 按分段计划生成并合并草稿
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - context-window-budget-config

@@ -15,6 +15,10 @@ When output names a domain concept, use the term as defined in `CONTEXT.md`. Do 
 
 If the concept is not in the glossary yet, reconsider whether it is invented language the project does not use, or note a real glossary gap for `/domain-modeling`.
 
+## Spec status
+
+Task-spec lifecycle and the keep-implemented rule live in `docs/specs/README.md`.
+
 ## Flag ADR conflicts
 
 If output contradicts an existing ADR, surface it explicitly rather than silently overriding it.

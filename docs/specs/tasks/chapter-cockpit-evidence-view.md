@@ -2,7 +2,7 @@
 id: chapter-cockpit-evidence-view
 type: task-spec
 title: 只读驾驶舱与证据高亮定位
-status: ready
+status: implemented
 parent: weave-effect-first-architecture
 depends-on:
   - chapter-cockpit-read-model
