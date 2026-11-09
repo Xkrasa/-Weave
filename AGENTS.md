@@ -12,4 +12,4 @@ Five canonical labels with default names: `needs-triage`, `needs-info`, `ready-f
 
 ### Domain docs
 
-Single-context: `CONTEXT.md` plus `docs/adr/`. See `docs/agents/domain.md`.
+Single-context: read `CONTEXT.md` and relevant `docs/adr/` when they exist; their absence is allowed. See `docs/agents/domain.md`.
