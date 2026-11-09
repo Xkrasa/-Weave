@@ -16,6 +16,32 @@ export interface ProjectConfig {
 /** Targets an idea may be promoted into; ledger is deliberately excluded. */
 export type IdeaPromotionTarget = 'plan' | 'contract' | 'outline' | 'canon' | 'promise'
 
+/** Wire protocol used to reach the model service. */
+export type ModelProvider = 'openai-compatible' | 'google' | 'anthropic'
+
+/** Declared provider capabilities; adapters degrade instead of assuming they hold. */
+export interface ModelCapabilities {
+  /** Provider accepts OpenAI `response_format` with a JSON schema. */
+  jsonSchema?: boolean
+  /** Provider reports token usage inside stream chunks. */
+  streamUsage?: boolean
+}
+
+/** Per-task override; see model-policy. */
+export interface ModelTaskOverride {
+  model?: string
+  baseUrl?: string
+  temperature?: number
+  maxOutputTokens?: number
+  contextWindow?: number
+  contextBudgetTokens?: number
+  timeoutMs?: number
+  /** Env var holding this provider's key; defaults to WEAVE_API_KEY. */
+  apiKeyEnv?: string
+  provider?: ModelProvider
+  capabilities?: ModelCapabilities
+}
+
 export interface ModelConfig {
   model: string
   baseUrl: string
@@ -33,15 +59,14 @@ export interface ModelConfig {
   effectReviewModel?: string
   /** How structured materials are rendered for the model. */
   promptRenderer?: 'json' | 'mission'
+  /** Env var holding the API key; defaults to WEAVE_API_KEY. Never stores the key itself. */
+  apiKeyEnv?: string
+  /** Wire protocol; defaults to OpenAI-compatible. */
+  provider?: ModelProvider
+  /** Declared capabilities of the default provider. */
+  capabilities?: ModelCapabilities
   /** Optional per-task overrides; see model-policy. */
-  taskModels?: Partial<Record<'planning' | 'writing' | 'extraction' | 'trustedReview' | 'effectReview' | 'revision', {
-    model?: string
-    baseUrl?: string
-    temperature?: number
-    maxOutputTokens?: number
-    contextWindow?: number
-    contextBudgetTokens?: number
-  }>>
+  taskModels?: Partial<Record<'planning' | 'writing' | 'extraction' | 'trustedReview' | 'effectReview' | 'revision', ModelTaskOverride>>
   /** Transparent retries allowed only before the first streamed delta. */
   maxRetries?: number
   retryBaseMs?: number
@@ -376,6 +401,8 @@ export interface StreamAttempt {
   reason?: string
   waitMs?: number
   startedAt: string
+  /** Provider-reported stop reason for this attempt, e.g. `stop` or `length`. */
+  finishReason?: string
 }
 
 /** A fresh run that supersedes a failed one; it never concatenates onto the old partial. */
@@ -422,6 +449,8 @@ export interface RunRecord {
   }
   partialPath?: string
   error?: string
+  /** Provider stop reason; `length` means the output hit max tokens and prose is likely cut. */
+  finishReason?: string
   usage?: RunUsage
   attempts?: StreamAttempt[]
   recovery?: RunRecovery

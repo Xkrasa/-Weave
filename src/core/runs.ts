@@ -60,6 +60,7 @@ export function finishRun(
     partialPath?: string
     attempts?: StreamAttempt[]
     recovery?: RunRecovery
+    finishReason?: string
   } = {},
 ): RunRecord {
   return {
@@ -69,6 +70,7 @@ export function finishRun(
     usage: extra.usage,
     error: extra.error,
     partialPath: extra.partialPath,
+    ...(extra.finishReason ? { finishReason: extra.finishReason } : {}),
     ...(extra.attempts ? { attempts: extra.attempts } : {}),
     ...(extra.recovery ? { recovery: extra.recovery } : {}),
   }

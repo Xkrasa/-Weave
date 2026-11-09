@@ -21,6 +21,8 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { randomInt } from 'node:crypto'
 
+import { loadDotEnv } from '../src/core/dotenv.ts'
+
 const REPO_ROOT = path.resolve(import.meta.dirname, '..')
 const CLI = path.join(REPO_ROOT, 'src', 'cli.ts')
 const SEED_DIR = path.join(REPO_ROOT, 'bench', 'seeds')
@@ -1096,6 +1098,7 @@ async function commandScore(flags: Record<string, string | true>): Promise<numbe
 }
 
 async function main(): Promise<void> {
+  await loadDotEnv(REPO_ROOT)
   const [command = 'run', ...rest] = process.argv.slice(2)
   const { flags } = parseFlags(rest)
   if (command === 'run') {

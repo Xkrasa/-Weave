@@ -37,7 +37,7 @@ function parseJson<T>(stdout: string): T {
   return JSON.parse(stdout.slice(start, end + 1)) as T
 }
 
-type Behaviour = 'ok' | '429' | '500' | 'break' | 'empty'
+type Behaviour = 'ok' | '429' | '500' | 'break' | 'empty' | 'length'
 
 class ScriptedModel {
   readonly requests: Array<Record<string, unknown>> = []
@@ -100,7 +100,15 @@ class ScriptedModel {
         setTimeout(() => response.destroy(), 10)
         return
       }
+      if (behaviour === 'length') {
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: this.text } }] })}\n\n`)
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'length' }] })}\n\n`)
+        response.write(`data: ${JSON.stringify({ usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })}\n\n`)
+        response.end('data: [DONE]\n\n')
+        return
+      }
       response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: this.text } }] })}\n\n`)
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }] })}\n\n`)
       response.write(`data: ${JSON.stringify({ usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } })}\n\n`)
       response.end('data: [DONE]\n\n')
     })
@@ -146,7 +154,13 @@ async function initBook(baseUrl: string): Promise<string> {
   return dir
 }
 
-async function latestRun(dir: string): Promise<{ runId: string; status: string; attempts?: unknown[]; recovery?: unknown }> {
+async function latestRun(dir: string): Promise<{
+  runId: string
+  status: string
+  finishReason?: string
+  attempts?: Array<{ status: string; finishReason?: string }>
+  recovery?: unknown
+}> {
   const runsDir = path.join(dir, '.weave', 'runs')
   const names = (await readdir(runsDir)).filter(name => name.endsWith('.json')).sort()
   assert.ok(names.length > 0)
@@ -248,6 +262,40 @@ test('retries a reasoning-only or empty response before surfacing failure', asyn
     assert.equal(model.requests.length, 2)
     const payload = parseJson<{ attempts: Array<{ status: string }> }>(written.stdout)
     assert.deepEqual(payload.attempts.map(item => item.status), ['retry', 'ok'])
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('records stop for a normal completion', async () => {
+  const model = new ScriptedModel(['ok'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    const written = await runCli(dir, ['write', '1', '--json'])
+    assert.equal(written.code, 0, written.stderr)
+    const run = await latestRun(dir)
+    assert.equal(run.status, 'completed')
+    assert.equal(run.finishReason, 'stop')
+    assert.equal(run.attempts?.[0]?.finishReason, 'stop')
+  } finally {
+    await model.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('records length so max-token truncation stays diagnosable', async () => {
+  const model = new ScriptedModel(['length'])
+  await model.start()
+  const dir = await initBook(model.baseUrl)
+  try {
+    const written = await runCli(dir, ['write', '1', '--json'])
+    assert.equal(written.code, 0, written.stderr)
+    const run = await latestRun(dir)
+    assert.equal(run.status, 'completed')
+    assert.equal(run.finishReason, 'length')
+    assert.equal(run.attempts?.[0]?.finishReason, 'length')
   } finally {
     await model.close()
     await rm(dir, { recursive: true, force: true })

@@ -89,6 +89,7 @@ import {
 import { deconstructFile } from './core/deconstruct.ts'
 import { startUiServer } from './core/ui-server.ts'
 import { evalReport, importEvalPairs, listEvalSessions } from './core/blind-eval.ts'
+import { loadDotEnv, loadDotEnvFile } from './core/dotenv.ts'
 import {
   abandonReaderPromise,
   approveReaderPromiseBook,
@@ -176,6 +177,9 @@ let eventStreamStarted = false
 
 async function main(): Promise<number> {
   const parsed = parseArgs(process.argv.slice(2))
+  const envFile = optionalString(parsed, 'env-file')
+  if (envFile) await loadDotEnvFile(path.resolve(envFile))
+  else await loadDotEnv(process.cwd())
   const [command, ...positionals] = parsed.positionals
   parsed.positionals = positionals
   if (!command || command === 'help' || parsed.flags.help === true) {
@@ -1990,11 +1994,15 @@ async function commandWrite(root: string, parsed: Parsed, json: boolean): Promis
         usage: result.run.usage ?? {},
         attempts: result.run.attempts ?? [],
         recovery: result.run.recovery,
+        finishReason: result.run.finishReason,
         keyCandidates: result.keyCandidates,
       })
     } else {
       console.log(`\n\n已生成第 ${chapter} 章草稿：${result.draftPath}`)
       console.log(`运行：${result.run.runId}；估算输入 token：${result.estimatedTokens}`)
+      if (result.run.finishReason === 'length') {
+        console.log('注意：模型以 finish_reason=length 结束，输出可能被 max-output 截断；先检查结尾再定稿。')
+      }
       if (result.omitted.length > 0) {
         console.log(`省略材料：${result.omitted.map(item => `${item.sourceId}(${item.reason})`).join('、')}`)
       }
@@ -2376,6 +2384,7 @@ function printHelp(): void {
   console.log(`Weave 0.1.0
 
 用法：
+  weave <command> [--env-file <path>]   # 密钥文件；缺省读取运行目录下的 .env
   weave init [dir] --title <name> --model <model> --base-url <url> [--context-window <n>] [--context-budget <n>] [--max-output <n>] [--snapshot-every <n>] [--workflow p0|p05] [--platform fanqie|qidian|generic]
   weave config show|set [--context-window <n>] [--context-budget <n>] [--max-output <n>] [--safety-margin <n>] [--chars-per-token <n>]|migrate
   weave idea add "<正文>" [--title <text>] [--tag <tag>]... [--scope chapter:N|volume:N|book|character:名字|world|mechanic] [--priority high|normal|low] [--spoiler none|hint|reveal] [--after <chapter>]

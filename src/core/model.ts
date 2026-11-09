@@ -7,6 +7,8 @@ export type { StreamAttempt } from './types.ts'
 export interface StreamResult {
   usage: RunUsage
   attempts: StreamAttempt[]
+  /** Provider stop reason; `length` means prose was cut by the output token limit. */
+  finishReason?: string
 }
 
 class AttemptFailure extends Error {
@@ -90,7 +92,7 @@ export async function streamChapter(input: {
     const startedAt = new Date().toISOString()
     let emitted = false
     try {
-      const usage = await streamOnce({
+      const result = await streamOnce({
         ...input,
         onDelta: text => {
           emitted = true
@@ -99,8 +101,17 @@ export async function streamChapter(input: {
       })
       // Reasoning-only or silently truncated responses produce no prose; retry is safe here.
       if (!emitted) throw new AttemptFailure('模型返回了空正文', true)
-      attempts.push({ attempt, status: 'ok', startedAt })
-      return { usage, attempts }
+      attempts.push({
+        attempt,
+        status: 'ok',
+        startedAt,
+        ...(result.finishReason ? { finishReason: result.finishReason } : {}),
+      })
+      return {
+        usage: result.usage,
+        attempts,
+        ...(result.finishReason ? { finishReason: result.finishReason } : {}),
+      }
     } catch (error) {
       if (input.signal.aborted) {
         attempts.push({ attempt, status: 'failed', reason: 'cancelled', startedAt })
@@ -123,15 +134,40 @@ export async function streamChapter(input: {
   throw fail('模型请求重试次数已用尽', attempts)
 }
 
+/**
+ * Resolves the API key from the configured environment variable.
+ * The key itself is never stored in a project file.
+ */
+export function resolveApiKey(config: ModelConfig): string {
+  const name = config.apiKeyEnv?.trim() || 'WEAVE_API_KEY'
+  return process.env[name]?.trim() ?? ''
+}
+
+/**
+ * Resolves the chat-completions endpoint for the configured provider.
+ * Google's OpenAI compatibility layer lives under `/v1beta/openai`, so a bare
+ * `/v1beta` base URL is completed here instead of failing at request time.
+ */
+export function resolveEndpoint(config: ModelConfig): string {
+  const base = config.baseUrl.replace(/\/+$/, '')
+  if (config.provider === 'anthropic') {
+    throw validationError('provider=anthropic 需要原生 messages 适配器；当前版本只支持 OpenAI 兼容协议')
+  }
+  if (config.provider === 'google' && /\/v1beta$/.test(base)) {
+    return `${base}/openai/chat/completions`
+  }
+  return `${base}/chat/completions`
+}
+
 async function streamOnce(input: {
   config: ModelConfig
   system: string
   user: string
   signal: AbortSignal
   onDelta: (text: string) => void
-}): Promise<RunUsage> {
-  const apiKey = process.env.WEAVE_API_KEY?.trim() ?? ''
-  const endpoint = `${input.config.baseUrl.replace(/\/+$/, '')}/chat/completions`
+}): Promise<{ usage: RunUsage; finishReason?: string }> {
+  const apiKey = resolveApiKey(input.config)
+  const endpoint = resolveEndpoint(input.config)
   const timeout = AbortSignal.timeout(input.config.timeoutMs)
   const signal = AbortSignal.any([input.signal, timeout])
   const headers: Record<string, string> = { 'content-type': 'application/json' }
@@ -171,6 +207,7 @@ async function streamOnce(input: {
 
   let buffer = ''
   let usage: RunUsage = {}
+  let finishReason: string | undefined
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
 
@@ -183,18 +220,20 @@ async function streamOnce(input: {
       buffer = events.pop() ?? ''
       for (const event of events) {
         const result = parseEvent(event)
-        if (result.done) return usage
+        if (result.finishReason) finishReason = result.finishReason
         if (result.text) input.onDelta(result.text)
         if (result.usage) usage = result.usage
+        if (result.done) return { usage, finishReason }
       }
     }
     buffer += decoder.decode()
     if (buffer.trim()) {
       const result = parseEvent(buffer)
+      if (result.finishReason) finishReason = result.finishReason
       if (result.text) input.onDelta(result.text)
       if (result.usage) usage = result.usage
     }
-    return usage
+    return { usage, finishReason }
   } catch (error) {
     if (input.signal.aborted) throw modelError('生成已取消')
     if (timeout.aborted) throw new AttemptFailure(`模型请求超时（${input.config.timeoutMs}ms）`, true)
@@ -240,16 +279,19 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   })
 }
 
-function parseEvent(raw: string): { text?: string; usage?: RunUsage; done?: boolean } {
+function parseEvent(raw: string): { text?: string; usage?: RunUsage; done?: boolean; finishReason?: string } {
   const lines = raw.split(/\r?\n/)
   const payloads = lines
     .filter(line => line.startsWith('data:'))
     .map(line => line.slice(5).trim())
     .filter(Boolean)
-  if (payloads.includes('[DONE]')) return { done: true }
+  const done = payloads.includes('[DONE]')
+  const jsonPayloads = payloads.filter(payload => payload !== '[DONE]')
+  if (done && jsonPayloads.length === 0) return { done: true }
   let text = ''
   let usage: RunUsage | undefined
-  for (const data of payloads) {
+  let finishReason: string | undefined
+  for (const data of jsonPayloads) {
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(data) as Record<string, unknown>
@@ -265,11 +307,19 @@ function parseEvent(raw: string): { text?: string; usage?: RunUsage; done?: bool
       }
     }
     const choices = parsed.choices as Array<Record<string, unknown>> | undefined
-    const delta = choices?.[0]?.delta as Record<string, unknown> | undefined
+    const choice = choices?.[0]
+    const finish = choice?.finish_reason
+    if (typeof finish === 'string' && finish) finishReason = finish
+    const delta = choice?.delta as Record<string, unknown> | undefined
     const content = delta?.content
     if (typeof content === 'string') text += content
   }
-  return { text: text || undefined, usage }
+  return {
+    text: text || undefined,
+    usage,
+    ...(finishReason ? { finishReason } : {}),
+    ...(done ? { done: true } : {}),
+  }
 }
 
 function numberOrUndefined(value: unknown): number | undefined {

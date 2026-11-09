@@ -239,7 +239,11 @@ export async function writeChapter(
       createdAt: new Date().toISOString(),
     }
     await saveDraftMeta(root, nextMeta)
-    const finished = finishRun(run, 'completed', { usage: result.usage, attempts: result.attempts })
+    const finished = finishRun(run, 'completed', {
+      usage: result.usage,
+      attempts: result.attempts,
+      finishReason: result.finishReason,
+    })
     await saveRun(root, finished)
     await recordTokenObservation(root, context.promptChars, result.usage?.promptTokens, context.charsPerToken)
     emit({ type: 'completed', draft })
@@ -586,6 +590,8 @@ async function writeSegmentedChapter(
   let promptChars = 0
   let layers = { stable: '', volume: '', chapter: '', full: '' }
   let renderer = 'json'
+  /** Stop reason of the last accepted segment; a `length` here means the merged cut may be truncated. */
+  let chapterFinishReason: string | undefined
 
   try {
     for (const segment of input.plan.segments) {
@@ -657,6 +663,7 @@ async function writeSegmentedChapter(
           acceptedText = checked.text
           acceptedUsage = result.usage
           acceptedAttempt = attempt
+          chapterFinishReason = result.finishReason
           acceptedContext = context
           break
         }
@@ -730,7 +737,7 @@ async function writeSegmentedChapter(
     }
     await saveDraftMeta(root, nextMeta)
     const finished = {
-      ...finishRun(run, 'completed', { usage: totalUsage }),
+      ...finishRun(run, 'completed', { usage: totalUsage, finishReason: chapterFinishReason }),
       segments: summaries,
     }
     await saveRun(root, finished)

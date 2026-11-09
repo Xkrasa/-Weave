@@ -48,6 +48,23 @@ WEAVE_API_KEY=... node scripts/benchmark.ts run \
 - 空正文（reasoning-only）原先在写作层直接失败；现在在**首个 delta 前**按可重试处理，最多重试 3 次。
 - 120 秒超时对慢速推理模型偏紧；基线改用 180 秒，并在 `benchmark` 提供 `--timeout-ms` / `--max-output`。
 
+## 模型可用性观察：Gemini 兼容层（2026-11-09，非基线）
+
+用 Google 官方 OpenAI 兼容层（`https://generativelanguage.googleapis.com/v1beta/openai`）跑 `craft / broken-cultivation`，用于验证多 provider 接线，不作为质量证据：
+
+| 模型 | 结果 | 说明 |
+| --- | --- | --- |
+| `gemini-2.5-flash` | 4 章 9097 字 / 108 秒 / 0 重试 | 第 4 章在 2/3 次重复中以 blocking `TRUNCATED_ENDING` 阻断（"根看不见的细线，轻轻拨动"）；流式不返回 usage，tokens 为本地估算 |
+| `gemini-3.5 / 3.6 / 3.7 / 3.8-flash` | 未取得样本 | 模型列表中存在，但 `generateContent` 返回 503 或兼容层请求超时 |
+
+结论：
+
+- 兼容层接线可用，速度不慢于本机代理（同种子 craft 基线 147.5 秒）；
+- 章末截断是真实缺陷，需按 `max-output` 与内容检查处理，不能当成"模型文风问题"；
+- 自 2026-11-09 起运行记录写入 provider 的 `finish_reason`。同日复跑 12 次：6 次 `stop`、1 次 `length`，`length` 那次同时触发 `TRUNCATED_ENDING`——截断可直接定位为输出上限，不再靠标点推断；
+- 3.x 系列当前不可用，与本项目配置无关，择期重试；
+- 该观察与 deepseek 那条同级：只说明可用性，不参与默认值裁决。
+
 ## 长篇纵向集（longitudinal / long-harbor）
 
 30 章合成前文（用于验证检索与记忆接线，不参与文学评价）+ 3 章真实生成。

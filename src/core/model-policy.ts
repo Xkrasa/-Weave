@@ -26,6 +26,10 @@ export function resolveTaskConfig(config: ModelConfig, task: TaskName): ModelCon
     maxOutputTokens: override.maxOutputTokens ?? config.maxOutputTokens,
     contextWindow: override.contextWindow ?? config.contextWindow,
     contextBudgetTokens: override.contextBudgetTokens ?? config.contextBudgetTokens,
+    timeoutMs: override.timeoutMs ?? config.timeoutMs,
+    apiKeyEnv: override.apiKeyEnv ?? config.apiKeyEnv,
+    provider: override.provider ?? config.provider,
+    capabilities: override.capabilities ?? config.capabilities,
   }
 }
 

@@ -21,7 +21,34 @@ npm install
 npm run check
 ```
 
-下文的 `weave` 表示 `npm run weave --`。模型密钥只从 `WEAVE_API_KEY` 环境变量读取。
+下文的 `weave` 表示 `npm run weave --`。模型密钥只从环境变量读取，默认变量名为 `WEAVE_API_KEY`；运行目录下的 `.env` 会被自动加载，且只填充尚未设置的变量，不会覆盖已有环境。
+
+## 模型接入
+
+默认走 OpenAI 兼容协议：`baseUrl` + `model` + 一个环境变量里的密钥。多 provider 与按任务分配模型都通过 `.weave/config.json` 的可选字段完成，**不配置时行为与单模型完全一致**。
+
+```json
+{
+  "model": "glm-5.3",
+  "baseUrl": "http://127.0.0.1:7863/v1",
+  "apiKeyEnv": "WEAVE_API_KEY",
+  "taskModels": {
+    "extraction": {
+      "model": "gemini-2.5-flash",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+      "provider": "google",
+      "apiKeyEnv": "Google_API_KEY",
+      "timeoutMs": 120000
+    }
+  }
+}
+```
+
+- `apiKeyEnv`：密钥所在环境变量名，默认 `WEAVE_API_KEY`。只存变量名，密钥永远不写入项目文件。
+- `provider`：`openai-compatible`（默认）/ `google` / `anthropic`。`google` 且 `baseUrl` 以 `/v1beta` 结尾时自动补 `/openai` 走官方兼容层；`anthropic` 需要原生 messages 适配器，当前会明确报错而不是静默降级。
+- `capabilities`：可声明 `jsonSchema`（是否支持 `response_format`）与 `streamUsage`（流式是否返回用量）。Google 兼容层流式不返回 usage，成本只能按本地估算。
+- `taskModels` 可让写作用一个服务商、抽取或审查用另一个，正文与门禁流程不变。
+- `.env` 默认放在**项目根目录**（即运行 `weave` 的目录），仓库根只对 `scripts/benchmark.ts` 生效；放在别处时用 `weave <command> --env-file <path>` 指定。
 
 ## 快速开始
 
